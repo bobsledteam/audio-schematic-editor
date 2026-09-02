@@ -9,7 +9,7 @@
 :root {
   --font: Consolas, "Courier New", Monaco, monospace;
   --bg: #1a1a1e;
-  --canvas-bg: #25252b;
+  --canvas-bg: #18181c;
   --grid: rgba(58, 72, 92, 0.065);
   --text: #e8e8ec;
   --muted: #888;
@@ -700,6 +700,13 @@ body {
   background: #e74c3c !important;
   color: #fff !important;
   border-color: #c0392b;
+}
+
+.terminal.state-active.keep-base-color,
+.terminal.hot.state-active.keep-base-color {
+  background: var(--hot) !important;
+  color: #111 !important;
+  border-color: #555;
 }
 
 .terminal.ground {

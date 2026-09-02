@@ -24,6 +24,32 @@ Then open **http://127.0.0.1:8765** in Cursor's preview tab, or use **Run → St
 
 Font: Consolas (with monospace fallbacks).
 
+## Windows download
+
+Send your friend **`GuitarWiring-Setup.exe`** — a normal Windows installer (Next → Next → Finish, optional desktop shortcut, uninstall via Settings).
+
+### Build the installer (on Windows)
+
+1. Install [Python 3](https://www.python.org/downloads/) and [Inno Setup 6](https://jrsoftware.org/isdl.php) (free).
+2. From the project folder, run:
+
+```bat
+build\build-windows.bat
+```
+
+3. Share **`dist\GuitarWiring-Setup.exe`**.
+
+Your friend double-clicks the setup file, installs, then launches **Guitar Wiring Visualiser** from the Start menu. The app opens in their browser. To quit, close the browser tab and end **GuitarWiring.exe** in Task Manager if it keeps running.
+
+**GitHub Actions:** push a tag like `v1.0.0` and download **GuitarWiring-Setup.exe** from the workflow artifacts.
+
+### Without installer (portable)
+
+- **`dist\GuitarWiring.exe`** — single file, no install step (PyInstaller build only).
+- **`GuitarWiring.bat`** — needs Python 3 on the PC.
+
+Custom assets are saved in the browser on that computer (`localStorage`).
+
 ## Controls
 
 | Action | Control |

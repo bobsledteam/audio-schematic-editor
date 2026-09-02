@@ -33,7 +33,7 @@
 
   const SUBTYPES = {
     pickup: [{ id: 'singlecoil', label: 'Single Coil' }],
-    switch: [{ id: 'dpdt', label: 'DPDT' }],
+    switch: [{ id: 'dpdt', label: 'DPDT type 1' }],
   };
 
   function singleCoilTerminalPair(bx, by, bw, bodyH) {
@@ -62,11 +62,19 @@
       bodyH: 48,
       cssClass: 'singlecoil',
       layout: 'absolute',
-      terminals: singleCoilTerminalPair(0, 0, 70, 48),
+      hideStateLabel: true,
+      states: [
+        { id: 0, terminalActive: [true, false] },
+      ],
+      terminals: (() => {
+        const pair = singleCoilTerminalPair(0, 0, 70, 48);
+        pair[0].keepColorWhenActive = true;
+        return pair;
+      })(),
     },
     {
       id: 'dpdt',
-      name: '6-Way DPDT',
+      name: 'DPDT type 1',
       category: 'switch',
       subtype: 'dpdt',
       builtin: true,
@@ -75,6 +83,12 @@
       bodyH: 56,
       cssClass: 'dpdt',
       layout: 'grid-3x2',
+      states: [
+        { id: 0, label: '0', terminalActive: [false, false, false, false, false, false] },
+        { id: 1, label: 'Up', terminalActive: [false, false, true, true, true, true] },
+        { id: 2, label: 'Middle', terminalActive: [true, false, true, true, false, true] },
+        { id: 3, label: 'Down', terminalActive: [true, true, true, true, false, false] },
+      ],
       terminals: Array.from({ length: 6 }, (_, i) => ({
         label: `T${i + 1}`,
         color: '#c9a227',
@@ -333,7 +347,7 @@
     if (!componentsMap) return result;
     componentsMap.forEach((comp) => {
       const template = getTemplate(comp.dataset.assetId);
-      if (!template || template.builtin || !template.states?.length) return;
+      if (!template || !template.states?.length) return;
       const state = template.states[getComponentStateIndex(comp)];
       if (!state) return;
       comp.querySelectorAll('.terminal').forEach((term, idx) => {
@@ -956,13 +970,20 @@
       const baseColor = term.dataset.baseColor || spec.color || '';
       const active = !!state.terminalActive?.[idx];
       if (active) {
-        term.style.background = ACTIVE_TERM_COLOR;
-        term.style.color = '#fff';
-        term.classList.add('state-active');
+        if (spec.keepColorWhenActive) {
+          term.style.background = baseColor;
+          term.style.color = '#111';
+          term.classList.add('state-active', 'keep-base-color');
+        } else {
+          term.style.background = ACTIVE_TERM_COLOR;
+          term.style.color = '#fff';
+          term.classList.add('state-active');
+          term.classList.remove('keep-base-color');
+        }
       } else {
         term.style.background = baseColor;
         term.style.color = '#111';
-        term.classList.remove('state-active');
+        term.classList.remove('state-active', 'keep-base-color');
       }
     });
     el.dataset.assetStateIndex = String(stateIndex);
@@ -975,12 +996,12 @@
     const label = el.querySelector('.component-state-label');
     if (!label) return;
     const template = getTemplate(el.dataset.assetId);
-    if (!template || template.builtin || !template.states?.length) {
+    if (!template || !template.states?.length || template.hideStateLabel) {
       label.hidden = true;
       return;
     }
-    const stateId = getComponentStateLabel(el);
-    label.textContent = `State ${stateId}`;
+    const state = template.states[getComponentStateIndex(el)];
+    label.textContent = state?.label != null ? String(state.label) : `State ${state?.id ?? ''}`;
     label.hidden = false;
     const rot = ((parseFloat(el.dataset.rotation) || 0) % 360 + 360) % 360;
     label.style.transformOrigin = '50% 100%';
@@ -1008,14 +1029,16 @@
 
   function hasAssetStates(el) {
     const template = getTemplate(el?.dataset?.assetId);
-    return !!(template?.states && template.states.length > 1 && !template.builtin);
+    return !!(template?.states && template.states.length > 1);
   }
 
   function getComponentStateLabel(el) {
     const template = getTemplate(el?.dataset?.assetId);
     if (!template?.states?.length) return null;
     const idx = getComponentStateIndex(el);
-    return template.states[idx]?.id ?? null;
+    const state = template.states[idx];
+    if (!state) return null;
+    return state.label != null ? state.label : state.id;
   }
 
   function getAbsoluteBounds(template) {
@@ -1101,7 +1124,7 @@
       terminals.style.marginTop = '0';
     }
 
-    if (!template.builtin && template.states?.length) {
+    if (template.states?.length && !template.hideStateLabel) {
       const stateLabel = document.createElement('div');
       stateLabel.className = 'component-state-label';
       stateLabel.hidden = true;

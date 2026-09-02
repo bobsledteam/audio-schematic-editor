@@ -70,6 +70,7 @@
   let suppressNextClick = false;
   const MARQUEE_MIN_PX = 4;
   const Q_HOLD_MS = 50;
+  const Q_HOLD_MS_SELECTED = 400;
   const WIRE_WHEEL_ITEM = '__wire__';
   let recentAssetIds = [];
   let qHoldTimer = null;
@@ -183,6 +184,20 @@
   function recordRecentAsset(assetId) {
     if (!assetId || !GuitarAssets.getTemplate(assetId)) return;
     recentAssetIds = [assetId, ...recentAssetIds.filter((id) => id !== assetId)].slice(0, 3);
+  }
+
+  function getQHoldDelay() {
+    if (selectedComponents.size > 0 || selectedWireGroups.size > 0) {
+      return Q_HOLD_MS_SELECTED;
+    }
+    return Q_HOLD_MS;
+  }
+
+  function scheduleQHoldWheel() {
+    clearTimeout(qHoldTimer);
+    qHoldTimer = setTimeout(() => {
+      if (qKeyHeld && openAssetWheel()) qOpenedWheel = true;
+    }, getQHoldDelay());
   }
 
   function getWheelSlotAngles(count) {
@@ -438,10 +453,10 @@
       const el = [...selectedComponents][0];
       const stateHint = (() => {
         const template = GuitarAssets.getTemplate(el.dataset.assetId);
-        if (!template || template.builtin || !template.states?.length) return '';
+        if (!template || !template.states?.length) return '';
+        if (!GuitarAssets.hasAssetStates(el)) return '';
         const label = GuitarAssets.getComponentStateLabel(el);
-        const cycle = template.states.length > 1 ? ' · E next · tap Q prev · hold Q recent' : ' · hold Q recent';
-        return ` · State ${label}${cycle}`;
+        return ` · ${label} · E next · tap Q prev · hold Q recent`;
       })();
       setStatus(`${el.dataset.type} selected — Delete to remove · Shift=free drag · +/- or ↺↻ to rotate${stateHint}`);
       updateAlignBar();
@@ -1605,10 +1620,7 @@
       if (e.repeat) return;
       qKeyHeld = true;
       qOpenedWheel = false;
-      clearTimeout(qHoldTimer);
-      qHoldTimer = setTimeout(() => {
-        if (qKeyHeld && openAssetWheel()) qOpenedWheel = true;
-      }, Q_HOLD_MS);
+      scheduleQHoldWheel();
       return;
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {

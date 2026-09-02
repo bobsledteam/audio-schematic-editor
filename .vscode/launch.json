@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Guitar Wiring App",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/serve.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "running at (https?://\\S+)",
+        "uriFormat": "%s"
+      }
+    }
+  ]
+}

@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="application-name" content="Guitar Wiring Visualiser">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Guitar Wiring Visualiser</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-header">
+    <div class="logo-slot">
+      <button
+        class="logo-mark toolbar-logo"
+        type="button"
+        aria-label="Endō home"
+        data-logo-flash
+      >
+        <span class="logo-mark__lava" aria-hidden="true">
+          <span class="logo-mark__blob logo-mark__blob--1"></span>
+          <span class="logo-mark__blob logo-mark__blob--2"></span>
+          <span class="logo-mark__blob logo-mark__blob--3"></span>
+          <span class="logo-mark__blob logo-mark__blob--4"></span>
+          <span class="logo-mark__blob logo-mark__blob--5"></span>
+        </span>
+        <span class="logo-mark__flash" aria-hidden="true"></span>
+        <img
+          class="logo-mark__img"
+          src="assets/logo-mark.png"
+          alt="Endo"
+          width="150"
+          height="150"
+        />
+      </button>
+    </div>
+    <header class="toolbar">
+      <div class="toolbar-actions">
+        <div class="layer-panel" role="group" aria-label="Wire layers">
+          <div class="layer-buttons-grid">
+            <div class="layer-buttons" id="layer-buttons"></div>
+            <span class="layer-label">Layer</span>
+          </div>
+          <button type="button" id="btn-layer-visibility" class="tool-btn layer-btn" title="Show/hide active layer">Show</button>
+          <button type="button" id="btn-layer-front" class="tool-btn layer-btn" title="Active layer above components">Front</button>
+          <button type="button" id="btn-layer-back" class="tool-btn layer-btn" title="Active layer behind components">Back</button>
+        </div>
+      <span class="toolbar-divider"></span>
+      <button type="button" id="btn-wire" class="tool-btn tool-btn-wire" title="Wire" aria-label="Wire">
+        <svg class="draw-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 20h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <div class="wire-style-group" role="group" aria-label="Line style">
+        <button type="button" id="btn-solid" class="tool-btn style-btn active" data-style="solid">Solid</button>
+        <button type="button" id="btn-dashed" class="tool-btn style-btn" data-style="dashed">Dashed</button>
+      </div>
+      <div class="wire-colors" role="group" aria-label="Wire colour">
+        <button type="button" class="color-swatch active" data-color="white" title="White" aria-label="White"></button>
+        <button type="button" class="color-swatch" data-color="black" title="Black" aria-label="Black"></button>
+        <button type="button" class="color-swatch" data-color="yellow" title="Yellow" aria-label="Yellow"></button>
+        <button type="button" class="color-swatch" data-color="green" title="Green" aria-label="Green"></button>
+        <button type="button" class="color-swatch" data-color="orange" title="Orange" aria-label="Orange"></button>
+      </div>
+      </div>
+    </header>
+    <button type="button" id="btn-accent-cycle" class="accent-swatch" title="Cycle accent colour" aria-label="Cycle accent colour"></button>
+  </div>
+
+  <main id="canvas" class="canvas" tabindex="0">
+    <div id="workspace" class="workspace">
+      <svg id="wires-below" class="wire-stack below" aria-hidden="true"></svg>
+      <svg id="wires-above" class="wire-stack above" aria-hidden="true"></svg>
+      <div id="marquee-box" class="marquee-box hidden" aria-hidden="true"></div>
+    </div>
+    <div id="snap-indicator" class="snap-indicator hidden" aria-hidden="true"></div>
+  </main>
+
+  <div id="asset-context-menu" class="context-menu hidden" role="menu" aria-label="Place asset">
+    <div class="context-menu-power-row">
+      <button type="button" id="context-menu-power" class="context-menu-power-btn" title="Highlight wires on active terminals" aria-pressed="false" aria-label="Active wire glow">⚡</button>
+    </div>
+    <ul id="context-menu-items" class="context-menu-list"></ul>
+    <button type="button" id="context-menu-add" class="context-menu-add">+ Custom asset</button>
+  </div>
+
+  <div id="asset-wheel" class="asset-wheel hidden" aria-hidden="true" role="dialog" aria-label="Recent assets">
+    <div class="asset-wheel-backdrop"></div>
+    <div class="asset-wheel-hub">
+      <div id="asset-wheel-items" class="asset-wheel-items"></div>
+      <div class="asset-wheel-center" aria-hidden="true">
+        <svg class="asset-wheel-cursor" viewBox="0 0 24 24" focusable="false">
+          <path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </div>
+    <p class="asset-wheel-hint">Scroll or point · release Q to select</p>
+  </div>
+
+  <div id="asset-delete-confirm" class="confirm-dialog hidden" role="alertdialog" aria-modal="true" aria-labelledby="asset-delete-confirm-title">
+    <div class="confirm-dialog-panel">
+      <p id="asset-delete-confirm-title" class="confirm-dialog-title">Delete custom asset?</p>
+      <p id="asset-delete-confirm-message" class="confirm-dialog-message"></p>
+      <div class="confirm-dialog-actions">
+        <button type="button" id="asset-delete-confirm-cancel" class="tool-btn">Cancel</button>
+        <button type="button" id="asset-delete-confirm-ok" class="tool-btn confirm-dialog-danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="asset-editor" class="asset-editor hidden" role="dialog" aria-label="Custom asset editor">
+    <div class="asset-editor-top">
+      <div id="asset-editor-states" class="asset-editor-states" role="group" aria-label="Asset states">
+        <div id="asset-editor-state-tabs" class="asset-editor-state-tabs"></div>
+        <button type="button" id="asset-editor-add-state" class="asset-editor-state-btn" title="Add state">+</button>
+        <button type="button" id="asset-editor-delete-state" class="asset-editor-state-btn asset-editor-state-delete" title="Delete state">−</button>
+      </div>
+      <div id="asset-editor-header" class="asset-editor-header">Custom Asset</div>
+    </div>
+    <div class="asset-editor-body-fields">
+      <label class="asset-editor-field">Name
+        <input type="text" id="asset-editor-name" class="asset-editor-input" maxlength="32">
+      </label>
+      <label class="asset-editor-field">Label
+        <input type="text" id="asset-editor-placelabel" class="asset-editor-input" maxlength="8" value="PU">
+      </label>
+      <label class="asset-editor-field">Category
+        <select id="asset-editor-category" class="asset-editor-select">
+          <option value="pickup">Pickup</option>
+          <option value="switch">Switch</option>
+        </select>
+      </label>
+      <label class="asset-editor-field">Type
+        <select id="asset-editor-subtype" class="asset-editor-select"></select>
+      </label>
+    </div>
+    <button type="button" id="asset-editor-grid-toggle" class="tool-btn asset-editor-grid-btn">Grid: Off</button>
+    <div id="asset-editor-preview" class="asset-editor-preview"></div>
+    <div id="asset-editor-terminals-list" class="asset-editor-terminals-list"></div>
+    <button type="button" id="asset-editor-add-terminal" class="tool-btn asset-editor-add-btn">+ Terminal</button>
+    <div class="asset-editor-actions">
+      <button type="button" id="asset-editor-save" class="tool-btn">Save</button>
+      <button type="button" id="asset-editor-cancel" class="tool-btn">Cancel</button>
+    </div>
+  </div>
+
+  <footer class="status-bar">
+    <span id="status-text">Ready</span>
+    <div id="align-bar" class="align-bar hidden">
+      <button type="button" id="btn-align-column" class="tool-btn align-btn" title="Same Y">Align Column</button>
+      <button type="button" id="btn-align-row" class="tool-btn align-btn" title="Same X">Align Row</button>
+      <button type="button" id="btn-rotate-ccw" class="tool-btn align-btn" title="Rotate −7.5°">↺</button>
+      <button type="button" id="btn-rotate-cw" class="tool-btn align-btn" title="Rotate +7.5°">↻</button>
+    </div>
+    <span id="snap-info"></span>
+  </footer>
+
+  <script src="assets.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

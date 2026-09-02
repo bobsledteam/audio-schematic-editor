@@ -1,0 +1,10 @@
+{
+  "name": "guitar-wiring-visualiser",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Guitar wiring schematic visualiser",
+  "scripts": {
+    "start": "python3 serve.py",
+    "app": "python3 serve.py"
+  }
+}

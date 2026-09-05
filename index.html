@@ -6,15 +6,18 @@
   <meta name="application-name" content="Guitar Wiring Visualiser">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Guitar Wiring Visualiser</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=221">
 </head>
 <body>
+  <div class="app-chrome">
   <div class="app-header">
     <div class="logo-slot">
       <button
         class="logo-mark toolbar-logo"
         type="button"
-        aria-label="Endō home"
+        aria-label="Projects"
+        aria-expanded="false"
+        aria-controls="project-switcher"
         data-logo-flash
       >
         <span class="logo-mark__lava" aria-hidden="true">
@@ -52,6 +55,9 @@
           <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </button>
+      <button type="button" id="wire-gauge-reopen" class="wire-gauge-reopen hidden" title="Wire gauge" aria-label="Open wire gauge" hidden>
+        <span id="wire-gauge-reopen-label">22 AWG</span>
+      </button>
       <div class="wire-style-group" role="group" aria-label="Line style">
         <button type="button" id="btn-solid" class="tool-btn style-btn active" data-style="solid">Solid</button>
         <button type="button" id="btn-dashed" class="tool-btn style-btn" data-style="dashed">Dashed</button>
@@ -62,10 +68,159 @@
         <button type="button" class="color-swatch" data-color="yellow" title="Yellow" aria-label="Yellow"></button>
         <button type="button" class="color-swatch" data-color="green" title="Green" aria-label="Green"></button>
         <button type="button" class="color-swatch" data-color="orange" title="Orange" aria-label="Orange"></button>
+        <button type="button" class="color-swatch" data-color="red" title="Red" aria-label="Red"></button>
+        <button type="button" class="color-swatch" data-color="blue" title="Blue" aria-label="Blue"></button>
       </div>
       </div>
     </header>
     <button type="button" id="btn-accent-cycle" class="accent-swatch" title="Cycle accent colour" aria-label="Cycle accent colour"></button>
+  </div>
+
+  <div id="project-switcher" class="project-switcher" aria-hidden="true">
+    <div class="project-switcher-sheet">
+      <div class="project-switcher-panel">
+        <div class="project-switcher-bar">
+          <button type="button" id="project-switcher-chevron" class="project-switcher-chevron" title="Show projects" aria-expanded="false" aria-controls="project-switcher-list" aria-label="Expand project list">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <button type="button" id="project-switcher-current" class="project-switcher-current" title="Current project">Unsaved Project</button>
+          <div class="project-switcher-actions">
+            <button type="button" id="project-switcher-save" class="project-switcher-action project-switcher-save" title="Save project" aria-label="Save project">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M5 3h11l3 3v15H5V3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                <path d="M8 3v6h8V3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                <path d="M8 17h8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                <rect x="9" y="13" width="6" height="4" fill="currentColor" opacity="0.35"/>
+              </svg>
+            </button>
+            <button type="button" id="project-switcher-rename" class="project-switcher-action project-switcher-rename" title="Rename project" aria-label="Rename project">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M4 20h4l11-11-4-4L4 16v4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                <path d="M13 7l4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button type="button" id="project-switcher-delete" class="project-switcher-action project-switcher-delete" title="Delete project" aria-label="Delete project">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="project-switcher-list" class="project-switcher-list" aria-hidden="true">
+          <div class="project-switcher-list-inner">
+            <div id="project-switcher-items" class="project-switcher-items" role="list"></div>
+            <button type="button" id="project-switcher-add" class="project-switcher-add" title="New project" aria-label="New project">+</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="wire-gauge-bar" class="wire-gauge-panel hidden" aria-hidden="true">
+    <div class="wire-gauge-surface">
+      <div class="wire-gauge-bar-row">
+        <label class="wire-gauge-toggle" title="Dimensional wire gauge">
+          <input type="checkbox" id="wire-gauge-dimensional-toggle" aria-label="Dimensional Wire Gauge">
+          <span class="wire-gauge-toggle-ui" aria-hidden="true"></span>
+        </label>
+        <span class="wire-gauge-bar-label">Dimensional Wire Gauge</span>
+        <div class="wire-gauge-dropdown">
+          <button
+            type="button"
+            id="wire-gauge-dropdown-btn"
+            class="wire-gauge-dropdown-btn"
+            aria-haspopup="listbox"
+            aria-expanded="false"
+            aria-controls="wire-gauge-options"
+            title="Select wire gauge"
+          >
+            <span id="wire-gauge-dropdown-label">22 AWG (0.64mm)</span>
+            <span class="wire-gauge-dropdown-caret" aria-hidden="true">▾</span>
+          </button>
+          <div id="wire-gauge-options" class="wire-gauge-options hidden" role="listbox" aria-label="Wire gauge" hidden>
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.32" data-mm="0.32" data-awg="28" data-ohm="0.213" style="--mm: 0.32" aria-selected="false">
+              <span class="wire-gauge-option-sample" aria-hidden="true"></span>
+              <span class="wire-gauge-option-label">28 AWG (0.32mm)</span>
+              <span class="wire-gauge-option-divider" aria-hidden="true"></span>
+              <span class="wire-gauge-option-ohm">(0.213Ω/m)</span>
+            </button>
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.40" data-mm="0.40" data-awg="26" data-ohm="0.134" style="--mm: 0.40" aria-selected="false">
+              <span class="wire-gauge-option-sample" aria-hidden="true"></span>
+              <span class="wire-gauge-option-label">26 AWG (0.40mm)</span>
+              <span class="wire-gauge-option-divider" aria-hidden="true"></span>
+              <span class="wire-gauge-option-ohm">(0.134Ω/m)</span>
+            </button>
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.51" data-mm="0.51" data-awg="24" data-ohm="0.084" style="--mm: 0.51" aria-selected="false">
+              <span class="wire-gauge-option-sample" aria-hidden="true"></span>
+              <span class="wire-gauge-option-label">24 AWG (0.51mm)</span>
+              <span class="wire-gauge-option-divider" aria-hidden="true"></span>
+              <span class="wire-gauge-option-ohm">(0.084Ω/m)</span>
+            </button>
+            <button type="button" class="wire-gauge-option active" role="option" data-gauge="0.64" data-mm="0.64" data-awg="22" data-ohm="0.053" style="--mm: 0.64" aria-selected="true">
+              <span class="wire-gauge-option-sample" aria-hidden="true"></span>
+              <span class="wire-gauge-option-label">22 AWG (0.64mm)</span>
+              <span class="wire-gauge-option-divider" aria-hidden="true"></span>
+              <span class="wire-gauge-option-ohm">(0.053Ω/m)</span>
+            </button>
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.81" data-mm="0.81" data-awg="20" data-ohm="0.033" style="--mm: 0.81" aria-selected="false">
+              <span class="wire-gauge-option-sample" aria-hidden="true"></span>
+              <span class="wire-gauge-option-label">20 AWG (0.81mm)</span>
+              <span class="wire-gauge-option-divider" aria-hidden="true"></span>
+              <span class="wire-gauge-option-ohm">(0.033Ω/m)</span>
+            </button>
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="1.02" data-mm="1.02" data-awg="18" data-ohm="0.021" style="--mm: 1.02" aria-selected="false">
+              <span class="wire-gauge-option-sample" aria-hidden="true"></span>
+              <span class="wire-gauge-option-label">18 AWG (1.02mm)</span>
+              <span class="wire-gauge-option-divider" aria-hidden="true"></span>
+              <span class="wire-gauge-option-ohm">(0.021Ω/m)</span>
+            </button>
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="1.29" data-mm="1.29" data-awg="16" data-ohm="0.013" style="--mm: 1.29" aria-selected="false">
+              <span class="wire-gauge-option-sample" aria-hidden="true"></span>
+              <span class="wire-gauge-option-label">16 AWG (1.29mm)</span>
+              <span class="wire-gauge-option-divider" aria-hidden="true"></span>
+              <span class="wire-gauge-option-ohm">(0.013Ω/m)</span>
+            </button>
+          </div>
+        </div>
+        <button type="button" id="wire-gauge-menu-close" class="wire-gauge-menu-close" title="Close" aria-label="Close gauge menu">
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="wire-gauge-bar-row wire-gauge-preview-row">
+        <label class="wire-gauge-toggle" title="Preview dimensional thickness">
+          <input type="checkbox" id="wire-gauge-preview-toggle" aria-label="Preview">
+          <span class="wire-gauge-toggle-ui" aria-hidden="true"></span>
+        </label>
+        <span class="wire-gauge-bar-label">Preview</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="wire-selection-readout" class="wire-selection-panel hidden" aria-hidden="true" hidden>
+    <div class="wire-gauge-surface">
+      <div class="wire-gauge-readout wire-selection-readout-row">
+        <span id="wire-gauge-length" class="wire-gauge-readout-length">—</span>
+        <span id="wire-gauge-resistance" class="wire-gauge-readout-resistance">—</span>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <div id="project-details-dialog" class="confirm-dialog project-details-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="project-details-title">
+    <div class="confirm-dialog-panel project-details-panel">
+      <p id="project-details-title" class="confirm-dialog-title project-details-title">Project Details</p>
+      <label class="project-details-field">Name
+        <input type="text" id="project-details-name" class="project-details-input" maxlength="48" autocomplete="off" spellcheck="false">
+      </label>
+      <div class="confirm-dialog-actions">
+        <button type="button" id="project-details-cancel" class="tool-btn">Cancel</button>
+        <button type="button" id="project-details-save" class="tool-btn">Save</button>
+      </div>
+    </div>
   </div>
 
   <main id="canvas" class="canvas" tabindex="0">
@@ -73,16 +228,99 @@
       <svg id="wires-below" class="wire-stack below" aria-hidden="true"></svg>
       <svg id="wires-above" class="wire-stack above" aria-hidden="true"></svg>
       <div id="marquee-box" class="marquee-box hidden" aria-hidden="true"></div>
+      <div id="dim-layer" class="dim-layer hidden" aria-hidden="true">
+        <svg class="dim-svg" aria-hidden="true">
+          <line class="dim-line" x1="0" y1="0" x2="0" y2="0"></line>
+          <circle class="dim-mark dim-mark-a" cx="0" cy="0" r="1"></circle>
+          <circle class="dim-mark dim-mark-b" cx="0" cy="0" r="1"></circle>
+        </svg>
+        <div class="dim-label"></div>
+      </div>
+      <div id="dim-annotations" class="dim-annotations" aria-label="Dimension labels"></div>
+      <div id="note-windows" class="note-windows" aria-label="Notes"></div>
+      <div id="wire-end-labels" class="wire-end-labels" aria-hidden="true">
+        <div class="wire-end-label hidden" data-end="start"></div>
+        <div class="wire-end-label hidden" data-end="end"></div>
+      </div>
+      <button type="button" id="asset-config-btn" class="asset-config-btn hidden" title="Configure asset" aria-label="Configure asset" aria-expanded="false" aria-controls="asset-config-menu">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 15.5A3.5 3.5 0 1 0 12 8.5a3.5 3.5 0 0 0 0 7z" fill="none" stroke="currentColor" stroke-width="1.8"/>
+          <path d="M19.4 13.5a7.6 7.6 0 0 0 .1-1.5 7.6 7.6 0 0 0-.1-1.5l2-1.5-1.9-3.3-2.4 1a7.2 7.2 0 0 0-2.6-1.5l-.4-2.6H9.9l-.4 2.6a7.2 7.2 0 0 0-2.6 1.5l-2.4-1L2.6 9l2 1.5a7.6 7.6 0 0 0-.1 1.5 7.6 7.6 0 0 0 .1 1.5l-2 1.5 1.9 3.3 2.4-1a7.2 7.2 0 0 0 2.6 1.5l.4 2.6h3.8l.4-2.6a7.2 7.2 0 0 0 2.6-1.5l2.4 1 1.9-3.3-2-1.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <div id="asset-state-chrome" class="asset-state-chrome hidden" aria-label="Asset states">
+        <div id="asset-state-numbers" class="asset-state-numbers" role="list"></div>
+        <button type="button" id="asset-state-add" class="asset-state-add" title="Add state" aria-label="Add state">+</button>
+      </div>
+      <div id="asset-state-term-menu" class="asset-state-term-menu hidden" role="dialog" aria-label="State terminals"></div>
+      <div id="asset-config-menu" class="asset-config-menu hidden" role="dialog" aria-label="Asset configuration">
+        <label id="asset-config-ground-row" class="asset-config-ground-row hidden">
+          <input type="checkbox" id="asset-config-grounding" class="asset-config-ground-toggle">
+          <span class="asset-config-ground-label">Needs <span class="grounding-pulse">GROUNDING</span>? ⏚</span>
+        </label>
+        <div id="asset-config-switch-throw-row" class="asset-config-switch-throw-row hidden">
+          <span class="asset-config-switch-throw-label">Throw</span>
+          <span id="asset-config-switch-throw" class="asset-config-switch-throw">ON-ON-ON</span>
+        </div>
+        <div id="asset-config-switch-type-row" class="asset-config-switch-type-row hidden" role="group" aria-label="Switch type">
+          <span class="asset-config-switch-type-label" data-type="1">Type 1</span>
+          <span class="asset-config-switch-type-label" data-type="2">Type 2</span>
+          <input type="checkbox" id="asset-config-switch-type" class="asset-config-ground-toggle" aria-label="Type 1 / Type 2" title="Type 1 / Type 2">
+        </div>
+        <div id="asset-config-value-fields" class="asset-config-value-fields"></div>
+        <label id="asset-config-flash-row" class="asset-config-ground-row hidden">
+          <input type="checkbox" id="asset-config-flashing" class="asset-config-ground-toggle" checked>
+          <span class="asset-config-ground-label">Flashing?</span>
+        </label>
+      </div>
     </div>
-    <div id="snap-indicator" class="snap-indicator hidden" aria-hidden="true"></div>
+    <div id="snap-indicator" class="snap-indicator hidden" aria-hidden="true">
+      <svg class="snap-indicator-cross" viewBox="-12 -12 24 24" aria-hidden="true" focusable="false">
+        <!-- Origin-centered plus: outline then core (symmetric about 0,0) -->
+        <line class="snap-indicator-cross-outline" x1="0" y1="-11" x2="0" y2="11" />
+        <line class="snap-indicator-cross-outline" x1="-11" y1="0" x2="11" y2="0" />
+        <line class="snap-indicator-cross-core" x1="0" y1="-11" x2="0" y2="11" />
+        <line class="snap-indicator-cross-core" x1="-11" y1="0" x2="11" y2="0" />
+      </svg>
+    </div>
   </main>
 
+  <div id="text-command-box" class="text-command-box hidden" aria-hidden="true">
+    <input
+      id="text-command-input"
+      class="text-command-input"
+      type="text"
+      autocomplete="off"
+      spellcheck="false"
+      aria-label="Command"
+      aria-autocomplete="list"
+    >
+    <span id="text-command-hint" class="text-command-hint" aria-hidden="true"></span>
+  </div>
+
+  <div id="wire-place-cursor-mark" class="wire-place-cursor-mark hidden" aria-hidden="true"></div>
+
   <div id="asset-context-menu" class="context-menu hidden" role="menu" aria-label="Place asset">
-    <div class="context-menu-power-row">
-      <button type="button" id="context-menu-power" class="context-menu-power-btn" title="Highlight wires on active terminals" aria-pressed="false" aria-label="Active wire glow">⚡</button>
+    <div class="context-menu-power-row" role="group" aria-label="Focus modes">
+      <span class="context-menu-focus-modes-label">Focus modes</span>
+      <div class="context-menu-focus-modes-btns">
+        <button type="button" id="context-menu-power" class="context-menu-power-btn" title="Focus: Active — highlight wires on active signal path" aria-pressed="false" aria-label="Focus: Active signal path">⚡</button>
+        <button type="button" id="context-menu-ground" class="context-menu-power-btn" title="Focus: Ground — ungrounded YESGROUND; with Wire focus, chase the grounding net into ISGROUND" aria-pressed="false" aria-label="Focus: Ground check">⏚</button>
+        <button type="button" id="context-menu-wire-focus" class="context-menu-power-btn" title="Focus: Wire — grey &amp; lock assets, wires in front" aria-pressed="false" aria-label="Focus: Wire edit">
+          <svg class="context-menu-wire-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <line x1="5" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button type="button" id="context-menu-short-check" class="context-menu-power-btn" title="Focus: Short — detect hard shorts (H↔G, tip–sleeve, battery)" aria-pressed="false" aria-label="Focus: Short check">
+          <svg class="context-menu-short-check-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="10.5" cy="10.5" r="6.25" fill="none" stroke="currentColor" stroke-width="2.1"/>
+            <line x1="15.2" y1="15.2" x2="20" y2="20" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
     </div>
     <ul id="context-menu-items" class="context-menu-list"></ul>
-    <button type="button" id="context-menu-add" class="context-menu-add">+ Custom asset</button>
+    <button type="button" id="context-menu-add" class="context-menu-add">+ Custom Asset</button>
   </div>
 
   <div id="asset-wheel" class="asset-wheel hidden" aria-hidden="true" role="dialog" aria-label="Recent assets">
@@ -127,36 +365,252 @@
       </label>
       <label class="asset-editor-field">Category
         <select id="asset-editor-category" class="asset-editor-select">
-          <option value="pickup">Pickup</option>
-          <option value="switch">Switch</option>
+          <option value="pickup">Pickups</option>
+          <option value="switch">Switches</option>
+          <option value="jack">Jacks</option>
+          <option value="power">Power</option>
+          <option value="component">Components</option>
+          <option value="custom">User</option>
         </select>
       </label>
-      <label class="asset-editor-field">Type
+      <label id="asset-editor-subtype-field" class="asset-editor-field">Type
         <select id="asset-editor-subtype" class="asset-editor-select"></select>
       </label>
+      <label class="asset-editor-ground-option asset-editor-field-span">
+        <input type="checkbox" id="asset-editor-grounding" class="asset-config-ground-toggle">
+        <span class="asset-config-ground-label">Needs <span class="grounding-pulse">GROUNDING</span>? ⏚</span>
+      </label>
+      <div class="asset-editor-value-fields asset-editor-field-span">
+        <span class="asset-editor-value-fields-label">Schematic values</span>
+        <div id="asset-editor-value-fields-list" class="asset-editor-value-fields-list"></div>
+      </div>
     </div>
     <button type="button" id="asset-editor-grid-toggle" class="tool-btn asset-editor-grid-btn">Grid: Off</button>
     <div id="asset-editor-preview" class="asset-editor-preview"></div>
     <div id="asset-editor-terminals-list" class="asset-editor-terminals-list"></div>
-    <button type="button" id="asset-editor-add-terminal" class="tool-btn asset-editor-add-btn">+ Terminal</button>
+    <div class="asset-editor-add-row" role="group" aria-label="Add parts">
+      <button type="button" id="asset-editor-add-terminal" class="tool-btn asset-editor-add-btn" title="Add terminal">+ Terminal</button>
+      <button type="button" id="asset-editor-add-lead" class="tool-btn asset-editor-add-btn" title="Add lead leg">+ Lead</button>
+      <button type="button" id="asset-editor-add-conductor" class="tool-btn asset-editor-add-btn" title="Add 4-conductor loom + fan">+ 4-Conductor</button>
+      <button type="button" id="asset-editor-add-wire" class="tool-btn asset-editor-add-btn" title="Add generic wire">+ Wire</button>
+    </div>
     <div class="asset-editor-actions">
       <button type="button" id="asset-editor-save" class="tool-btn">Save</button>
       <button type="button" id="asset-editor-cancel" class="tool-btn">Cancel</button>
     </div>
+    <div id="asset-editor-resize" class="asset-editor-panel-resize" title="Resize" aria-hidden="true"></div>
   </div>
 
-  <footer class="status-bar">
-    <span id="status-text">Ready</span>
-    <div id="align-bar" class="align-bar hidden">
-      <button type="button" id="btn-align-column" class="tool-btn align-btn" title="Same Y">Align Column</button>
-      <button type="button" id="btn-align-row" class="tool-btn align-btn" title="Same X">Align Row</button>
-      <button type="button" id="btn-rotate-ccw" class="tool-btn align-btn" title="Rotate −7.5°">↺</button>
-      <button type="button" id="btn-rotate-cw" class="tool-btn align-btn" title="Rotate +7.5°">↻</button>
+  <div id="cad-import-dialog" class="cad-import-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="cad-import-title">
+    <div id="cad-import-panel" class="cad-import-panel">
+      <div id="cad-import-header" class="cad-import-header">
+        <p id="cad-import-title" class="cad-import-title">Import File</p>
+        <button type="button" id="cad-import-close" class="cad-import-close" title="Close" aria-label="Close">×</button>
+      </div>
+      <div id="cad-import-drop" class="cad-import-drop" tabindex="0">
+        <p class="cad-import-drop-label">Drag a file here</p>
+        <p class="cad-import-drop-hint">DXF / DWG · 2D geometry only · 1 unit = 1 mm · pasted as one group</p>
+        <button type="button" id="cad-import-browse" class="cad-import-browse">Browse…</button>
+        <input type="file" id="cad-import-input" class="cad-import-input" accept=".dxf,.dwg,image/vnd.dxf,application/dxf,application/acad,application/x-acad,application/autocad_dwg" hidden>
+      </div>
+      <p id="cad-import-status" class="cad-import-status" aria-live="polite"></p>
     </div>
-    <span id="snap-info"></span>
-  </footer>
+  </div>
 
-  <script src="assets.js"></script>
-  <script src="app.js"></script>
+  <div id="moodle-issue-float" class="moodle-issue-float hidden" aria-hidden="true"></div>
+  <div id="overlap-cycle-float" class="overlap-cycle-float hidden" aria-hidden="true"></div>
+
+  <div class="workspace-dock">
+    <div class="workspace-page-bar" role="tablist" aria-label="Workspace pages">
+      <span class="workspace-electronics-tab-wrap">
+        <div class="moodle-stack" aria-hidden="true">
+          <div
+            id="circuit-moodle-disconnected"
+            class="circuit-moodle circuit-moodle-disconnected"
+            hidden
+            aria-hidden="true"
+            role="button"
+            tabindex="-1"
+            title="Moodle — Disconnected wires"
+            aria-label="Moodle — disconnected wires"
+          >
+            <span class="circuit-moodle-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M3 12 H9" fill="none" stroke="#111" stroke-width="2.4" stroke-linecap="square"/>
+                <path d="M15 12 H21" fill="none" stroke="#111" stroke-width="2.4" stroke-linecap="square"/>
+                <path d="M9 8 L15 16 M15 8 L9 16" fill="none" stroke="#e00000" stroke-width="2.2" stroke-linecap="square"/>
+                <rect x="7.2" y="10.2" width="3.6" height="3.6" fill="#f0c000" stroke="#111" stroke-width="1.2"/>
+                <rect x="13.2" y="10.2" width="3.6" height="3.6" fill="#f0c000" stroke="#111" stroke-width="1.2"/>
+              </svg>
+            </span>
+            <span id="circuit-moodle-disconnected-badge" class="circuit-fault-warning-badge">0</span>
+          </div>
+          <div
+            id="circuit-fault-warning"
+            class="circuit-moodle circuit-fault-warning"
+            hidden
+            aria-hidden="true"
+            role="button"
+            tabindex="-1"
+            title="Moodle — click to highlight faults"
+            aria-label="Moodle — circuit faults"
+          >
+            <span class="circuit-fault-warning-icon circuit-moodle-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M12 2.2 L22.4 21.2 H1.6 Z" fill="#f0c000" stroke="#111" stroke-width="1.35" stroke-linejoin="miter"/>
+                <rect x="11.05" y="8.2" width="1.9" height="6.2" fill="#111"/>
+                <rect x="11.05" y="16.2" width="1.9" height="1.9" fill="#111"/>
+              </svg>
+            </span>
+            <span id="circuit-fault-warning-badge" class="circuit-fault-warning-badge">0</span>
+          </div>
+        </div>
+        <div id="grid-scale-indicator" class="grid-scale-indicator" aria-hidden="true">
+          <span class="grid-scale-label grid-scale-label-v">1.00x</span>
+          <span id="grid-scale-square" class="grid-scale-square"><span class="grid-scale-corner-x">×</span></span>
+          <span class="grid-scale-label grid-scale-label-h">1.00x</span>
+        </div>
+        <button
+          type="button"
+          id="workspace-page-electronics"
+          class="workspace-page-tab is-active"
+          role="tab"
+          data-page="electronics"
+          aria-selected="true"
+        >Electronics</button>
+      </span>
+      <span class="workspace-page-panel-shell">
+        <button
+          type="button"
+          id="workspace-page-panel"
+          class="workspace-page-panel"
+          role="tab"
+          data-page="panel"
+          aria-selected="false"
+        >Panel</button>
+      </span>
+      <button
+        type="button"
+        id="workspace-page-panel-visibility"
+        class="workspace-page-visibility"
+        title="Show/hide Panel layer"
+        aria-label="Show Panel layer"
+        aria-pressed="true"
+      >
+        <svg class="workspace-page-eye workspace-page-eye-open" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+          <circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        </svg>
+        <svg class="workspace-page-eye workspace-page-eye-closed hidden" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+          <circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+    <footer class="status-bar">
+      <div id="schematic-peek" class="schematic-peek" aria-label="Circuit preview">
+        <div class="schematic-peek-shell">
+          <div class="schematic-peek-surface">
+            <div class="schematic-peek-bar">
+              <button
+                type="button"
+                id="schematic-peek-refresh"
+                class="schematic-peek-refresh"
+                title="Refresh circuit"
+                aria-label="Refresh circuit"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M20 12a8 8 0 1 1-2.2-5.4" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
+                  <path d="M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <span class="schematic-peek-title">Circuit</span>
+              <div class="schematic-peek-zoom" aria-label="Schematic zoom">
+                <button type="button" id="schematic-zoom-out" class="schematic-zoom-btn" title="Zoom out" aria-label="Zoom out">−</button>
+                <span id="schematic-zoom-label" class="schematic-zoom-label">100%</span>
+                <button type="button" id="schematic-zoom-in" class="schematic-zoom-btn" title="Zoom in" aria-label="Zoom in">+</button>
+              </div>
+              <button
+                type="button"
+                id="schematic-peek-chevron"
+                class="schematic-peek-chevron"
+                title="Circuit"
+                aria-expanded="false"
+                aria-controls="schematic-peek-body"
+                aria-label="Expand circuit"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </div>
+            <div id="schematic-peek-body" class="schematic-peek-body" aria-hidden="true">
+              <div class="schematic-peek-body-inner">
+                <div class="schematic-peek-canvas" id="schematic-peek-canvas">
+                  <svg id="schematic-peek-svg" class="schematic-peek-svg" aria-hidden="true"></svg>
+                  <p id="schematic-peek-empty" class="schematic-peek-empty">Connect assets with wires to generate a circuit</p>
+                  <button
+                    type="button"
+                    id="schematic-pan-home"
+                    class="schematic-pan-home"
+                    title="Reset pan"
+                    aria-label="Reset pan to home"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                      <path d="M4 11.5L12 4l8 7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                      <path d="M7 10.5V20h10v-9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </button>
+                </div>
+                <div id="schematic-wire-stats" class="schematic-wire-stats hidden" aria-label="Wire totals" hidden></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <span id="status-text">Ready</span>
+      <div id="align-bar" class="align-bar hidden">
+        <button type="button" id="btn-align-column" class="tool-btn align-btn" title="Same Y">Align Column</button>
+        <button type="button" id="btn-align-row" class="tool-btn align-btn" title="Same X">Align Row</button>
+        <button type="button" id="btn-rotate-ccw" class="tool-btn align-btn" title="Rotate −7.5°">↺</button>
+        <button type="button" id="btn-rotate-cw" class="tool-btn align-btn" title="Rotate +7.5°">↻</button>
+      </div>
+      <span id="snap-info"></span>
+      <div id="commands-panel" class="commands-panel" aria-label="Commands">
+        <div class="commands-sheet">
+          <div class="commands-panel-surface">
+            <div id="commands-body" class="commands-body" aria-hidden="true">
+              <div class="commands-body-inner">
+                <div class="commands-title-row">
+                  <span class="commands-title">Commands</span>
+                </div>
+                <div id="commands-list" class="commands-list" role="list"></div>
+              </div>
+            </div>
+            <div class="commands-bar">
+              <button
+                type="button"
+                id="commands-chevron"
+                class="commands-chevron"
+                title="Commands"
+                aria-expanded="false"
+                aria-controls="commands-body"
+                aria-label="Expand commands"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <script src="cad.js?v=221"></script>
+  <script src="assets.js?v=221"></script>
+  <script src="app.js?v=221"></script>
 </body>
 </html>

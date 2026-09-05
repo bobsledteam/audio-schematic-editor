@@ -4,7 +4,7 @@
 import os
 
 block_cipher = None
-project_root = os.path.abspath(os.path.join(SPEC, '..'))
+project_root = os.path.abspath(os.path.join(os.path.dirname(SPEC), '..'))
 
 a = Analysis(
     [os.path.join(project_root, 'serve.py')],
@@ -14,6 +14,7 @@ a = Analysis(
         (os.path.join(project_root, 'index.html'), '.'),
         (os.path.join(project_root, 'app.js'), '.'),
         (os.path.join(project_root, 'assets.js'), '.'),
+        (os.path.join(project_root, 'cad.js'), '.'),
         (os.path.join(project_root, 'styles.css'), '.'),
         (os.path.join(project_root, 'assets'), 'assets'),
     ],

@@ -20,18 +20,38 @@ jobs:
         run: python -m pip install -r requirements-build.txt
 
       - name: Build executable
-        run: pyinstaller build/GuitarWiring.spec --clean --noconfirm
+        run: pyinstaller build/EndoASD.spec --clean --noconfirm
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
 
       - name: Build installer
-        run: iscc build/GuitarWiring.iss
+        run: iscc build/EndoASD.iss
+
+      - name: Build portable bugtest zip
+        shell: pwsh
+        run: |
+          $out = "dist/EndoASD-Windows-Bugtest"
+          if (Test-Path $out) { Remove-Item -Recurse -Force $out }
+          New-Item -ItemType Directory -Path "$out/assets" | Out-Null
+          $files = @(
+            "index.html","app.js","assets.js","cad.js","engines.js","errorreporting.js",
+            "materials.js","gate.js","gate.css","styles.css","serve.py","updater.py",
+            "update-channel.json","requirements.txt"
+          )
+          foreach ($f in $files) { Copy-Item $f $out }
+          Copy-Item EndoASD.bat "$out/EndoASD.bat"
+          Copy-Item build/BUGTEST-WINDOWS.txt "$out/README.txt"
+          Copy-Item -Recurse assets/* "$out/assets/"
+          if (Test-Path dist/EndoASD.exe) { Copy-Item dist/EndoASD.exe $out }
+          if (Test-Path dist/EndoASD-Windows-Bugtest.zip) { Remove-Item dist/EndoASD-Windows-Bugtest.zip -Force }
+          Compress-Archive -Path "$out/*" -DestinationPath dist/EndoASD-Windows-Bugtest.zip -Force
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: GuitarWiring-windows
+          name: EndoASD-windows
           path: |
-            dist/GuitarWiring.exe
-            dist/GuitarWiring-Setup.exe
+            dist/EndoASD.exe
+            dist/EndoASD-Setup.exe
+            dist/EndoASD-Windows-Bugtest.zip

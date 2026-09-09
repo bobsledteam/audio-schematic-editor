@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Start Guitar Wiring App",
+      "label": "Start Endo ASD",
       "type": "shell",
       "command": "python3 serve.py",
       "options": {
@@ -10,28 +10,43 @@
       },
       "isBackground": true,
       "problemMatcher": {
-        "owner": "guitar-wiring",
+        "owner": "endo-asd",
         "pattern": { "regexp": "^$" },
         "background": {
           "activeOnStart": true,
           "beginsPattern": ".",
-          "endsPattern": "Guitar Wiring App running at"
+          "endsPattern": "Local UI:"
         }
       },
       "presentation": {
         "reveal": "silent",
-        "panel": "dedicated",
-        "close": false
+        "panel": "dedicated"
       }
     },
     {
-      "label": "Run Guitar Wiring App",
-      "dependsOn": ["Start Guitar Wiring App"],
+      "label": "Run Endo ASD",
+      "dependsOn": ["Start Endo ASD"],
       "dependsOrder": "sequence",
-      "problemMatcher": [],
-      "group": {
-        "kind": "build",
-        "isDefault": true
+      "type": "shell",
+      "command": "echo Endo ASD is running",
+      "problemMatcher": []
+    },
+    {
+      "label": "Start Endo ASD (browser)",
+      "type": "shell",
+      "command": "ENDO_ASD_BROWSER=1 python3 serve.py",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "endo-asd-browser",
+        "pattern": { "regexp": "^$" },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".",
+          "endsPattern": "Local UI:"
+        }
       }
     }
   ]

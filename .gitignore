@@ -2,8 +2,16 @@
 dist/
 build/GuitarWiring-mac/
 build/GuitarWiring/
-*.dmg
+build/EndoASD-mac/
+build/EndoASD/
 *.exe
+
+# Allow tracked installer artifacts under releases/
+*.dmg
+!releases/*.dmg
+
+# Local app bundle copies (use dist/ / releases/ DMG instead)
+/Endo ASD.app/
 
 # Python
 __pycache__/

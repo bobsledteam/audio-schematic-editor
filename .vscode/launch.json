@@ -2,16 +2,20 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Guitar Wiring App",
-      "type": "debugpy",
+      "name": "Endo ASD",
+      "type": "node-terminal",
       "request": "launch",
-      "program": "${workspaceFolder}/serve.py",
+      "command": "python3 serve.py",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Endo ASD (browser)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "ENDO_ASD_BROWSER=1 python3 serve.py",
       "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "serverReadyAction": {
-        "action": "openExternally",
-        "pattern": "running at (https?://\\S+)",
-        "uriFormat": "%s"
+      "env": {
+        "ENDO_ASD_BROWSER": "1"
       }
     }
   ]

@@ -1,6 +1,8 @@
-# Guitar Wiring Schematic Visualiser
+# Endo Audio Schematic Editor
 
-A local app for placing guitar wiring components on a schematic canvas. Runs inside Cursor's preview tab (Glass browser).
+Desktop application for placing audio / guitar wiring components on a schematic canvas (Endo ASD).
+
+Runs as a native window on your computer (local UI + embedded webview). Projects stay on this machine (`localStorage`).
 
 ## Features
 
@@ -10,23 +12,32 @@ A local app for placing guitar wiring components on a schematic canvas. Runs ins
 - **Drag to move** — drag components around the canvas
 - **Terminal snap** — hover over any mini terminal box for 2 seconds to snap the cursor to its center
 
-## Run as app (Cursor preview)
+## Run the desktop app
 
-**Quick start** — from the project root:
+**Requirements:** [Python 3](https://www.python.org/downloads/)
+
+From the project root:
 
 ```bash
+python3 -m pip install -r requirements.txt
 npm start
 ```
 
-Then open **http://127.0.0.1:8765** in Cursor's preview tab, or use **Run → Start Debugging** and pick **Guitar Wiring App**.
+That opens **Endo Audio Schematic Editor** in its own application window.
 
-**From Cursor tasks:** `Terminal → Run Task → Run Guitar Wiring App` (starts the local server).
+**Browser fallback** (e.g. Cursor preview):
+
+```bash
+npm run start:browser
+```
+
+Or: `Terminal → Run Task → Run Endo ASD`.
 
 Font: Consolas (with monospace fallbacks).
 
 ## Windows download
 
-Send your friend **`GuitarWiring-Setup.exe`** — a normal Windows installer (Next → Next → Finish, optional desktop shortcut, uninstall via Settings).
+Send testers **`EndoASD-Setup.exe`** — a normal Windows installer (Next → Next → Finish, optional desktop shortcut, uninstall via Settings).
 
 ### Build the installer (on Windows)
 
@@ -37,22 +48,21 @@ Send your friend **`GuitarWiring-Setup.exe`** — a normal Windows installer (Ne
 build\build-windows.bat
 ```
 
-3. Share **`dist\GuitarWiring-Setup.exe`**.
+3. Share **`dist\EndoASD-Setup.exe`**.
 
-Your friend double-clicks the setup file, installs, then launches **Guitar Wiring Visualiser** from the Start menu. The app opens in their browser. To quit, close the browser tab and end **GuitarWiring.exe** in Task Manager if it keeps running.
+Testers double-click the setup file, install, then launch **Endo Audio Schematic Editor** from the Start menu. Closing the window quits the app.
 
-**GitHub Actions:** push a tag like `v1.0.0` and download **GuitarWiring-Setup.exe** from the workflow artifacts.
+**GitHub Actions:** push a tag like `v1.0.0` and download **EndoASD-Setup.exe** from the workflow artifacts.
 
 ### Without installer (portable)
 
-- **`dist\GuitarWiring.exe`** — single file, no install step (PyInstaller build only).
-- **`GuitarWiring.bat`** — needs Python 3 on the PC.
-
-Custom assets are saved in the browser on that computer (`localStorage`).
+- **`dist\EndoASD.exe`** — single file, no install step (PyInstaller build only).
+- **`EndoASD.bat`** — needs Python 3 + `pip install -r requirements.txt` on the PC.
+- **`dist\EndoASD-Windows-Bugtest.zip`** — portable folder for bug testers.
 
 ## macOS download
 
-Share **`GuitarWiring.dmg`** — your friend opens it and drags **Guitar Wiring.app** to Applications.
+Share **`EndoASD-mac-Bugtest.dmg`** — open it and drag **Endo ASD.app** to Applications.
 
 ### Build on Mac
 
@@ -64,23 +74,13 @@ chmod +x build/build-mac.sh
 ```
 
 Output:
-- **`dist/Guitar Wiring.app`** — double-click to run (opens in your browser)
-- **`dist/GuitarWiring.dmg`** — easy to share
+- **`dist/Endo ASD.app`** — double-click to run (desktop window)
+- **`dist/EndoASD-mac-Bugtest.dmg`** — easy to share
 
-**Without building:** double-click **`GuitarWiring.command`** (needs Python 3).
+**Without building:** double-click **`EndoASD.command`** (needs Python 3 + `pip install -r requirements.txt`).
 
-**First launch:** if macOS blocks the app (unsigned), right-click → **Open** → **Open** once.
+**GitHub Actions:** run **Build macOS app** from the Actions tab, or push a `v*` tag, then download **EndoASD-mac**.
 
-**GitHub Actions:** run **Build macOS app** from the Actions tab, or push a `v*` tag, then download **GuitarWiring-mac**.
+## Check update
 
-## Controls
-
-| Action | Control |
-|--------|---------|
-| Place Single Coil | Click **+ Single Coil**, then click canvas |
-| Place DPDT | Click **+ 6-Way DPDT**, then click canvas |
-| Select | Click component |
-| Move | Drag component |
-| Delete | Select component, press Delete |
-| Cancel placement | Escape |
-| Snap to terminal | Hover terminal 2 seconds |
+On the gate screen, under the Bugtest build number, click **Check update**. Set `gitUrl` in `update-channel.json` after the repo is pushed so testers can pull newer builds.

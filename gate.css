@@ -1,0 +1,558 @@
+/* Temporary unlock gate — fully isolated from editor styles (delete with gate.js). */
+
+.app-gate {
+  --gate-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  position: fixed;
+  inset: 0;
+  z-index: 1000000;
+  display: grid;
+  place-items: center;
+  pointer-events: auto;
+  opacity: 1;
+  background: #0a0a0c;
+  transition: opacity 0.55s var(--gate-ease);
+  font-family: Consolas, "Courier New", Monaco, monospace;
+}
+
+.app-gate.is-unlocking {
+  opacity: 0;
+  pointer-events: none;
+}
+
+html.desktop-mac .app-gate {
+  border-radius: 10px;
+}
+
+.app-gate__stage {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #0a0a0c;
+  /* Keep stage/badge/content in one grid cell — auto-rows were pushing the logo down */
+  grid-area: 1 / 1;
+}
+
+html.desktop-mac .app-gate__stage {
+  border-radius: 10px;
+}
+
+.app-gate__lava {
+  position: absolute;
+  inset: -12%;
+  z-index: 0;
+  overflow: hidden;
+  background: #141214;
+  opacity: 0.88;
+  pointer-events: none;
+}
+
+.app-gate__blob {
+  position: absolute;
+  display: block;
+  border-radius: 50%;
+  filter: blur(42px);
+  opacity: 0.78;
+  will-change: transform, border-radius;
+}
+
+.app-gate__blob--1 {
+  width: 62%;
+  height: 58%;
+  left: -14%;
+  bottom: -18%;
+  background: #3a2e2e;
+  animation: app-gate-lava-1 14s ease-in-out infinite;
+}
+
+.app-gate__blob--2 {
+  width: 54%;
+  height: 50%;
+  right: -16%;
+  top: -6%;
+  background: #382c2c;
+  animation: app-gate-lava-2 18s ease-in-out infinite;
+}
+
+.app-gate__blob--3 {
+  width: 44%;
+  height: 44%;
+  left: 28%;
+  top: 30%;
+  background: #453636;
+  animation: app-gate-lava-3 16s ease-in-out infinite;
+}
+
+.app-gate__blob--4 {
+  width: 58%;
+  height: 42%;
+  left: 8%;
+  top: -14%;
+  background: #342929;
+  animation: app-gate-lava-4 20s ease-in-out infinite;
+}
+
+.app-gate__blob--5 {
+  width: 40%;
+  height: 38%;
+  right: 10%;
+  bottom: 4%;
+  background: #382d2d;
+  animation: app-gate-lava-5 12s ease-in-out infinite;
+}
+
+@keyframes app-gate-lava-1 {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+    border-radius: 42% 58% 60% 40% / 48% 42% 58% 52%;
+  }
+  40% {
+    transform: translate(18%, -55%) scale(1.12);
+    border-radius: 58% 42% 38% 62% / 52% 60% 40% 48%;
+  }
+  70% {
+    transform: translate(8%, -28%) scale(0.92);
+    border-radius: 48% 52% 55% 45% / 40% 55% 45% 60%;
+  }
+}
+
+@keyframes app-gate-lava-2 {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+    border-radius: 55% 45% 48% 52% / 42% 58% 42% 58%;
+  }
+  35% {
+    transform: translate(-22%, 45%) scale(1.08);
+    border-radius: 40% 60% 55% 45% / 60% 40% 60% 40%;
+  }
+  65% {
+    transform: translate(-10%, 18%) scale(0.9);
+    border-radius: 60% 40% 42% 58% / 48% 52% 48% 52%;
+  }
+}
+
+@keyframes app-gate-lava-3 {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+    border-radius: 50% 50% 45% 55% / 55% 45% 55% 45%;
+  }
+  50% {
+    transform: translate(-20%, -40%) scale(1.2);
+    border-radius: 42% 58% 60% 40% / 40% 60% 40% 60%;
+  }
+}
+
+@keyframes app-gate-lava-4 {
+  0%, 100% {
+    transform: translate(0, 0) scale(1.05);
+    border-radius: 48% 52% 60% 40% / 55% 45% 55% 45%;
+  }
+  45% {
+    transform: translate(15%, 70%) scale(0.88);
+    border-radius: 60% 40% 45% 55% / 40% 60% 40% 60%;
+  }
+  75% {
+    transform: translate(-8%, 35%) scale(1.1);
+    border-radius: 45% 55% 50% 50% / 50% 50% 45% 55%;
+  }
+}
+
+@keyframes app-gate-lava-5 {
+  0%, 100% {
+    transform: translate(0, 0) scale(0.95);
+    border-radius: 55% 45% 50% 50% / 45% 55% 45% 55%;
+  }
+  50% {
+    transform: translate(-30%, -55%) scale(1.15);
+    border-radius: 40% 60% 55% 45% / 60% 40% 55% 45%;
+  }
+}
+
+.app-gate__glass {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background:
+    linear-gradient(165deg, rgba(40, 40, 46, 0.42) 0%, rgba(18, 18, 22, 0.55) 52%, rgba(10, 10, 12, 0.62) 100%);
+  backdrop-filter: blur(28px) saturate(120%);
+  -webkit-backdrop-filter: blur(28px) saturate(120%);
+  pointer-events: none;
+}
+
+.app-gate__content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.75rem;
+  padding: 1.5rem;
+  grid-area: 1 / 1;
+  justify-self: center;
+  align-self: center;
+}
+
+.app-gate__logo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  width: min(15rem, 54vw);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  transition: transform 0.2s var(--gate-ease), filter 0.2s ease;
+}
+
+.app-gate__logo:hover {
+  filter: brightness(1.08);
+}
+
+.app-gate__logo:active {
+  transform: scale(0.97);
+}
+
+.app-gate__logo-img {
+  width: 100%;
+  height: auto;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+  filter: drop-shadow(0 10px 28px rgba(0, 0, 0, 0.45));
+}
+
+.app-gate__asd {
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.36em;
+  text-indent: 0.36em;
+  text-transform: uppercase;
+  line-height: 1;
+  color: rgba(248, 248, 250, 0.9);
+  user-select: none;
+  pointer-events: none;
+}
+
+.app-gate__form {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.65rem;
+  width: min(15rem, 70vw);
+}
+
+.app-gate__terminal {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 1.85rem;
+  padding: 0.28rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  cursor: text;
+  overflow: hidden;
+}
+
+.app-gate__terminal:focus-within {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.app-gate__mask {
+  font-size: 0.82rem;
+  letter-spacing: 0.18em;
+  color: rgba(232, 232, 236, 0.88);
+  white-space: pre;
+  pointer-events: none;
+  user-select: none;
+}
+
+.app-gate__caret {
+  display: inline-block;
+  margin-left: 1px;
+  font-size: 0.9rem;
+  line-height: 1;
+  color: rgba(245, 245, 248, 0.9);
+  animation: app-gate-caret-blink 1.05s steps(1, end) infinite;
+  pointer-events: none;
+  user-select: none;
+}
+
+@keyframes app-gate-caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+.app-gate__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  caret-color: transparent;
+  color: transparent;
+  background: transparent;
+  outline: none;
+  font-size: 1rem;
+}
+
+.app-gate__error {
+  margin: 0;
+  min-height: 1.1em;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #ff6b6b;
+  text-align: center;
+}
+
+.app-gate__error.is-wiggle {
+  animation: app-gate-wiggle 0.48s ease;
+}
+
+@keyframes app-gate-wiggle {
+  0%, 100% { transform: translateX(0); }
+  15% { transform: translateX(-7px); }
+  30% { transform: translateX(7px); }
+  45% { transform: translateX(-5px); }
+  60% { transform: translateX(5px); }
+  75% { transform: translateX(-2px); }
+  90% { transform: translateX(2px); }
+}
+
+.app-gate__spinner {
+  display: grid;
+  place-items: center;
+  width: 1.55rem;
+  height: 1.55rem;
+  margin-top: 0.1rem;
+}
+
+.app-gate__spinner[hidden] {
+  display: none;
+}
+
+.app-gate__spinner-ring {
+  width: 1.35rem;
+  height: 1.35rem;
+  border: 2px solid rgba(255, 255, 255, 0.16);
+  border-top-color: rgba(245, 245, 248, 0.92);
+  border-radius: 50%;
+  animation: app-gate-spin 0.7s linear infinite;
+}
+
+@keyframes app-gate-spin {
+  to { transform: rotate(360deg); }
+}
+
+.app-gate-unveil {
+  position: fixed;
+  inset: 0;
+  z-index: 999990;
+  pointer-events: none;
+}
+
+.app-gate-unveil[hidden] {
+  display: none !important;
+}
+
+.app-gate-unveil__black {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: #000;
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity 1.25s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 1.25s cubic-bezier(0.22, 1.18, 0.36, 1);
+}
+
+.app-gate-unveil.is-clearing .app-gate-unveil__black {
+  opacity: 0;
+  /* Veil drops away + soft rebound — editor chrome is never transformed */
+  transform: translateY(18px);
+}
+
+html.desktop-mac .app-gate-unveil__black {
+  border-radius: 10px;
+}
+
+.app-gate-unveil__welcome {
+  position: absolute;
+  top: 11%;
+  left: 50%;
+  z-index: 2;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  font-family: Consolas, "Courier New", Monaco, monospace;
+  font-size: clamp(1.35rem, 3.2vw, 2rem);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: rgba(248, 248, 250, 0.94);
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.55);
+  opacity: 1;
+  transition: opacity 0.7s ease;
+  white-space: pre;
+}
+
+.app-gate-unveil.is-welcome-done .app-gate-unveil__welcome {
+  opacity: 0;
+}
+
+.app-gate-unveil__caret {
+  display: inline-block;
+  margin-left: 1px;
+  transform: translateX(0);
+  animation: app-gate-caret-blink 1.05s steps(1, end) infinite;
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.app-gate-unveil__caret.is-advancing {
+  animation: none;
+  opacity: 1;
+  transform: translateX(0.72em);
+}
+
+.bugtest-badge--gate {
+  position: relative;
+  top: auto;
+  right: auto;
+  z-index: 5;
+  grid-area: auto;
+  justify-self: auto;
+  align-self: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.05rem;
+  margin: 0;
+  padding: 0.15rem 0.2rem;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.78);
+  font-family: Consolas, "Courier New", Monaco, monospace;
+  font-size: 0.68rem;
+  line-height: 1.15;
+  letter-spacing: 0.02em;
+  text-align: right;
+  cursor: pointer;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.app-gate__bugtest {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 5;
+  grid-area: 1 / 1;
+  justify-self: end;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.35rem;
+  max-width: min(16rem, calc(100vw - 1.5rem));
+  pointer-events: none;
+}
+
+.app-gate__bugtest > * {
+  pointer-events: auto;
+}
+
+html.desktop-mac .app-gate__bugtest,
+html.desktop-win .app-gate__bugtest {
+  top: 28px;
+  right: 12px;
+}
+
+html.desktop-win .app-gate__bugtest {
+  top: 12px;
+}
+
+.app-gate__check-update {
+  margin: 0;
+  padding: 0.28rem 0.55rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 2px;
+  background: rgba(12, 12, 16, 0.72);
+  color: rgba(232, 232, 236, 0.92);
+  font-family: Consolas, "Courier New", Monaco, monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  line-height: 1.2;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.app-gate__check-update:hover:not(:disabled) {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.4);
+  background: rgba(20, 22, 28, 0.9);
+}
+
+.app-gate__check-update:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.app-gate__update-status {
+  margin: 0;
+  padding: 0.2rem 0.15rem 0;
+  color: rgba(200, 220, 210, 0.78);
+  font-family: Consolas, "Courier New", Monaco, monospace;
+  font-size: 0.58rem;
+  line-height: 1.35;
+  text-align: right;
+  white-space: pre-wrap;
+}
+
+.app-gate__update-status.is-error {
+  color: #ff9a9a;
+}
+
+.app-gate__update-status.is-ok {
+  color: #9ad4b0;
+}
+
+.app-gate__update-status.is-busy {
+  color: rgba(180, 200, 255, 0.85);
+}
+
+html.desktop-mac .bugtest-badge--gate {
+  top: auto;
+  right: auto;
+}
+
+.bugtest-badge--gate .bugtest-badge__title {
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.bugtest-badge--gate .bugtest-badge__build {
+  font-size: 0.9em;
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.bugtest-badge--gate.is-recording .bugtest-badge__title {
+  color: #ff8a8a;
+}
+
+.bugtest-badge--gate.is-save-as .bugtest-badge__title {
+  color: #9ad4ff;
+}
+
+body.is-app-gated {
+  overflow: hidden;
+}

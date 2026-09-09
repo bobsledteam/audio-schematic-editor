@@ -3,24 +3,24 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "============================================"
-echo " Guitar Wiring Visualiser - macOS Build"
+echo " Endo ASD — macOS bugtest package"
 echo "============================================"
 echo
 
-python3 -m pip install --upgrade pip pyinstaller
+python3 -m pip install --upgrade pip -r requirements-build.txt
 
 echo
-echo "[1/2] Building Guitar Wiring.app ..."
-python3 -m PyInstaller build/GuitarWiring-mac.spec --clean --noconfirm
+echo "[1/2] Building Endo ASD.app (PyInstaller) ..."
+python3 -m PyInstaller build/EndoASD-mac.spec --clean --noconfirm
 
-APP_PATH="dist/Guitar Wiring.app"
-DMG_PATH="dist/GuitarWiring.dmg"
+APP_PATH="dist/Endo ASD.app"
+DMG_PATH="dist/EndoASD-mac-Bugtest.dmg"
 
 echo
 echo "[2/2] Creating disk image ..."
 rm -f "$DMG_PATH"
 hdiutil create \
-  -volname "Guitar Wiring" \
+  -volname "Endo ASD" \
   -srcfolder "$APP_PATH" \
   -ov -format UDZO \
   "$DMG_PATH" >/dev/null
@@ -32,4 +32,6 @@ echo "   App:  $APP_PATH"
 echo "   DMG:  $DMG_PATH"
 echo "============================================"
 echo
-echo "Drag Guitar Wiring.app to Applications, or open the DMG to install."
+echo "Gate password: froge"
+echo "After pushing git, set gitUrl in update-channel.json for Check update."
+echo

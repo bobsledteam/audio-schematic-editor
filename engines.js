@@ -1,11 +1,13 @@
 /**
  * Calculation-layer registry (domain-agnostic).
  *
- * Three engines form one coherent stack:
+ * Three physics engines form one coherent stack (plus diagnostics):
  *
  *   materials ──μ, ρ, Br/Hc, eddy──► electromagnet ──derived Z/L──► circuit
  *       │                                    │
  *       └──────────ρ, eddy, σ────────────────┘
+ *
+ *   errorreporting → Bugtest capture / categorize / Cursor export (no dataset keys)
  *
  * Ownership rules:
  *   - circuit     → network values (impedance, inductance, …) + schematic analysis/render
@@ -24,7 +26,7 @@
 (function (global) {
   'use strict';
 
-  /** @typedef {'circuit' | 'electromagnet' | 'materials'} EngineId */
+  /** @typedef {'circuit' | 'electromagnet' | 'materials' | 'errorreporting'} EngineId */
 
   /**
    * Explicit cross-engine contracts. App bridges must honor these — do not
@@ -279,11 +281,32 @@
         'Intrinsic material database and object-type bindings. No geometry, no network Z/L. '
         + 'Electromagnet and circuit both consume this catalog via ENGINE_BRIDGES.',
     }),
+    errorreporting: Object.freeze({
+      id: 'errorreporting',
+      name: 'Error-reporting engine',
+      owns: Object.freeze([
+        'Bugtest capture (console.error / window.onerror / unhandledrejection)',
+        'dedupe + consolidate (≥5 → [×N] lines)',
+        'category buckets: calculation | render | electromagnetism | UI',
+        'Cursor-oriented .txt export via Bugtest badge click cycle',
+      ]),
+      consumes: Object.freeze([]),
+      provides: Object.freeze([
+        'ErrorReporting API',
+        'categorized bugtest reports',
+      ]),
+      datasetKeys: Object.freeze([]),
+      note:
+        'Diagnostics only — no geometry, materials, or network values. '
+        + 'Maps faults onto calculation / render / electromagnetism / UI for Cursor fixes. '
+        + 'Runtime lives in errorreporting.js (Bugtest Ver. + build badge).',
+    }),
   });
 
   const CIRCUIT = 'circuit';
   const ELECTROMAGNET = 'electromagnet';
   const MATERIALS = 'materials';
+  const ERRORREPORTING = 'errorreporting';
 
   function getEngine(id) {
     return ENGINES[id] || null;
@@ -475,6 +498,7 @@
     CIRCUIT,
     ELECTROMAGNET,
     MATERIALS,
+    ERRORREPORTING,
     getEngine,
     listEngines,
     listEngineBridges,

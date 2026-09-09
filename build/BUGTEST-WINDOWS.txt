@@ -1,0 +1,27 @@
+Endo Audio Schematic Editor — Windows bugtest package
+====================================================
+
+Password gate: froge
+
+Ways to run
+-----------
+1) Double-click EndoASD.exe (no Python needed) if present.
+2) Or double-click EndoASD.bat — requires Python 3 from https://python.org
+   (first run installs pywebview via pip).
+
+Check update
+------------
+On the gate screen, under the Bugtest build number, click "Check update".
+It compares your local build to the pushed git remote (update-channel.json).
+
+Before Check update can reach the remote, set "gitUrl" in update-channel.json
+to your HTTPS repo URL (GitHub works best), then push that file.
+
+Updates install into:
+  %LOCALAPPDATA%\EndoASD\app\
+Restart the app after a successful update.
+
+Send testers
+------------
+Prefer: EndoASD-Setup.exe  (Inno installer)
+Or zip: EndoASD-Windows-Bugtest.zip

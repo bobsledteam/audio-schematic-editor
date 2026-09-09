@@ -1,10 +1,15 @@
 (function () {
   'use strict';
 
+  // WebKit/pywebview: bare CalcEngines?.x throws "Can't find variable" in strict IIFEs.
+  // Always bind from window (property access), never as free identifiers.
+  const CalcEngines = window.CalcEngines || null;
+  const CalcMaterials = window.CalcMaterials || null;
+
   const SNAP_DELAY_MS = 2000;
   /** Pointer movement past this (px) after snap clears magnet immediately. */
   const SNAP_MOVE_CANCEL_PX = 3;
-  const ASSET_CONFIG_BTN_SIZE = 12.6;
+  const ASSET_CONFIG_BTN_SIZE = 26;
   /** Optical nudge matching .asset-config-btn transform. */
   const ASSET_CONFIG_BTN_NUDGE_X = -1;
   const LAYER_COUNT_MIN = 1;
@@ -66,9 +71,10 @@
 
   const canvas = document.getElementById('canvas');
   const workspace = document.getElementById('workspace');
-  const WIRE_COLORS = {
+  const WIRE_COLORS_DEFAULT = {
     white: '#ffffff',
-    black: '#111111',
+    // Lifted charcoal — still reads as black, visible on the dark canvas
+    black: '#3a3a42',
     yellow: '#ffd700',
     green: '#2ecc71',
     orange: '#ff8c00',
@@ -76,10 +82,44 @@
     blue: '#4aa3ff',
     copper: '#b87333',
   };
+  const WIRE_COLORS = { ...WIRE_COLORS_DEFAULT };
+  const WIRE_COLORS_COLORBLIND = {
+    deut: {
+      white: '#ffffff',
+      black: '#3a3a42',
+      yellow: '#F0E442',
+      green: '#009E73',
+      orange: '#E69F00',
+      red: '#D55E00',
+      blue: '#0072B2',
+      copper: '#CC79A7',
+    },
+    prot: {
+      white: '#ffffff',
+      black: '#3a3a42',
+      yellow: '#F0E442',
+      green: '#009E73',
+      orange: '#E69F00',
+      red: '#D55E00',
+      blue: '#0072B2',
+      copper: '#CC79A7',
+    },
+    trit: {
+      white: '#ffffff',
+      black: '#3a3a42',
+      yellow: '#FFEA00',
+      green: '#00A3A3',
+      orange: '#FF7A00',
+      red: '#E6007A',
+      blue: '#5B5BFF',
+      copper: '#C4A484',
+    },
+  };
 
   function syncWireBorderClasses(wire) {
     if (!wire?.group) return;
     wire.group.classList.toggle('wire-white', wire.color === 'white');
+    wire.group.classList.toggle('wire-black', wire.color === 'black');
   }
   const ACCENT_THEMES = [
     { name: 'red', color: '#e74c3c' },
@@ -93,6 +133,32 @@
   const statusText = document.getElementById('status-text');
   const snapInfo = document.getElementById('snap-info');
   const btnWire = document.getElementById('btn-wire');
+  const btnErase = document.getElementById('btn-erase');
+  const btnSettings = document.getElementById('btn-settings');
+  const appSettingsPanel = document.getElementById('app-settings-panel');
+  const appSettingsAccentSwatch = document.getElementById('app-settings-accent-swatch');
+  const appSettingsAccentName = document.getElementById('app-settings-accent-name');
+  const settingsColorblind = document.getElementById('settings-colorblind');
+  const settingsUiText = document.getElementById('settings-ui-text');
+  const settingsUiElement = document.getElementById('settings-ui-element');
+  const settingsUiTextVal = document.getElementById('settings-ui-text-val');
+  const settingsUiElementVal = document.getElementById('settings-ui-element-val');
+  const settingsHeaderDither = document.getElementById('settings-header-dither');
+  const settingsHeaderDitherState = document.getElementById('settings-header-dither-state');
+  const UI_PREFS_KEY = 'endo-asd-ui-prefs';
+  const UI_PREFS_KEY_LEGACY = 'gwv-ui-prefs';
+  let eraseMode = false;
+  let eraseStrokeActive = false;
+  let eraseStrokeDeleted = 0;
+  const eraseStrokeSeen = new Set();
+  let colorblindMode = 'off';
+  let uiTextScalePct = 100;
+  let uiElementScalePct = 100;
+  let headerDitherEnabled = false;
+  /** Schematic wire strokes: monochrome by default; colour toggle re-enables WIRE_COLORS. */
+  let schematicWireColourEnabled = false;
+  const HEADER_DITHER_LAYER_COUNT = 7;
+  const headerDitherLayerTimers = Array(HEADER_DITHER_LAYER_COUNT + 1).fill(0);
   const wireGaugeBar = document.getElementById('wire-gauge-bar');
   const wireGaugeDimensionalToggle = document.getElementById('wire-gauge-dimensional-toggle');
   const wireGaugePreviewToggle = document.getElementById('wire-gauge-preview-toggle');
@@ -109,6 +175,8 @@
   const wireGaugeOptions = document.querySelectorAll('.wire-gauge-option');
   const btnSolid = document.getElementById('btn-solid');
   const btnDashed = document.getElementById('btn-dashed');
+  const btnRouteFree = document.getElementById('btn-route-free');
+  const btnRouteManhattan = document.getElementById('btn-route-manhattan');
   const btnLayerVisibility = document.getElementById('btn-layer-visibility');
   const btnLayerFront = document.getElementById('btn-layer-front');
   const btnLayerBack = document.getElementById('btn-layer-back');
@@ -137,6 +205,8 @@
   let accentThemeIndex = 0;
   let wireMode = false;
   let wireStyle = 'solid';
+  /** 'free' = smooth bends · 'manhattan' = orthogonal + soft fillets */
+  let wireRouteMode = 'free';
   let wireColor = 'white';
   /** Default new-wire gauge (mm). 1 grid unit = 1 mm → stroke_px = mm × WORKSPACE_GRID. */
   const DEFAULT_WIRE_GAUGE_MM = 0.64;
@@ -206,6 +276,8 @@
   let wirePreviewLine = null;
   let marqueeStart = null;
   let marqueeActive = false;
+  let marqueeLastClient = null;
+  let marqueeFinishing = false;
   let suppressNextClick = false;
   const MARQUEE_MIN_PX = 4;
   const Q_HOLD_MS = 50;
@@ -393,11 +465,61 @@
   function applyViewport() {
     stabilizeWorkspaceScroll();
     workspace.style.transform = `translate(${panX}px, ${panY}px) scale(${viewportScale()})`;
+    updateGridScaleIndicator(zoom);
+    if (document.body.classList.contains('is-viewport-interacting')) {
+      scheduleViewportHeavyUpdate();
+      return;
+    }
+    flushViewportHeavyUpdate();
+  }
+
+  let viewportHeavyRaf = 0;
+  let viewportInteractTimer = 0;
+  let lastZoomStatusAt = 0;
+
+  function isViewportInteracting() {
+    return document.body.classList.contains('is-viewport-interacting');
+  }
+
+  /**
+   * Full post-pan/zoom pass. Wires live in world space under the CSS transform, so
+   * geometry is unchanged by zoom — this pass still refreshes attachments and
+   * selection chrome once interaction ends.
+   */
+  function flushViewportHeavyUpdate() {
+    if (viewportHeavyRaf) {
+      cancelAnimationFrame(viewportHeavyRaf);
+      viewportHeavyRaf = 0;
+    }
     updateAllWirePositions();
     updateAssetConfigChrome();
-    updateGridScaleIndicator(zoom);
     if (activeWorkspaceGroupId) refreshActiveWorkspaceGroupVisual();
     positionWorkspaceGroupHelpPopup();
+  }
+
+  /**
+   * While zooming/panning: only re-pin body-mounted floating UI to the scaled
+   * viewport. Never rebuild asset config / bobbin / formula hosts — that path
+   * runs circuit + electromagnet engines and was spamming Bugtest on every wheel tick.
+   */
+  function scheduleViewportHeavyUpdate() {
+    if (viewportHeavyRaf) return;
+    viewportHeavyRaf = requestAnimationFrame(() => {
+      viewportHeavyRaf = 0;
+      positionAssetConfigFloatingUi();
+      positionWorkspaceGroupHelpPopup();
+    });
+  }
+
+  /** Pause CSS workspace animations and coalesce heavy wire work while zooming/panning. */
+  function markViewportInteracting(ms = 140) {
+    document.body.classList.add('is-viewport-interacting');
+    if (viewportInteractTimer) clearTimeout(viewportInteractTimer);
+    viewportInteractTimer = window.setTimeout(() => {
+      viewportInteractTimer = 0;
+      document.body.classList.remove('is-viewport-interacting');
+      flushViewportHeavyUpdate();
+    }, ms);
   }
 
   /**
@@ -468,12 +590,17 @@
     panX = vx - worldX * nextS;
     panY = vy - worldY * nextS;
     zoom = clamped;
+    markViewportInteracting(160);
     applyViewport();
     // Re-project CAD cursor — screen position of the snap point changes with zoom/pan
     if (activeWorkspacePage === 'panel' && panelCursorGridSnap) {
       refreshPanelCadCursorAfterViewport(clientX, clientY);
     }
-    setStatus(`Zoom ${Math.round(zoom * 100)}%`);
+    const now = performance.now();
+    if (now - lastZoomStatusAt > 90) {
+      lastZoomStatusAt = now;
+      setStatus(`Zoom ${Math.round(zoom * 100)}%`);
+    }
   }
 
   function zoomAtSmooth(clientX, clientY, deltaY) {
@@ -565,6 +692,7 @@
     if (dx === 0 && dy === 0) return;
     panX += dx;
     panY += dy;
+    markViewportInteracting(120);
     applyViewport();
     if (activeWorkspacePage === 'panel' && panelCursorGridSnap) {
       refreshPanelCadCursorAfterViewport(clientX, clientY);
@@ -575,6 +703,8 @@
     if (!spacePanDragging) return;
     spacePanDragging = false;
     updateSpacePanBodyClass();
+    document.body.classList.remove('is-viewport-interacting');
+    flushViewportHeavyUpdate();
   }
 
   function canEngageSpacePan(e) {
@@ -645,95 +775,102 @@
   }
 
   function refreshLightningWireGlow() {
-    wires.forEach((wire) => {
-      wire.group?.classList.remove('lightning-glow');
-    });
-    if (!lightningMode) return;
-
-    const seedTerms = new Set();
-    components.forEach((comp) => {
-      if (comp.classList.contains('workspace-page-hidden')) return;
-      if (comp.classList.contains('is-subgroup-disabled')) return;
-      const template = GuitarAssets.getTemplate(comp.dataset.assetId);
-      if (!template) return;
-      const states = GuitarAssets.getEffectiveStates(comp);
-      const state = states[GuitarAssets.getComponentStateIndex(comp)];
-      if (!state?.terminalActive) return;
-      const terms = [...comp.querySelectorAll('.terminal')];
-      terms.forEach((term, idx) => {
-        if (!state.terminalActive[idx]) return;
-        if (!isLightningSignalInjector(term, comp)) return;
-        seedTerms.add(term);
+    withWireNets(() => {
+      wires.forEach((wire) => {
+        wire.group?.classList.remove('lightning-glow');
       });
-    });
-    if (!seedTerms.size) return;
+      if (!lightningMode) return;
 
-    const liveTerms = new Set();
-    buildWireNets().forEach((net) => {
-      let seeded = false;
-      for (const t of seedTerms) {
-        if (net.has(t)) {
-          seeded = true;
-          break;
+      const seedTerms = new Set();
+      components.forEach((comp) => {
+        if (comp.classList.contains('workspace-page-hidden')) return;
+        if (comp.classList.contains('is-subgroup-disabled')) return;
+        const template = GuitarAssets.getTemplate(comp.dataset.assetId);
+        if (!template) return;
+        const states = GuitarAssets.getEffectiveStates(comp);
+        const state = states[GuitarAssets.getComponentStateIndex(comp)];
+        if (!state?.terminalActive) return;
+        const terms = [...comp.querySelectorAll('.terminal')];
+        terms.forEach((term, idx) => {
+          if (!state.terminalActive[idx]) return;
+          if (!isLightningSignalInjector(term, comp)) return;
+          seedTerms.add(term);
+        });
+      });
+      if (!seedTerms.size) return;
+
+      const liveTerms = new Set();
+      buildWireNets().forEach((net) => {
+        let seeded = false;
+        for (const t of seedTerms) {
+          if (net.has(t)) {
+            seeded = true;
+            break;
+          }
         }
-      }
-      if (!seeded) return;
-      net.forEach((t) => liveTerms.add(t));
-    });
-    if (!liveTerms.size) return;
+        if (!seeded) return;
+        net.forEach((t) => liveTerms.add(t));
+      });
+      if (!liveTerms.size) return;
 
-    wires.forEach((wire) => {
-      if (!wire?.group) return;
-      if (wire.group.classList.contains('workspace-page-hidden')) return;
-      if (wire.group.classList.contains('is-subgroup-disabled')) return;
-      const a = wire.start?.terminal;
-      const b = wire.end?.terminal;
-      if (a && b && liveTerms.has(a) && liveTerms.has(b)) {
-        wire.group.classList.add('lightning-glow');
-      }
+      wires.forEach((wire) => {
+        if (!wire?.group) return;
+        if (wire.group.classList.contains('workspace-page-hidden')) return;
+        if (wire.group.classList.contains('is-subgroup-disabled')) return;
+        const a = wire.start?.terminal;
+        const b = wire.end?.terminal;
+        if (a && b && liveTerms.has(a) && liveTerms.has(b)) {
+          wire.group.classList.add('lightning-glow');
+        }
+      });
     });
   }
 
   function refreshGroundCheckAlert() {
-    components.forEach((comp) => {
-      comp.classList.remove('ungrounded-alert');
-    });
-    if (groundCheckMode && circuitHasGroundReference()) {
+    withWireNets(() => {
       components.forEach((comp) => {
-        if (!componentNeedsGrounding(comp)) return;
-        if (componentReachesCircuitGround(comp)) return;
-        comp.classList.add('ungrounded-alert');
+        comp.classList.remove('ungrounded-alert');
       });
-    }
-    notifyCircuitFaultWarningChanged();
-    refreshGroundNetChase();
+      if (groundCheckMode && circuitHasGroundReference()) {
+        components.forEach((comp) => {
+          if (comp.classList.contains('is-subgroup-disabled')) return;
+          if (!componentNeedsGrounding(comp)) return;
+          if (componentReachesCircuitGround(comp)) return;
+          comp.classList.add('ungrounded-alert');
+        });
+      }
+      notifyCircuitFaultWarningChanged();
+      refreshGroundNetChase();
+    });
   }
 
   /** Terminals + wires on nets that reach a circuit ground reference. */
   function collectGroundNetMembership() {
-    const groundSources = collectCircuitGroundTerminals();
-    const groundTerms = new Set();
-    if (!groundSources.size) return { groundSources, groundTerms, groundWires: [] };
-    buildWireNets().forEach((net) => {
-      let touches = false;
-      for (const g of groundSources) {
-        if (net.has(g)) {
-          touches = true;
-          break;
+    return withWireNets(() => {
+      const groundSources = collectCircuitGroundTerminals();
+      const groundTerms = new Set();
+      if (!groundSources.size) return { groundSources, groundTerms, groundWires: [] };
+      buildWireNets().forEach((net) => {
+        let touches = false;
+        for (const g of groundSources) {
+          if (net.has(g)) {
+            touches = true;
+            break;
+          }
         }
-      }
-      if (!touches) return;
-      net.forEach((t) => groundTerms.add(t));
+        if (!touches) return;
+        net.forEach((t) => groundTerms.add(t));
+      });
+      const groundWires = [];
+      wires.forEach((wire) => {
+        const a = wire.start?.terminal;
+        const b = wire.end?.terminal;
+        if ((a && groundTerms.has(a)) || (b && groundTerms.has(b))) {
+          groundWires.push(wire);
+        }
+      });
+      return { groundSources, groundTerms, groundWires };
     });
-    const groundWires = [];
-    wires.forEach((wire) => {
-      const a = wire.start?.terminal;
-      const b = wire.end?.terminal;
-      if ((a && groundTerms.has(a)) || (b && groundTerms.has(b))) {
-        groundWires.push(wire);
-      }
-    });
-    return { groundSources, groundTerms, groundWires };
   }
 
   /**
@@ -1364,49 +1501,52 @@
   }
 
   function collectMoodleIssues() {
-    const byComp = new Map();
-    const byWire = new Map();
+    return withWireNets(() => {
+      const byComp = new Map();
+      const byWire = new Map();
 
-    function addComp(comp, reason) {
-      if (!comp) return;
-      if (getComponentWorkspacePage(comp) !== 'electronics') return;
-      if (comp.classList.contains('workspace-page-hidden')) return;
-      if (!byComp.has(comp)) byComp.set(comp, new Set());
-      byComp.get(comp).add(reason);
-    }
-
-    function addWire(id, reason) {
-      if (id == null) return;
-      const wire = wires.get(id);
-      if (!wire || !isElectronicsWire(wire)) return;
-      if (!byWire.has(id)) byWire.set(id, new Set());
-      byWire.get(id).add(reason);
-    }
-
-    components.forEach((comp) => {
-      if (!componentNeedsGrounding(comp)) return;
-      // No jack/DC/chassis G on the board → grounding N/A (avoid false YESGROUND faults)
-      if (!circuitHasGroundReference()) return;
-      if (componentReachesCircuitGround(comp)) return;
-      addComp(comp, MOODLE_ISSUE.grounding);
-    });
-
-    analyzeShortCircuits().shorts.forEach((s) => {
-      s.terminals.forEach((t) => {
-        addComp(t.closest?.('.component'), MOODLE_ISSUE.short);
-        terminalWireMap.get(t)?.forEach((wid) => addWire(wid, MOODLE_ISSUE.short));
-      });
-    });
-
-    wires.forEach((wire) => {
-      if (!isElectronicsWire(wire)) return;
-      if (!isWireConnectedToTwoAssets(wire)) {
-        addWire(wire.id, MOODLE_ISSUE.disconnected);
+      function addComp(comp, reason) {
+        if (!comp) return;
+        if (getComponentWorkspacePage(comp) !== 'electronics') return;
+        if (comp.classList.contains('workspace-page-hidden')) return;
+        if (!byComp.has(comp)) byComp.set(comp, new Set());
+        byComp.get(comp).add(reason);
       }
-    });
 
-    moodleIssueCache = { byComp, byWire };
-    return moodleIssueCache;
+      function addWire(id, reason) {
+        if (id == null) return;
+        const wire = wires.get(id);
+        if (!wire || !isElectronicsWire(wire)) return;
+        if (!byWire.has(id)) byWire.set(id, new Set());
+        byWire.get(id).add(reason);
+      }
+
+      components.forEach((comp) => {
+        if (comp.classList.contains('is-subgroup-disabled')) return;
+        if (!componentNeedsGrounding(comp)) return;
+        // No jack/DC/chassis G on the board → grounding N/A (avoid false YESGROUND faults)
+        if (!circuitHasGroundReference()) return;
+        if (componentReachesCircuitGround(comp)) return;
+        addComp(comp, MOODLE_ISSUE.grounding);
+      });
+
+      analyzeShortCircuits().shorts.forEach((s) => {
+        s.terminals.forEach((t) => {
+          addComp(t.closest?.('.component'), MOODLE_ISSUE.short);
+          terminalWireMap.get(t)?.forEach((wid) => addWire(wid, MOODLE_ISSUE.short));
+        });
+      });
+
+      wires.forEach((wire) => {
+        if (!isElectronicsWire(wire)) return;
+        if (!isWireConnectedToTwoAssets(wire)) {
+          addWire(wire.id, MOODLE_ISSUE.disconnected);
+        }
+      });
+
+      moodleIssueCache = { byComp, byWire };
+      return moodleIssueCache;
+    });
   }
 
   function countMoodleWarningIssues(cache) {
@@ -1741,8 +1881,21 @@
   }
 
   /**
+   * HB / 4-conductor loom tips reuse H/R/S labels but are coil leads, not TRS.
+   * Coil-split (series link / red tip to ground) is normal NA practice — not a jack fault.
+   */
+  function isHbCoilFaultTip(term) {
+    if (!term) return false;
+    if (term.classList?.contains('hb-tip')) return true;
+    const host = term.closest?.('.component');
+    return !!(host && isDualCoilComponent(host) && isPickupComponent(host));
+  }
+
+  /**
    * Role used for hard-short analysis (signal vs power vs heater).
    * Returns null for terminals that should not seed fault rules.
+   * Output-jack tip/ring/sleeve map to H/R/G buckets; HB coil tips use COIL_*
+   * ids that tip–ring short rules ignore.
    */
   function getFaultAnalysisRole(term) {
     const role = getTerminalRole(term);
@@ -1751,14 +1904,42 @@
     if (role === 'CT' && isHeaterFilamentTerminal(term)) return 'HEAT';
     if (isDcPowerPositiveRole(role)) return 'SUP+';
     if (role === 'P-' || role === 'V-') return 'SUP-';
+    // Humbucker / 4c coil leads — do not collide with TRS ring/tip short buckets
+    if (isHbCoilFaultTip(term)) {
+      if (role === 'H') return 'COIL_H';
+      if (role === 'N') return 'COIL_N';
+      if (role === 'R') return 'COIL_R';
+      if (role === 'S') return 'COIL_S';
+      if (role === 'G') return 'G';
+    }
     if (role === 'G') return 'G';
+    // Jack (and other non-HB) tip / ring / sleeve → fault buckets H / R / G
     if (role === 'H' || role === 'R' || role === 'S') return role;
     if (role === 'A' || role === 'K') return role;
     return role;
   }
 
   /** Build nets from wires + switch hard bridges in the current state. */
+  let wireNetsCache = null;
+  let wireNetsPassDepth = 0;
+
+  /**
+   * Run `fn` with a single shared `buildWireNets()` graph for the whole pass
+   * (Moodle / ground / short / lightning refresh). Nested calls reuse the cache.
+   */
+  function withWireNets(fn) {
+    wireNetsPassDepth += 1;
+    if (wireNetsPassDepth === 1) wireNetsCache = null;
+    try {
+      return fn();
+    } finally {
+      wireNetsPassDepth -= 1;
+      if (wireNetsPassDepth === 0) wireNetsCache = null;
+    }
+  }
+
   function buildWireNets() {
+    if (wireNetsCache) return wireNetsCache;
     const parent = new Map();
 
     function find(t) {
@@ -1781,19 +1962,36 @@
       if (ra !== rb) parent.set(ra, rb);
     }
 
+    function termActive(term) {
+      const host = term?.closest?.('.component');
+      return !!(host && !host.classList.contains('is-subgroup-disabled'));
+    }
+
     wires.forEach((wire) => {
+      // Disabled subgroups stay on the board for edits but do not join circuit nets /
+      // CalcEngines analysis / Moodle (org-only until re-enabled).
+      if (wire.group?.classList.contains('is-subgroup-disabled')) return;
+      if (wire.group?.classList.contains('workspace-page-hidden')) return;
       union(wire.start.terminal, wire.end.terminal);
     });
 
     // Capacitor lead tips docked onto other terminals
-    eachCapTipAttachmentPair(union);
+    eachCapTipAttachmentPair((a, b) => {
+      if (termActive(a) && termActive(b)) union(a, b);
+    });
     // Dual-coil fan tips docked onto other terminals
-    eachHbTipAttachmentPair(union);
+    eachHbTipAttachmentPair((a, b) => {
+      if (termActive(a) && termActive(b)) union(a, b);
+    });
     // Custom-asset wire tips docked onto other terminals
-    eachAssetWireTipAttachmentPair(union);
+    eachAssetWireTipAttachmentPair((a, b) => {
+      if (termActive(a) && termActive(b)) union(a, b);
+    });
 
     // Switch (and any future) hard bridges for the active state
     components.forEach((comp) => {
+      if (comp.classList.contains('is-subgroup-disabled')) return;
+      if (comp.classList.contains('workspace-page-hidden')) return;
       const template = GuitarAssets.getTemplate(comp.dataset.assetId);
       if (!template) return;
       const states = GuitarAssets.getEffectiveStates(comp);
@@ -1808,6 +2006,27 @@
       });
     });
 
+    // NA pot lug1↔case solder bond (same gate as DC conductive map / dashed schematic link)
+    components.forEach((comp) => {
+      if (comp.classList.contains('is-subgroup-disabled')) return;
+      if (!isPotentiometerComponent(comp)) return;
+      const track = getPotentiometerTrackTerms(comp);
+      if (track?.lug1 && track?.caseG && computePotBondCaseToLug1(comp)) {
+        union(track.lug1, track.caseG);
+      }
+    });
+
+    // HB / 4-conductor stock series: N↔R series link + S↔G (south start + shield).
+    // Coil windings themselves stay out of hard nets (avoid false tip–sleeve shorts).
+    components.forEach((comp) => {
+      if (comp.classList.contains('is-subgroup-disabled')) return;
+      if (!isDualCoilComponent(comp)) return;
+      if (!usesHbStockSeriesWiring(comp)) return;
+      const tips = getHbCoilTipTerms(comp);
+      if (tips?.n && tips?.r) union(tips.n, tips.r);
+      if (tips?.s && tips?.g) union(tips.s, tips.g);
+    });
+
     const nets = new Map();
     parent.forEach((_, term) => {
       const root = find(term);
@@ -1815,107 +2034,101 @@
       nets.get(root).add(term);
     });
     components.forEach((comp) => {
+      if (comp.classList.contains('is-subgroup-disabled')) return;
       comp.querySelectorAll('.terminal').forEach((term) => {
         if (!parent.has(term)) {
           nets.set(term, new Set([term]));
         }
       });
     });
-    return [...nets.values()];
+    const result = [...nets.values()];
+    if (wireNetsPassDepth > 0) wireNetsCache = result;
+    return result;
   }
 
   /**
    * Hard-short check on the wire / bridge graph (passives are not bridges).
-   * - Signal: H↔G, R↔G, H↔R (heater filament H excluded)
+   * - Signal H↔G / R↔G / H↔R: only when output-jack tip/ring/sleeve roles are on
+   *   the net (HB coil R/S/H are COIL_* and ignored — series-link / coil-split to
+   *   ground is normal NA practice, not a TRS fault)
    * - Supply: SUP+↔SUP−, SUP+↔G (SUP−↔G is a normal return)
    * - Device: LED/diode A↔K wired around the part
    * Ground↔ground ties are never flagged.
    */
   function analyzeShortCircuits() {
-    const shorts = [];
-    const seenReasons = new Set();
+    return withWireNets(() => {
+      const shorts = [];
+      const seenReasons = new Set();
 
-    function flagNet(netTerms, reason) {
-      // De-dupe identical reason+net fingerprints
-      const key = `${reason}|${[...netTerms].map((t) => t.dataset?.id || t.id || '').sort().join(',')}`;
-      if (seenReasons.has(key)) return;
-      seenReasons.add(key);
-      shorts.push({ reason, terminals: [...netTerms] });
-    }
-
-    function netHasOutputJackPair(net, roleA, roleB) {
-      let hit = false;
-      components.forEach((comp) => {
-        if (!isOutputJackComponent(comp)) return;
-        const terms = [...comp.querySelectorAll('.terminal')];
-        const a = terms.find((t) => getTerminalRole(t) === roleA);
-        const b = terms.find((t) => getTerminalRole(t) === roleB);
-        if (a && b && net.has(a) && net.has(b)) hit = true;
-      });
-      return hit;
-    }
-
-    buildWireNets().forEach((net) => {
-      if (net.size < 2) return;
-      const buckets = {
-        H: [], R: [], G: [], 'SUP+': [], 'SUP-': [], HEAT: [], A: [], K: [],
-      };
-      net.forEach((term) => {
-        const role = getFaultAnalysisRole(term);
-        if (role && buckets[role]) buckets[role].push(term);
-      });
-
-      if (buckets.H.length && buckets.G.length) {
-        flagNet(
-          net,
-          netHasOutputJackPair(net, 'H', 'G')
-            ? 'Output tip–sleeve short (H↔G)'
-            : 'Signal short to ground (H↔G)'
-        );
+      function flagNet(netTerms, reason) {
+        // De-dupe identical reason+net fingerprints
+        const key = `${reason}|${[...netTerms].map((t) => t.dataset?.id || t.id || '').sort().join(',')}`;
+        if (seenReasons.has(key)) return;
+        seenReasons.add(key);
+        shorts.push({ reason, terminals: [...netTerms] });
       }
 
-      if (buckets.R.length && buckets.G.length) {
-        flagNet(
-          net,
-          netHasOutputJackPair(net, 'R', 'G')
-            ? 'Output ring–sleeve short (R↔G)'
-            : 'Ring short to ground (R↔G)'
-        );
+      /** True when this net joins both named pins on some output jack. */
+      function netHasOutputJackPair(net, roleA, roleB) {
+        let hit = false;
+        components.forEach((comp) => {
+          if (!isOutputJackComponent(comp)) return;
+          const terms = [...comp.querySelectorAll('.terminal')];
+          const a = terms.find((t) => getTerminalRole(t) === roleA);
+          const b = terms.find((t) => getTerminalRole(t) === roleB);
+          if (a && b && net.has(a) && net.has(b)) hit = true;
+        });
+        return hit;
       }
 
-      if (buckets.H.length && buckets.R.length) {
-        flagNet(
-          net,
-          netHasOutputJackPair(net, 'H', 'R')
-            ? 'Output tip–ring short (H↔R)'
-            : 'Tip–ring short (H↔R)'
-        );
-      }
+      buildWireNets().forEach((net) => {
+        if (net.size < 2) return;
+        const buckets = {
+          H: [], R: [], G: [], 'SUP+': [], 'SUP-': [], HEAT: [], A: [], K: [],
+        };
+        net.forEach((term) => {
+          const role = getFaultAnalysisRole(term);
+          if (role && buckets[role]) buckets[role].push(term);
+        });
 
-      if (buckets['SUP+'].length && buckets['SUP-'].length) {
-        flagNet(net, 'Supply short (+ ↔ −)');
-      }
-      if (buckets['SUP+'].length && buckets.G.length) {
-        flagNet(net, 'Supply + shorted to ground');
-      }
-      // SUP−↔G intentionally ignored — normal battery / rail return
-      // HEAT↔G ignored — heater CT to chassis is normal
-
-      // Hard short across a diode / LED (leads on the same net)
-      components.forEach((comp) => {
-        if (!isLedIndicatorComponent(comp) && !isDiodeComponent(comp)) return;
-        const polar = getDiodePolarityPair(comp);
-        if (!polar) return;
-        if (net.has(polar.anode) && net.has(polar.cathode)) {
-          flagNet(
-            net,
-            isLedIndicatorComponent(comp) ? 'LED short (A↔K)' : 'Diode short (A↔K)'
-          );
+        // H↔G / R↔G / H↔R only when jack tip/ring/sleeve roles are present on the net
+        if (buckets.H.length && buckets.G.length && netHasOutputJackPair(net, 'H', 'G')) {
+          flagNet(net, 'Output tip–sleeve short (H↔G)');
         }
-      });
-    });
 
-    return { shorts };
+        if (buckets.R.length && buckets.G.length && netHasOutputJackPair(net, 'R', 'G')) {
+          flagNet(net, 'Output ring–sleeve short (R↔G)');
+        }
+
+        if (buckets.H.length && buckets.R.length && netHasOutputJackPair(net, 'H', 'R')) {
+          flagNet(net, 'Output tip–ring short (H↔R)');
+        }
+
+        if (buckets['SUP+'].length && buckets['SUP-'].length) {
+          flagNet(net, 'Supply short (+ ↔ −)');
+        }
+        if (buckets['SUP+'].length && buckets.G.length) {
+          flagNet(net, 'Supply + shorted to ground');
+        }
+        // SUP−↔G intentionally ignored — normal battery / rail return
+        // HEAT↔G ignored — heater CT to chassis is normal
+
+        // Hard short across a diode / LED (leads on the same net)
+        components.forEach((comp) => {
+          if (!isLedIndicatorComponent(comp) && !isDiodeComponent(comp)) return;
+          const polar = getDiodePolarityPair(comp);
+          if (!polar) return;
+          if (net.has(polar.anode) && net.has(polar.cathode)) {
+            flagNet(
+              net,
+              isLedIndicatorComponent(comp) ? 'LED short (A↔K)' : 'Diode short (A↔K)'
+            );
+          }
+        });
+      });
+
+      return { shorts };
+    });
   }
 
   /**
@@ -1936,14 +2149,29 @@
       neighbors.get(b).push(a);
     }
 
+    function termActive(term) {
+      const host = term?.closest?.('.component');
+      return !!(host && !host.classList.contains('is-subgroup-disabled'));
+    }
+
     wires.forEach((wire) => {
+      if (wire.group?.classList.contains('is-subgroup-disabled')) return;
+      if (wire.group?.classList.contains('workspace-page-hidden')) return;
       link(wire.start.terminal, wire.end.terminal);
     });
-    eachCapTipAttachmentPair(link);
-    eachHbTipAttachmentPair(link);
-    eachAssetWireTipAttachmentPair(link);
+    eachCapTipAttachmentPair((a, b) => {
+      if (termActive(a) && termActive(b)) link(a, b);
+    });
+    eachHbTipAttachmentPair((a, b) => {
+      if (termActive(a) && termActive(b)) link(a, b);
+    });
+    eachAssetWireTipAttachmentPair((a, b) => {
+      if (termActive(a) && termActive(b)) link(a, b);
+    });
 
     components.forEach((comp) => {
+      if (comp.classList.contains('is-subgroup-disabled')) return;
+      if (comp.classList.contains('workspace-page-hidden')) return;
       const template = GuitarAssets.getTemplate(comp.dataset.assetId);
       if (!template) return;
       const terms = [...comp.querySelectorAll('.terminal')];
@@ -1970,6 +2198,18 @@
         // NA solder bond lug 1 ↔ case when schematic criteria hold
         if (track?.lug1 && track?.caseG && computePotBondCaseToLug1(comp)) {
           link(track.lug1, track.caseG);
+        }
+        return;
+      }
+      // Humbucker / 4-conductor: each coil is a continuous winding (H↔N, R↔S).
+      // Stock series also bonds N↔R and S↔G like factory NA 4-conductor wiring.
+      if (isDualCoilComponent(comp)) {
+        const tips = getHbCoilTipTerms(comp);
+        if (tips?.h && tips?.n) link(tips.h, tips.n);
+        if (tips?.r && tips?.s) link(tips.r, tips.s);
+        if (usesHbStockSeriesWiring(comp)) {
+          if (tips?.n && tips?.r) link(tips.n, tips.r);
+          if (tips?.s && tips?.g) link(tips.s, tips.g);
         }
       }
     });
@@ -2231,13 +2471,16 @@
   function toggleGroundCheckMode() {
     groundCheckMode = !groundCheckMode;
     document.body.classList.toggle('ground-check-on', groundCheckMode);
-    refreshGroundCheckAlert();
-    const hasRef = circuitHasGroundReference();
-    const ungrounded = groundCheckMode && hasRef
-      ? [...components.values()].filter(
-          (comp) => componentNeedsGrounding(comp) && !componentReachesCircuitGround(comp)
-        )
-      : [];
+    const { hasRef, ungrounded } = withWireNets(() => {
+      refreshGroundCheckAlert();
+      const ref = circuitHasGroundReference();
+      const missing = groundCheckMode && ref
+        ? [...components.values()].filter(
+            (comp) => componentNeedsGrounding(comp) && !componentReachesCircuitGround(comp)
+          )
+        : [];
+      return { hasRef: ref, ungrounded: missing };
+    });
     if (!groundCheckMode) {
       setStatus('Ungrounded asset highlight off');
     } else if (!hasRef) {
@@ -2346,9 +2589,36 @@
     setWireEditFocusMode(!wireEditFocusMode);
   }
 
+  function isElementInteractivelyVisible(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.closest?.('[hidden], .hidden')) return false;
+    try {
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+    } catch (_) { /* ignore */ }
+    return true;
+  }
+
+  /** True when focus is in a visible field — ignore inputs trapped in closed panels. */
   function isTypingTarget() {
-    const tag = document.activeElement?.tagName;
-    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    const el = document.activeElement;
+    if (!el) return false;
+    const tag = el.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+      return isElementInteractivelyVisible(el);
+    }
+    if (el.isContentEditable) return isElementInteractivelyVisible(el);
+    return false;
+  }
+
+  /** Q/E state cycle — allowed from canvas or asset chrome (not free text fields). */
+  function canUseAssetStateHotkeys() {
+    if (textCommandOpen || isEditorOpen()) return false;
+    const el = document.activeElement;
+    if (el?.closest?.('#asset-config-menu, #asset-state-chrome, #asset-state-term-menu, #asset-config-btn')) {
+      return true;
+    }
+    return !isTypingTarget();
   }
 
   /** Registry of Enter-box text commands (extend here). */
@@ -2382,7 +2652,7 @@
       name: 'Group',
       short: 'GROUP',
       aliases: ['GROUP', 'GRP', 'G'],
-      description: 'Group selected assets and wires (or whole groups)',
+      description: 'Group selection (⌘/Ctrl+G)',
       run: () => createWorkspaceGroupFromSelection(),
     },
     {
@@ -2390,7 +2660,7 @@
       name: 'Ungroup',
       short: 'UNGROUP',
       aliases: ['UNGROUP', 'UNGRP', 'UG'],
-      description: 'Dissolve the selected workspace group(s); other groups stay',
+      description: 'Ungroup selection (⌘/Ctrl+Shift+G)',
       run: () => ungroupWorkspaceSelection(),
     },
     {
@@ -2447,6 +2717,8 @@
     '<path d="M8.2 14.8l-4.6 4.6c-.4.4-.4 1 0 1.4l.8.8c.4.4 1 .4 1.4 0l4.6-4.6-2.2-2.2z" fill="currentColor"/>' +
     '</svg>';
   const DEFAULT_CIRCUIT_NAME = 'Untitled circuit';
+  const REMAKE_WORKPLACE_LABEL = 'Remake';
+  let pendingRemakeWorkplaceConfirm = null;
 
   const NOTE_SVG = {
     chevron:
@@ -2525,6 +2797,34 @@
     btn.classList.toggle('is-active', hasPins);
     btn.setAttribute('aria-pressed', hasPins ? 'true' : 'false');
     btn.title = hasPins ? 'Pin another circuit to workspace' : 'Pin circuit to workspace';
+  }
+
+  function syncSchematicColourButtonState() {
+    const btn = document.getElementById('schematic-peek-colour');
+    if (!btn) return;
+    btn.classList.toggle('is-active', schematicWireColourEnabled);
+    btn.setAttribute('aria-pressed', schematicWireColourEnabled ? 'true' : 'false');
+    btn.title = schematicWireColourEnabled ? 'Use monochrome wires' : 'Show coloured wires';
+    btn.setAttribute(
+      'aria-label',
+      schematicWireColourEnabled ? 'Use monochrome wires' : 'Show coloured wires'
+    );
+  }
+
+  function setSchematicWireColourEnabled(enabled) {
+    schematicWireColourEnabled = !!enabled;
+    syncSchematicColourButtonState();
+    saveUiPrefs();
+    refreshSchematicPeek();
+    schematicPinWindows.forEach((pin) => {
+      refreshSchematicInto({
+        svg: pin.svg,
+        empty: pin.empty,
+        stats: null,
+        pin,
+      });
+      pin.snapshot = captureSchematicPinSnapshot(pin);
+    });
   }
 
   function clearAllSchematicPinWindows() {
@@ -2638,10 +2938,64 @@
 
   function syncSchematicPinCircuitName(pin) {
     if (!pin?.circuitNameEl) return;
-    const group = pin.sourceGroupId ? getWorkspaceGroup(pin.sourceGroupId) : null;
-    pin.circuitNameEl.textContent = group?.name
-      || String(pin.circuitName || '').trim()
-      || DEFAULT_CIRCUIT_NAME;
+    const islands = collectSchematicCircuitIslands({
+      groupId: pin.sourceGroupId || null,
+    }).islands;
+    const circuitIndex = clampSchematicCircuitIndex(pin.circuitIndex ?? 0, islands.length);
+    const island = islands[circuitIndex] || (islands.length === 1 ? islands[0] : null);
+    const group = pin.sourceGroupId
+      ? getWorkspaceGroup(pin.sourceGroupId)
+      : findWorkspaceGroupForCircuitIsland(island?.idSet);
+    pin.circuitNameEl.textContent = formatSchematicCircuitTitle({
+      circuitIndex,
+      islandCount: islands.length,
+      group,
+      hasCircuit: islands.length > 0,
+    });
+  }
+
+  /** Shared group for every component in a circuit island, if any. */
+  function findWorkspaceGroupForCircuitIsland(idSet) {
+    if (!idSet || idSet.size === 0) return null;
+    let groupId = null;
+    for (const id of idSet) {
+      const el = components.get(id);
+      const gid = getComponentGroupId(el);
+      if (!gid) return null;
+      if (groupId == null) groupId = gid;
+      else if (groupId !== gid) return null;
+    }
+    return getWorkspaceGroup(groupId);
+  }
+
+  function formatSchematicCircuitTitle({ circuitIndex = 0, islandCount = 0, group = null, hasCircuit = false } = {}) {
+    if (!hasCircuit && islandCount < 1) return DEFAULT_CIRCUIT_NAME;
+    const n = Math.max(1, (Number(circuitIndex) || 0) + 1);
+    const base = `Circuit ${n}`;
+    const name = String(group?.name || '').trim();
+    return name ? `${base} (${name})` : base;
+  }
+
+  function syncSchematicPeekCircuitName(opts = {}) {
+    const el = document.getElementById('schematic-peek-circuit-name');
+    if (!el) return;
+    const islands = opts.islands || collectSchematicCircuitIslands({
+      groupId: opts.groupId || null,
+    }).islands;
+    const circuitIndex = clampSchematicCircuitIndex(
+      opts.circuitIndex ?? schematicPeekCircuitIndex,
+      islands.length,
+    );
+    const island = islands[circuitIndex] || (islands.length === 1 ? islands[0] : null);
+    const group = opts.groupId
+      ? getWorkspaceGroup(opts.groupId)
+      : findWorkspaceGroupForCircuitIsland(island?.idSet);
+    el.textContent = formatSchematicCircuitTitle({
+      circuitIndex,
+      islandCount: islands.length,
+      group,
+      hasCircuit: islands.length > 0,
+    });
   }
 
   function setSchematicPinBuildListOpen(pin, open) {
@@ -3725,6 +4079,13 @@
     sourceMenu.setAttribute('role', 'listbox');
     sourceMenu.setAttribute('hidden', '');
 
+    const remakeBtn = document.createElement('button');
+    remakeBtn.type = 'button';
+    remakeBtn.className = 'schematic-pin-remake schematic-remake-btn';
+    remakeBtn.textContent = REMAKE_WORKPLACE_LABEL;
+    remakeBtn.title = 'Remake workplace circuit to match this schematic';
+    remakeBtn.setAttribute('aria-label', 'Remake workplace circuit');
+
     const refreshBtn = document.createElement('button');
     refreshBtn.type = 'button';
     refreshBtn.className = 'schematic-pin-refresh';
@@ -3741,6 +4102,7 @@
 
     bar.appendChild(title);
     bar.appendChild(sourceBtn);
+    bar.appendChild(remakeBtn);
     bar.appendChild(refreshBtn);
     bar.appendChild(closeBtn);
     panel.appendChild(bar);
@@ -3984,6 +4346,12 @@
       e.stopPropagation();
       setSchematicPinBuildListOpen(pin, false);
       markProjectDirty();
+    });
+
+    remakeBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openRemakeWorkplaceConfirm(() => remakeWorkplaceCircuitFromPin(pin));
     });
 
     refreshBtn.addEventListener('click', (e) => {
@@ -4704,6 +5072,9 @@
   function applyWorkspaceGroupTabTheme(btn, colorId, isActive) {
     if (!btn) return;
     const pal = getWorkspaceGroupPalette(colorId);
+    const host = btn.closest?.('.group-layer-tab-shell') || btn;
+    host.style.setProperty('--wg-tab-border', pal.border);
+    host.style.setProperty('--wg-tab-accent', pal.hex);
     btn.style.setProperty('--wg-tab-border', pal.border);
     btn.style.setProperty('--wg-tab-accent', pal.hex);
     btn.style.borderColor = pal.border;
@@ -5387,6 +5758,8 @@
       const letter = workspaceGroupSubgroupLetter(i);
       const sub = getSubgroupMeta(group, i);
       const enabled = sub?.enabled !== false;
+      const shell = document.createElement('span');
+      shell.className = 'group-layer-tab-shell';
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'group-layer-tab';
@@ -5411,7 +5784,8 @@
         e.stopPropagation();
         toggleWorkspaceGroupSubgroupEnabled(i);
       });
-      buttonsEl.appendChild(btn);
+      shell.appendChild(btn);
+      buttonsEl.appendChild(shell);
     });
   }
 
@@ -7644,6 +8018,23 @@
     return changed;
   }
 
+  function tryCycleSelectedAssetState(direction) {
+    if (!canUseAssetStateHotkeys()) return false;
+    if (selectedComponents.size === 0) return false;
+    // Leave focused selects/inputs in the cog so Q/E isn't swallowed as typing.
+    const active = document.activeElement;
+    if (active?.closest?.('#asset-config-menu, #asset-state-chrome, #asset-state-term-menu')) {
+      active.blur?.();
+    }
+    if (cycleSelectedComponentState(direction)) return true;
+    const multi = [...selectedComponents].some((c) => GuitarAssets.hasAssetStates?.(c)
+      || (GuitarAssets.getEffectiveStates(c)?.length || 0) > 1);
+    if (!multi) {
+      setStatus('Only one state — add more with + beside the state numbers');
+    }
+    return false;
+  }
+
   function getWorkspaceGrid() {
     return activeWorkspacePage === 'panel' ? PANEL_GRID_PX : WORKSPACE_GRID;
   }
@@ -7991,9 +8382,10 @@
     if (!wire) return 0;
     const startPt = { x: wire.start.x, y: wire.start.y };
     const endPt = { x: wire.end.x, y: wire.end.y };
-    const pts = getWireRoutePoints(wire, startPt, endPt);
+    let pts = getWireRoutePoints(wire, startPt, endPt);
+    if (isManhattanWire(wire)) pts = expandPointsToOrtho(pts);
     const hasAnchors = (wire.anchors || []).length > 0;
-    const slack = hasAnchors ? 0 : (wire.slack || 0);
+    const slack = hasAnchors || isManhattanWire(wire) ? 0 : (wire.slack || 0);
     const samples = flattenWireRoute(pts, slack, hasAnchors ? 4 : 8);
     if (samples.length < 2) {
       return Math.hypot(endPt.x - startPt.x, endPt.y - startPt.y);
@@ -8997,11 +9389,37 @@
       // Drawn wire: move only the bend for the clicked section (keep other mid points)
       const free = ev.shiftKey;
       const world = clientToWorld(ev.clientX, ev.clientY);
-      const x = snapWorkspace(world.x, free);
-      const y = snapWorkspace(world.y, free);
-      const idx = ensureSectionBendTarget(x, y);
+      const idx = ensureSectionBendTarget(
+        snapWorkspace(world.x, free),
+        snapWorkspace(world.y, free),
+      );
       if (!Array.isArray(wire.anchors)) wire.anchors = [];
-      wire.anchors[idx] = { x, y };
+      let x;
+      let y;
+      if (isManhattanWire(wire)) {
+        const startPt = getAttachPoint(wire, 'start');
+        const prev = idx === 0 ? startPt : wire.anchors[idx - 1];
+        const snapped = manhattanAxisSnap(prev, world.x, world.y, free);
+        wire.anchors[idx] = snapped;
+        x = snapped.x;
+        y = snapped.y;
+        // Keep the next hop orthogonal by sliding the following corner (not the end terminal).
+        if (idx < wire.anchors.length - 1) {
+          const next = wire.anchors[idx + 1];
+          const dx = Math.abs(next.x - snapped.x);
+          const dy = Math.abs(next.y - snapped.y);
+          if (dx > 1.5 && dy > 1.5) {
+            const fromPrevH = Math.abs(snapped.y - prev.y) < 1.5;
+            wire.anchors[idx + 1] = fromPrevH
+              ? { x: snapped.x, y: next.y }
+              : { x: next.x, y: snapped.y };
+          }
+        }
+      } else {
+        x = snapWorkspace(world.x, free);
+        y = snapWorkspace(world.y, free);
+        wire.anchors[idx] = { x, y };
+      }
       wire.slack = 0;
       updateWirePosition(wire);
       const n = wire.anchors.length;
@@ -9014,7 +9432,16 @@
     function onUp() {
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
-      if (dragging) markProjectDirty();
+      if (dragging) {
+        if (isManhattanWire(wire) && !hbComp) {
+          const startPt = getAttachPoint(wire, 'start');
+          const endPt = getAttachPoint(wire, 'end');
+          wire.anchors = normalizeManhattanAnchors(startPt, endPt, wire.anchors || []);
+          wire.slack = 0;
+          updateWirePosition(wire);
+        }
+        markProjectDirty();
+      }
     }
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
@@ -9984,10 +10411,12 @@
       const isElectronicsAsset = page === 'electronics';
       el.classList.remove('workspace-page-hidden', 'workspace-page-underlay');
 
+      // Keep both pages' objects in the same world positions:
+      // active page is interactive; the other page is a dimmed underlay.
       if (onElectronics) {
         if (!isElectronicsAsset) el.classList.add('workspace-page-underlay');
       } else if (isElectronicsAsset) {
-        el.classList.add('workspace-page-hidden');
+        el.classList.add('workspace-page-underlay');
       }
 
       const interactive = onElectronics ? isElectronicsAsset : !isElectronicsAsset;
@@ -10009,6 +10438,8 @@
           wire.group.classList.add('workspace-page-hidden');
         }
       } else if (onElectronicsWire && !onPanelWire) {
+        wire.group.classList.add('workspace-page-underlay');
+      } else if (!onElectronicsWire && !onPanelWire) {
         wire.group.classList.add('workspace-page-hidden');
       }
 
@@ -10065,14 +10496,184 @@
     const theme = ACCENT_THEMES[accentThemeIndex];
     document.documentElement.style.setProperty('--accent', theme.color);
     document.documentElement.style.setProperty('--selected', theme.color);
-    btnAccentCycle.style.background = theme.color;
-    btnAccentCycle.dataset.accent = theme.name;
-    btnAccentCycle.title = `Accent: ${theme.name} (click to cycle)`;
+    if (btnAccentCycle) {
+      btnAccentCycle.dataset.accent = theme.name;
+      btnAccentCycle.title = `Accent: ${theme.name} (click to cycle)`;
+    }
+    if (appSettingsAccentSwatch) appSettingsAccentSwatch.style.background = theme.color;
+    if (appSettingsAccentName) {
+      appSettingsAccentName.textContent = theme.name.charAt(0).toUpperCase() + theme.name.slice(1);
+    }
   }
 
   function cycleAccentTheme() {
     applyAccentTheme(accentThemeIndex + 1);
     setStatus(`Accent colour: ${ACCENT_THEMES[accentThemeIndex].name}`);
+    saveUiPrefs();
+  }
+
+  function positionSettingsPanel() {
+    if (!appSettingsPanel || !btnSettings) return;
+    if (appSettingsPanel.classList.contains('hidden')) return;
+    const r = btnSettings.getBoundingClientRect();
+    appSettingsPanel.style.position = 'fixed';
+    appSettingsPanel.style.top = `${Math.round(r.bottom + 6)}px`;
+    appSettingsPanel.style.right = `${Math.max(8, Math.round(window.innerWidth - r.right))}px`;
+    appSettingsPanel.style.left = 'auto';
+    appSettingsPanel.style.zIndex = '5000';
+  }
+
+  function setSettingsPanelOpen(open) {
+    if (!appSettingsPanel || !btnSettings) return;
+    const host = document.getElementById('app-settings');
+    if (open) {
+      // Fixed under the cog so header overflow / stacking never clips the menu.
+      if (appSettingsPanel.parentElement !== document.body) {
+        document.body.appendChild(appSettingsPanel);
+      }
+    } else if (host && appSettingsPanel.parentElement !== host) {
+      host.appendChild(appSettingsPanel);
+    }
+    appSettingsPanel.classList.toggle('hidden', !open);
+    if (open) {
+      appSettingsPanel.removeAttribute('hidden');
+      const styleDetails = document.getElementById('app-settings-style');
+      if (styleDetails) styleDetails.open = true;
+      positionSettingsPanel();
+    } else {
+      appSettingsPanel.setAttribute('hidden', '');
+      appSettingsPanel.style.position = '';
+      appSettingsPanel.style.top = '';
+      appSettingsPanel.style.right = '';
+      appSettingsPanel.style.left = '';
+      appSettingsPanel.style.zIndex = '';
+      // Release focus so Cmd/Ctrl shortcuts work again after closing settings.
+      if (appSettingsPanel.contains(document.activeElement)) {
+        document.activeElement.blur();
+        canvas?.focus?.({ preventScroll: true });
+      }
+    }
+    btnSettings.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  function applyUiScalePrefs() {
+    const text = Math.max(0.85, Math.min(1.4, (uiTextScalePct || 100) / 100));
+    const el = Math.max(0.85, Math.min(1.4, (uiElementScalePct || 100) / 100));
+    document.documentElement.style.setProperty('--ui-text-scale', String(text));
+    document.documentElement.style.setProperty('--ui-element-scale', String(el));
+    if (settingsUiText) settingsUiText.value = String(Math.round(text * 100));
+    if (settingsUiElement) settingsUiElement.value = String(Math.round(el * 100));
+    if (settingsUiTextVal) settingsUiTextVal.textContent = `${Math.round(text * 100)}%`;
+    if (settingsUiElementVal) settingsUiElementVal.textContent = `${Math.round(el * 100)}%`;
+  }
+
+  function refreshWireColorVisuals() {
+    colorSwatches.forEach((swatch) => {
+      const key = swatch.dataset.color;
+      if (!key) return;
+      if (colorblindMode === 'off') {
+        swatch.style.background = '';
+      } else if (WIRE_COLORS[key]) {
+        swatch.style.background = WIRE_COLORS[key];
+      }
+    });
+    wires.forEach((wire) => updateWirePosition(wire));
+  }
+
+  function applyColorblindMode(mode) {
+    const next = (mode === 'deut' || mode === 'prot' || mode === 'trit') ? mode : 'off';
+    colorblindMode = next;
+    document.body.classList.toggle('colorblind-deut', next === 'deut');
+    document.body.classList.toggle('colorblind-prot', next === 'prot');
+    document.body.classList.toggle('colorblind-trit', next === 'trit');
+    const palette = next === 'off' ? WIRE_COLORS_DEFAULT : (WIRE_COLORS_COLORBLIND[next] || WIRE_COLORS_DEFAULT);
+    Object.keys(WIRE_COLORS).forEach((k) => { delete WIRE_COLORS[k]; });
+    Object.assign(WIRE_COLORS, palette);
+    if (settingsColorblind) settingsColorblind.value = next;
+    refreshWireColorVisuals();
+  }
+
+  function stopHeaderDitherMotion() {
+    for (let i = 1; i <= HEADER_DITHER_LAYER_COUNT; i += 1) {
+      if (headerDitherLayerTimers[i]) {
+        clearTimeout(headerDitherLayerTimers[i]);
+        headerDitherLayerTimers[i] = 0;
+      }
+    }
+  }
+
+  function scheduleHeaderDitherLayer(i) {
+    if (!headerDitherEnabled) return;
+    const delay = 350 + Math.random() * 2400;
+    headerDitherLayerTimers[i] = setTimeout(() => {
+      headerDitherLayerTimers[i] = 0;
+      if (!headerDitherEnabled) return;
+      const header = document.querySelector('.app-header');
+      if (header) {
+        const x = Math.round((Math.random() * 2 - 1) * 40);
+        const y = Math.round((Math.random() * 2 - 1) * 40);
+        header.style.setProperty(`--dpx${i}`, `${x}px`);
+        header.style.setProperty(`--dpy${i}`, `${y}px`);
+      }
+      scheduleHeaderDitherLayer(i);
+    }, delay);
+  }
+
+  function startHeaderDitherMotion() {
+    stopHeaderDitherMotion();
+    for (let i = 1; i <= HEADER_DITHER_LAYER_COUNT; i += 1) {
+      scheduleHeaderDitherLayer(i);
+    }
+  }
+
+  function syncHeaderDitherToggleUi() {
+    if (settingsHeaderDither) {
+      settingsHeaderDither.setAttribute('aria-pressed', headerDitherEnabled ? 'true' : 'false');
+    }
+    if (settingsHeaderDitherState) {
+      settingsHeaderDitherState.textContent = headerDitherEnabled ? 'On' : 'Off';
+    }
+  }
+
+  function applyHeaderDitherEnabled(enabled) {
+    headerDitherEnabled = !!enabled;
+    const header = document.querySelector('.app-header');
+    header?.classList.toggle('has-header-dither', headerDitherEnabled);
+    syncHeaderDitherToggleUi();
+    if (headerDitherEnabled) startHeaderDitherMotion();
+    else stopHeaderDitherMotion();
+  }
+
+  function saveUiPrefs() {
+    try {
+      localStorage.setItem(UI_PREFS_KEY, JSON.stringify({
+        colorblindMode,
+        uiTextScalePct,
+        uiElementScalePct,
+        accentThemeIndex,
+        headerDitherEnabled,
+        schematicWireColourEnabled,
+      }));
+    } catch (_) { /* ignore */ }
+  }
+
+  function loadUiPrefs() {
+    try {
+      const raw = JSON.parse(
+        localStorage.getItem(UI_PREFS_KEY)
+        || localStorage.getItem(UI_PREFS_KEY_LEGACY)
+        || 'null'
+      );
+      if (!raw || typeof raw !== 'object') return;
+      if (Number.isFinite(raw.accentThemeIndex)) accentThemeIndex = raw.accentThemeIndex;
+      if (Number.isFinite(raw.uiTextScalePct)) uiTextScalePct = raw.uiTextScalePct;
+      if (Number.isFinite(raw.uiElementScalePct)) uiElementScalePct = raw.uiElementScalePct;
+      if (typeof raw.colorblindMode === 'string') colorblindMode = raw.colorblindMode;
+      if (typeof raw.headerDitherEnabled === 'boolean') headerDitherEnabled = raw.headerDitherEnabled;
+      if (typeof raw.schematicWireColourEnabled === 'boolean') {
+        schematicWireColourEnabled = raw.schematicWireColourEnabled;
+      }
+    } catch (_) { /* ignore */ }
   }
 
   function deselectAll(opts = {}) {
@@ -10129,8 +10730,12 @@
 
   function closeAssetConfigMenu() {
     if (!assetConfigMenu || !assetConfigBtn) return;
+    if (assetConfigMenu.contains(document.activeElement)) {
+      document.activeElement.blur();
+    }
     assetConfigMenu.classList.add('hidden');
     assetConfigBtn.setAttribute('aria-expanded', 'false');
+    restoreAssetConfigMenuHost();
   }
 
   function closeAssetStateTermMenu() {
@@ -10138,6 +10743,15 @@
     assetStateTermMenu.classList.add('hidden');
     assetStateTermMenu.innerHTML = '';
     assetStateMenuIndex = null;
+    ensureWorkspaceUiHost(assetStateTermMenu);
+    assetStateTermMenu.style.position = '';
+    assetStateTermMenu.style.left = '';
+    assetStateTermMenu.style.top = '';
+    assetStateTermMenu.style.right = '';
+    assetStateTermMenu.style.bottom = '';
+    assetStateTermMenu.style.zIndex = '';
+    assetStateTermMenu.style.transform = '';
+    assetStateTermMenu.style.transformOrigin = '';
   }
 
   function clearAssetStateClickTimer() {
@@ -10279,20 +10893,8 @@
       assetStateTermMenu.appendChild(label);
     });
 
-    const chromeRect = assetStateChrome?.getBoundingClientRect();
-    const anchorRect = anchorEl?.getBoundingClientRect();
-    const bounds = getComponentChromeBounds(comp);
-    const btnSize = ASSET_CONFIG_BTN_SIZE;
-    const gap = 4;
-    const baseLeft = bounds.right + gap + btnSize + 4;
-    let top = bounds.top + btnSize + gap;
-    if (chromeRect && anchorRect) {
-      const worldAnchor = clientToWorld(anchorRect.left, anchorRect.top);
-      top = worldAnchor.y;
-    }
-    assetStateTermMenu.style.left = `${baseLeft}px`;
-    assetStateTermMenu.style.top = `${Math.max(0, top)}px`;
     assetStateTermMenu.classList.remove('hidden');
+    positionAssetStateTermMenuInWorkspace(anchorEl);
   }
 
   function rebuildAssetStateNumbers(comp) {
@@ -10636,17 +11238,19 @@
   }
 
   function validateYesGroundConnections() {
-    const ungrounded = [];
-    const hasRef = circuitHasGroundReference();
-    components.forEach((comp) => {
-      const needs = componentNeedsGrounding(comp);
-      comp.classList.remove('ungrounded-warning');
-      if (!needs) return;
-      if (!hasRef) return; // no ground reference on board → not a fault yet
-      if (!componentReachesCircuitGround(comp)) ungrounded.push(comp);
+    return withWireNets(() => {
+      const ungrounded = [];
+      const hasRef = circuitHasGroundReference();
+      components.forEach((comp) => {
+        const needs = componentNeedsGrounding(comp);
+        comp.classList.remove('ungrounded-warning');
+        if (!needs) return;
+        if (!hasRef) return; // no ground reference on board → not a fault yet
+        if (!componentReachesCircuitGround(comp)) ungrounded.push(comp);
+      });
+      refreshGroundCheckAlert();
+      return ungrounded;
     });
-    refreshGroundCheckAlert();
-    return ungrounded;
   }
 
   function reportGroundingStatus(prefix) {
@@ -10715,7 +11319,10 @@
   function isPickupComponent(comp) {
     if (!comp) return false;
     const template = GuitarAssets.getTemplate(comp.dataset.assetId);
-    return template?.category === 'pickup';
+    if (!template) return false;
+    if (template.category === 'pickup') return true;
+    // 4-conductor loom asset is electrically a humbucker (legacy category: wire)
+    return template.subtype === '4conductor' || template.id === '4conductor';
   }
 
   function isSingleCoilComponent(comp) {
@@ -14386,14 +14993,19 @@
       ? CalcMaterials.listBaseplateMaterialIds()
       : ['nickelSilver', 'brass'];
     ids.forEach((id) => {
-      const mat = (typeof CalcMaterials !== 'undefined' && CalcMaterials.getMaterial?.(id))
-        || (id === 'brass'
-          ? { id: 'brass', label: 'Brass', eddyRel: 1.1, resistivityOhmM: 6.4e-8 }
-          : { id: 'nickelSilver', label: 'Nickel silver', eddyRel: 0.85, resistivityOhmM: 3.0e-7 });
+      const fromCatalog = (typeof CalcMaterials !== 'undefined' && CalcMaterials.getMaterial?.(id)) || null;
+      const rho = (typeof CalcMaterials !== 'undefined'
+        && typeof CalcMaterials.resistivityOhmM === 'function')
+        ? CalcMaterials.resistivityOhmM(id)
+        : fromCatalog?.resistivityOhmM;
+      const mat = fromCatalog || (id === 'brass'
+        ? { id: 'brass', label: 'Brass', eddyRel: 1.1, resistivityOhmM: 6.4e-8 }
+        : { id: 'nickelSilver', label: 'Nickel silver', eddyRel: 0.85, resistivityOhmM: 3.0e-7 });
+      const rhoShow = rho ?? mat.resistivityOhmM ?? '—';
       const option = document.createElement('option');
       option.value = id;
       option.textContent = mat.label;
-      option.title = `eddy×${mat.eddyRel ?? '—'} · ρ=${mat.resistivityOhmM ?? '—'} Ω·m`;
+      option.title = `eddy×${mat.eddyRel ?? '—'} · ρ=${rhoShow} Ω·m`;
       select.appendChild(option);
     });
     select.dataset.ready = '1';
@@ -16331,8 +16943,48 @@
     );
   }
 
+  /**
+   * SD-style 4-conductor tips: H/N north coil, R/S south coil, G shield.
+   * Indices match dualCoilTerminals DOM order.
+   */
+  function getHbCoilTipTerms(comp) {
+    if (!comp || !isDualCoilComponent(comp)) return null;
+    const tips = [...comp.querySelectorAll('.terminal.hb-tip')];
+    const byRole = {};
+    tips.forEach((t) => {
+      const role = getTerminalRole(t);
+      if (role) byRole[role.toLowerCase()] = t;
+    });
+    return {
+      h: byRole.h || tips[0] || null,
+      n: byRole.n || tips[1] || null,
+      r: byRole.r || tips[2] || null,
+      s: byRole.s || tips[3] || null,
+      g: byRole.g || tips[4] || null,
+    };
+  }
+
+  /**
+   * Stock NA series humbucker (default): N↔R series link, S+G to ground.
+   * Set dataset hbWiringMode="leads" for fully independent 4-conductor leads
+   * (coil-split / parallel / phase wired externally).
+   */
+  function usesHbStockSeriesWiring(comp) {
+    if (!comp || !isDualCoilComponent(comp)) return false;
+    const mode = String(comp.dataset.hbWiringMode || 'series').trim().toLowerCase();
+    return mode !== 'leads' && mode !== 'independent' && mode !== 'raw';
+  }
+
   function applyHbLeadData(el, data) {
     if (!el || !data) return;
+    if (data.hbWiringMode != null && data.hbWiringMode !== '') {
+      const mode = String(data.hbWiringMode).trim().toLowerCase();
+      if (mode === 'leads' || mode === 'independent' || mode === 'raw') {
+        el.dataset.hbWiringMode = 'leads';
+      } else {
+        delete el.dataset.hbWiringMode;
+      }
+    }
     if (data.hbJunctionLeft != null && data.hbJunctionLeft !== '') {
       el.dataset.hbJunctionLeft = String(data.hbJunctionLeft);
     }
@@ -18100,8 +18752,14 @@
     const formulas = GuitarAssets.listElectricalFormulas?.(...ids)
       || ids.map((id) => GuitarAssets.getElectricalFormula?.(id) || GuitarAssets.ELECTRICAL_FORMULAS?.[id]).filter(Boolean);
     let computedMap = new Map();
-    if (isLedIndicatorComponent(comp)) computedMap = getLedFormulaComputedLines(comp);
-    else if (supportsBobbinDimensionalConfig(comp)) computedMap = getBobbinPickupFormulaComputedLines(comp);
+    try {
+      if (isLedIndicatorComponent(comp)) computedMap = getLedFormulaComputedLines(comp);
+      else if (supportsBobbinDimensionalConfig(comp)) computedMap = getBobbinPickupFormulaComputedLines(comp);
+    } catch (err) {
+      // Formula readout must never break config chrome or spam Bugtest during UI churn.
+      console.warn('asset-config formula compute skipped', err);
+      computedMap = new Map();
+    }
     const collapsible = supportsBobbinDimensionalConfig(comp);
     formulas.forEach((f) => {
       const fid = f.id;
@@ -19172,33 +19830,22 @@
   const HB_FAN_COUNT = 5;
   const HB_SLACK_MAX = 56;
   const HB_TIP_ATTACH_SCREEN_PX = 16;
-  const WIRE_TIP_FRACTION = 0.05;
-  /** Coloured fan tips: 50% longer than base wire tips. */
-  const HB_FAN_TIP_FRACTION = WIRE_TIP_FRACTION * 1.5;
-  const WIRE_TIP_MIN_PX = 3;
+  const WIRE_TIP_FRACTION = 0.02;
+  /** Coloured fan tips: slightly longer than base wire tips. */
+  const HB_FAN_TIP_FRACTION = WIRE_TIP_FRACTION * 1.25;
+  const WIRE_TIP_MIN_PX = 4;
+  /** Hard cap — colour must stay near the pad even on long runs. */
+  const WIRE_TIP_MAX_PX = 8;
   const WIRE_TIP_COLOR = '#c4a35a';
   const HB_LOOM_BORDER = '#3a3a3a';
   const HB_LOOM_BORDER_PAD = 1.35;
 
   function clientToDualCoilLocal(el, clientX, clientY) {
-    const svg = el.querySelector('.hb-leads-hit-svg') || el.querySelector('.hb-leads-svg');
-    if (svg) {
-      const ctm = svg.getScreenCTM();
-      if (ctm) {
-        const pt = svg.createSVGPoint();
-        pt.x = clientX;
-        pt.y = clientY;
-        const local = pt.matrixTransform(ctm.inverse());
-        return { x: local.x, y: local.y };
-      }
-    }
-    const rect = el.getBoundingClientRect();
-    const sx = el.offsetWidth / (rect.width || 1);
-    const sy = el.offsetHeight / (rect.height || 1);
-    return {
-      x: (clientX - rect.left) * sx,
-      y: (clientY - rect.top) * sy,
-    };
+    // Workspace-local math (not SVG CTM) so zoom/pan never desync tip/loom coords.
+    const world = clientToWorld(clientX, clientY);
+    const left = parseFloat(el.style.left) || 0;
+    const top = parseFloat(el.style.top) || 0;
+    return { x: world.x - left, y: world.y - top };
   }
 
   function getHbExitPoint(el) {
@@ -19832,6 +20479,7 @@
     const visSvg = el.querySelector('.hb-leads-svg');
     const hitSvg = el.querySelector('.hb-leads-hit-svg');
     if (!visSvg && !hitSvg) return;
+    syncHbLeadSvgViewport(el);
     ensureHbPlasticDefs(visSvg);
     const exit = getHbExitPoint(el);
     const junction = getHbJunction(el);
@@ -19894,6 +20542,8 @@
       if (attached) {
         gVis?.setAttribute('visibility', 'hidden');
         gHit?.setAttribute('visibility', 'hidden');
+        // Keep tip locked to the lug in component space (zoom-safe).
+        if (tc?.tip) parkHbTipOnTerminal(el, tc.tip, attached);
         const leadWire = getHbTipLeadWire(el, idx);
         if (leadWire && isHbFanSlackUserSet(el, idx) && leadWire.slack !== getHbFanSlack(el, idx)) {
           leadWire.slack = getHbFanSlack(el, idx);
@@ -19927,13 +20577,15 @@
           start: false,
           end: true,
           tipFraction: HB_FAN_TIP_FRACTION,
+          tipMaxPx: WIRE_TIP_MAX_PX * 1.25,
           underSleeve: true,
         });
         const sleeveD = vis.getAttribute('d') || d;
         vis.setAttribute('stroke-width', String(HB_FAN_STROKE));
         const color = tc.tip.dataset.wireColor || '#888';
         vis.setAttribute('stroke', color);
-        const isBlack = color === '#111111' || color === '#111' || color === 'black';
+        const isBlack = color === '#111111' || color === '#111' || color === '#3a3a42'
+          || color === 'black';
         if (outline) {
           if (isBlack) {
             outline.setAttribute('d', sleeveD);
@@ -19973,18 +20625,22 @@
   }
 
   function hbLocalToWorld(el, x, y) {
-    const svg = el.querySelector('.hb-leads-svg');
-    const ctm = svg?.getScreenCTM?.();
-    if (svg && ctm) {
-      const pt = svg.createSVGPoint();
-      pt.x = x;
-      pt.y = y;
-      const screen = pt.matrixTransform(ctm);
-      return clientToWorld(screen.x, screen.y);
-    }
+    // Dual-coil local space is component CSS pixels (same as style.left/top).
+    // Avoid SVG getScreenCTM — default SVG user space ≠ component box and drifts under zoom.
     const left = parseFloat(el.style.left) || 0;
     const top = parseFloat(el.style.top) || 0;
     return { x: left + x, y: top + y };
+  }
+
+  function syncHbLeadSvgViewport(el) {
+    const w = Math.max(1, el.offsetWidth || parseFloat(el.style.width) || 1);
+    const h = Math.max(1, el.offsetHeight || parseFloat(el.style.height) || 1);
+    [el.querySelector('.hb-leads-svg'), el.querySelector('.hb-leads-hit-svg')].forEach((svg) => {
+      if (!svg) return;
+      svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      svg.setAttribute('width', String(w));
+      svg.setAttribute('height', String(h));
+    });
   }
 
   function worldPathFromLocalPath(el, pathEl) {
@@ -20755,6 +21411,8 @@
     const resistorTypeRow = document.getElementById('asset-config-resistor-type-row');
     const flashRow = document.getElementById('asset-config-flash-row');
     const flashToggle = document.getElementById('asset-config-flashing');
+    const hbWiringRow = document.getElementById('asset-config-hb-wiring-row');
+    const hbWiringSelect = document.getElementById('asset-config-hb-wiring');
     const valueHost = ensureAssetConfigValueFields();
     const isOutput = isOutputJackComponent(comp);
     const isToggle = isToggleSwitchComponent(comp);
@@ -20764,6 +21422,7 @@
     const isTubePins = isTubePinConfigComponent(comp);
     const isDiode = isDiodeComponent(comp);
     const isResistor = isResistorComponent(comp);
+    const isHb = isDualCoilComponent(comp);
     const valueKeys = new Set(getTemplateValueFieldDefs(comp).map((d) => d.key));
 
     if (groundRow) groundRow.classList.toggle('hidden', isOutput || !comp);
@@ -20798,6 +21457,10 @@
     if (diodeMaterialRow) diodeMaterialRow.classList.toggle('hidden', !isDiode || !comp);
     if (resistorTypeRow) resistorTypeRow.classList.toggle('hidden', !isResistor || !comp);
     if (flashRow) flashRow.classList.toggle('hidden', !isOutput);
+    if (hbWiringRow) hbWiringRow.classList.toggle('hidden', !isHb || !comp);
+    if (hbWiringSelect && isHb && comp && document.activeElement !== hbWiringSelect) {
+      hbWiringSelect.value = usesHbStockSeriesWiring(comp) ? 'series' : 'leads';
+    }
     syncBobbinConfigFields(comp);
 
     valueHost?.querySelectorAll('[data-value-key]').forEach((row) => {
@@ -20888,6 +21551,7 @@
     assetConfigMenu.classList.remove('hidden');
     assetConfigBtn.setAttribute('aria-expanded', 'true');
     updateAssetConfigChrome();
+    positionAssetConfigFloatingUi();
     stabilizeWorkspaceScroll();
   }
 
@@ -20940,10 +21604,131 @@
     else closeAssetConfigMenu();
   }
 
+  function getSingleSelectedComponent() {
+    if (selectedComponents.size !== 1) return null;
+    return [...selectedComponents][0];
+  }
+
+  /** Counter-scale for workspace-mounted chrome so text stays sharp at any zoom. */
+  function workspaceUiCounterScale() {
+    const s = viewportScale();
+    return s > 1e-6 ? (1 / s) : 1;
+  }
+
+  function ensureWorkspaceUiHost(el) {
+    if (!el || !workspace) return;
+    if (el.parentElement !== workspace) workspace.appendChild(el);
+  }
+
+  /**
+   * Pin cog menus in workspace coords next to the asset (like before), with
+   * scale(1/zoom) so they cancel the workspace CSS transform and stay sharp.
+   */
+  function positionAssetConfigFloatingUi() {
+    if (!assetConfigBtn || assetConfigBtn.classList.contains('hidden')) return;
+    const inv = workspaceUiCounterScale();
+    const scale = viewportScale();
+    const btnLeft = parseFloat(assetConfigBtn.style.left) || 0;
+    const btnTop = parseFloat(assetConfigBtn.style.top) || 0;
+    const btnSize = ASSET_CONFIG_BTN_SIZE;
+    const gap = 4;
+
+    if (assetConfigMenu && !assetConfigMenu.classList.contains('hidden')) {
+      ensureWorkspaceUiHost(assetConfigMenu);
+      assetConfigMenu.style.position = 'absolute';
+      assetConfigMenu.style.zIndex = '45';
+      assetConfigMenu.style.right = '';
+      assetConfigMenu.style.bottom = '';
+      assetConfigMenu.style.transformOrigin = 'top left';
+      assetConfigMenu.style.transform = `scale(${inv})`;
+
+      let left = btnLeft + btnSize + gap;
+      let top = btnTop;
+      assetConfigMenu.style.left = `${left}px`;
+      assetConfigMenu.style.top = `${top}px`;
+
+      const view = canvas?.getBoundingClientRect() || {
+        left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight,
+      };
+      let mr = assetConfigMenu.getBoundingClientRect();
+      if (mr.right > view.right - 8) {
+        left = btnLeft - gap - (mr.width / scale);
+        assetConfigMenu.style.left = `${left}px`;
+        mr = assetConfigMenu.getBoundingClientRect();
+      }
+      if (mr.bottom > view.bottom - 8) {
+        top = btnTop - Math.max(0, (mr.bottom - (view.bottom - 8)) / scale);
+        assetConfigMenu.style.top = `${Math.max(0, top)}px`;
+      }
+    }
+
+    if (assetStateTermMenu && !assetStateTermMenu.classList.contains('hidden')) {
+      positionAssetStateTermMenuInWorkspace();
+    }
+  }
+
+  function positionAssetStateTermMenuInWorkspace(anchorEl) {
+    if (!assetStateTermMenu || assetStateTermMenu.classList.contains('hidden')) return;
+    ensureWorkspaceUiHost(assetStateTermMenu);
+    const inv = workspaceUiCounterScale();
+    const scale = viewportScale();
+    const btnLeft = parseFloat(assetConfigBtn?.style.left) || 0;
+    const btnTop = parseFloat(assetConfigBtn?.style.top) || 0;
+    const btnSize = ASSET_CONFIG_BTN_SIZE;
+    const gap = 4;
+
+    let top = btnTop;
+    if (anchorEl && workspace) {
+      const ar = anchorEl.getBoundingClientRect();
+      top = clientToWorld(ar.left, ar.top).y;
+    } else if (assetStateChrome && !assetStateChrome.classList.contains('hidden')) {
+      top = parseFloat(assetStateChrome.style.top) || btnTop;
+    }
+
+    assetStateTermMenu.style.position = 'absolute';
+    assetStateTermMenu.style.zIndex = '46';
+    assetStateTermMenu.style.right = '';
+    assetStateTermMenu.style.bottom = '';
+    assetStateTermMenu.style.transformOrigin = 'top left';
+    assetStateTermMenu.style.transform = `scale(${inv})`;
+
+    let left = btnLeft + btnSize + gap;
+    assetStateTermMenu.style.left = `${left}px`;
+    assetStateTermMenu.style.top = `${top}px`;
+
+    const view = canvas?.getBoundingClientRect() || {
+      left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight,
+    };
+    let mr = assetStateTermMenu.getBoundingClientRect();
+    if (mr.right > view.right - 8) {
+      left = btnLeft - gap - (mr.width / scale);
+      assetStateTermMenu.style.left = `${left}px`;
+      mr = assetStateTermMenu.getBoundingClientRect();
+    }
+    if (mr.bottom > view.bottom - 8) {
+      top -= Math.max(0, (mr.bottom - (view.bottom - 8)) / scale);
+      assetStateTermMenu.style.top = `${Math.max(0, top)}px`;
+    }
+  }
+
+  function restoreAssetConfigMenuHost() {
+    if (!assetConfigMenu || !workspace) return;
+    ensureWorkspaceUiHost(assetConfigMenu);
+    assetConfigMenu.style.position = '';
+    assetConfigMenu.style.left = '';
+    assetConfigMenu.style.top = '';
+    assetConfigMenu.style.right = '';
+    assetConfigMenu.style.bottom = '';
+    assetConfigMenu.style.zIndex = '';
+    assetConfigMenu.style.transform = '';
+    assetConfigMenu.style.transformOrigin = '';
+  }
+
   function updateAssetConfigChrome() {
     if (!assetConfigBtn || !assetConfigMenu) return;
     const comp = getSingleSelectedComponent();
-    if (!comp || selectedWireGroups.size > 0) {
+    // Show cog for a single selected asset even if wires are also selected (marquee often catches both).
+    if (!comp) {
       assetConfigBtn.classList.add('hidden');
       closeAssetConfigMenu();
       updateAssetStateChrome();
@@ -20959,18 +21744,21 @@
     assetConfigBtn.style.left = `${btnLeft}px`;
     assetConfigBtn.style.top = `${btnTop}px`;
     assetConfigBtn.classList.remove('hidden');
+
+    // Zoom/pan must not rebuild menus or run formula/electromagnet compute.
+    if (isViewportInteracting()) {
+      if (!assetConfigMenu.classList.contains('hidden')) {
+        positionAssetConfigFloatingUi();
+      }
+      return;
+    }
+
     syncAssetConfigMenuContent(comp);
 
     if (!assetConfigMenu.classList.contains('hidden')) {
-      assetConfigMenu.style.left = `${btnLeft + btnSize + 4}px`;
-      assetConfigMenu.style.top = `${Math.max(0, btnTop)}px`;
+      positionAssetConfigFloatingUi();
     }
     updateAssetStateChrome();
-  }
-
-  function getSingleSelectedComponent() {
-    if (selectedComponents.size !== 1) return null;
-    return [...selectedComponents][0];
   }
 
   function updateSelectionStatus() {
@@ -21134,9 +21922,11 @@
     } else {
       const startPt = getAttachPoint(wire, 'start');
       const endPt = getAttachPoint(wire, 'end');
-      points = getWireRoutePoints(wire, startPt, endPt);
+      let points = getWireRoutePoints(wire, startPt, endPt);
+      if (isManhattanWire(wire)) points = expandPointsToOrtho(points);
       const hasAnchors = (wire.anchors || []).length > 0;
-      slack = hasAnchors ? 0 : (wire.slack || 0);
+      slack = hasAnchors || isManhattanWire(wire) ? 0 : (wire.slack || 0);
+      return flattenWireRoute(points, slack, 10);
     }
     return flattenWireRoute(points, slack, 10);
   }
@@ -21167,6 +21957,7 @@
     if (e.button !== 0) return false;
     if (spacePanHeld || spacePanDragging) return false;
     if (wireMode) return false;
+    if (eraseMode) return false;
     if (dimTool && dimTool.phase !== 'done') return false;
     if (moveTool) return false;
     if (placementMode) return false;
@@ -21194,9 +21985,20 @@
   }
 
   function hideMarqueeBox() {
+    if (!marqueeBox) return;
     marqueeBox.classList.add('hidden');
     marqueeBox.style.width = '0';
     marqueeBox.style.height = '0';
+    marqueeBox.style.left = '0';
+    marqueeBox.style.top = '0';
+  }
+
+  function cancelMarqueeInteraction() {
+    marqueeStart = null;
+    marqueeActive = false;
+    marqueeLastClient = null;
+    marqueeFinishing = false;
+    hideMarqueeBox();
   }
 
   function getPanelSnapRect(entry) {
@@ -21310,22 +22112,35 @@
   }
 
   function finishMarquee(e) {
-    if (!marqueeStart) return;
-    const end = getCanvasCoords(e);
-    const rect = normalizeRect(marqueeStart.x, marqueeStart.y, end.x, end.y);
-    const dragged = marqueeActive
-      || Math.abs(rect.right - rect.left) >= MARQUEE_MIN_PX
-      || Math.abs(rect.bottom - rect.top) >= MARQUEE_MIN_PX;
-
-    if (dragged) {
-      if (wireDraftStart) cancelWireDraft();
-      applyMarqueeSelection(rect, { additive: !!(e && e.shiftKey) });
-      suppressNextClick = true;
-    }
-
+    if (!marqueeStart || marqueeFinishing) return;
+    marqueeFinishing = true;
+    const start = marqueeStart;
+    const wasActive = marqueeActive;
     marqueeStart = null;
     marqueeActive = false;
     hideMarqueeBox();
+    try {
+      const client = (e && Number.isFinite(e.clientX))
+        ? { x: e.clientX, y: e.clientY }
+        : marqueeLastClient;
+      const end = client
+        ? clientToWorld(client.x, client.y)
+        : { x: start.x, y: start.y };
+      const rect = normalizeRect(start.x, start.y, end.x, end.y);
+      const dragged = wasActive
+        || Math.abs(rect.right - rect.left) >= MARQUEE_MIN_PX
+        || Math.abs(rect.bottom - rect.top) >= MARQUEE_MIN_PX;
+      if (dragged) {
+        if (wireDraftStart) cancelWireDraft();
+        applyMarqueeSelection(rect, { additive: !!(e && e.shiftKey) });
+        suppressNextClick = true;
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      marqueeLastClient = null;
+      marqueeFinishing = false;
+    }
   }
 
   function createLayerGroupEl(layer) {
@@ -22094,6 +22909,7 @@
     if (assetId) {
       recordRecentAsset(assetId);
       if (wireMode) setWireMode(false);
+      if (eraseMode) setEraseMode(false);
       if (panelSnapMode) {
         panelSnapMode = false;
         document.getElementById('context-menu-power')?.classList.remove('panel-snap-active');
@@ -22122,10 +22938,17 @@
     setAssetPlacement(mode);
   }
 
+  function wireRouteDraftHint() {
+    return wireRouteMode === 'manhattan'
+      ? 'Click orthogonal corners, or a terminal to finish'
+      : 'Click anchors to curve, or a terminal to finish';
+  }
+
   function setWireMode(active) {
     wireMode = active;
     document.body.classList.toggle('wire-mode', !!active);
     if (active) {
+      if (eraseMode) setEraseMode(false);
       cancelMoveTool();
       cancelDimensionTool();
       setAssetPlacement(null);
@@ -22147,9 +22970,123 @@
     setStatus(
       active
         ? wireDraftStart
-          ? 'Click anchors to curve, or a terminal to finish'
-          : `Click start terminal (Layer ${activeLayer}) — then anchors, then end terminal`
+          ? wireRouteDraftHint()
+          : `Click start terminal (Layer ${activeLayer}) — then ${
+              wireRouteMode === 'manhattan' ? 'orthogonal corners' : 'anchors'
+            }, then end terminal`
         : 'Ready'
+    );
+  }
+
+  function setEraseMode(active) {
+    eraseMode = !!active;
+    document.body.classList.toggle('erase-mode', eraseMode);
+    btnErase?.classList.toggle('active', eraseMode);
+    btnErase?.setAttribute('aria-pressed', eraseMode ? 'true' : 'false');
+    if (eraseMode) {
+      if (wireMode) setWireMode(false);
+      cancelMoveTool();
+      cancelDimensionTool();
+      setAssetPlacement(null);
+      cancelWireDraft();
+      clearSnapState();
+      eraseStrokeActive = false;
+      eraseStrokeSeen.clear();
+      eraseStrokeDeleted = 0;
+      setStatus('Erase — drag over wires or parts to delete');
+    } else if (!wireMode) {
+      setStatus('Ready');
+    }
+  }
+
+  function eraseHitAtClient(clientX, clientY) {
+    let deleted = 0;
+    const wireHits = [];
+    wires.forEach((wire) => {
+      if (!wire || eraseStrokeSeen.has(`w:${wire.id}`)) return;
+      if (isHbLeadWire(wire) || isAssetWire(wire)) return;
+      if (wireNearClient(wire, clientX, clientY, 14)) wireHits.push(wire);
+    });
+    wireHits.forEach((wire) => {
+      eraseStrokeSeen.add(`w:${wire.id}`);
+      deleteWireGroup(wire.group);
+      deleted += 1;
+    });
+
+    const stack = document.elementsFromPoint(clientX, clientY) || [];
+    for (const el of stack) {
+      const snap = el.closest?.('.panel-snap-point');
+      if (snap?.dataset?.id && !eraseStrokeSeen.has(`s:${snap.dataset.id}`)) {
+        eraseStrokeSeen.add(`s:${snap.dataset.id}`);
+        const entry = panelSnapPoints.get(snap.dataset.id);
+        if (entry) {
+          entry.el?.remove();
+          panelSnapPoints.delete(snap.dataset.id);
+          deleted += 1;
+        }
+        continue;
+      }
+      const dim = el.closest?.('.dim-annotation');
+      if (dim?.dataset?.id && !eraseStrokeSeen.has(`d:${dim.dataset.id}`)) {
+        eraseStrokeSeen.add(`d:${dim.dataset.id}`);
+        const entry = dimAnnotations.get(dim.dataset.id);
+        if (entry) {
+          entry.el.remove();
+          dimAnnotations.delete(dim.dataset.id);
+          selectedDimAnnotationIds.delete(dim.dataset.id);
+          deleted += 1;
+        }
+        continue;
+      }
+      const comp = el.closest?.('.component');
+      if (!comp?.dataset?.id || eraseStrokeSeen.has(`c:${comp.dataset.id}`)) continue;
+      if (comp.classList.contains('workspace-page-hidden')) continue;
+      eraseStrokeSeen.add(`c:${comp.dataset.id}`);
+      removeComponentFromAllGroups(comp.dataset.id);
+      removeWiresForComponent(comp);
+      removeHbWorldLeadGroup(comp);
+      components.delete(comp.dataset.id);
+      selectedComponents.delete(comp);
+      comp.remove();
+      deleted += 1;
+    }
+    return deleted;
+  }
+
+  function beginEraseStroke(clientX, clientY) {
+    eraseStrokeActive = true;
+    eraseStrokeSeen.clear();
+    eraseStrokeDeleted = 0;
+    eraseStrokeDeleted += eraseHitAtClient(clientX, clientY);
+    if (eraseStrokeDeleted) {
+      markProjectDirty();
+      setStatus(`Erased ${eraseStrokeDeleted} · keep dragging`);
+    }
+  }
+
+  function continueEraseStroke(clientX, clientY) {
+    if (!eraseStrokeActive) return;
+    const n = eraseHitAtClient(clientX, clientY);
+    if (n) {
+      eraseStrokeDeleted += n;
+      markProjectDirty();
+      setStatus(`Erased ${eraseStrokeDeleted} · keep dragging`);
+    }
+  }
+
+  function endEraseStroke() {
+    if (!eraseStrokeActive) return;
+    eraseStrokeActive = false;
+    const n = eraseStrokeDeleted;
+    eraseStrokeSeen.clear();
+    eraseStrokeDeleted = 0;
+    refreshLightningWireGlow();
+    refreshShortCircuitCheck();
+    validateYesGroundConnections();
+    setStatus(
+      n > 0
+        ? (n === 1 ? 'Erased 1 item' : `Erased ${n} items`)
+        : 'Erase — drag over wires or parts to delete'
     );
   }
 
@@ -22167,6 +23104,41 @@
       markProjectDirty();
     });
     updateSelectionStatus();
+  }
+
+  function setWireRouteMode(mode) {
+    if (mode !== 'free' && mode !== 'manhattan') return;
+    wireRouteMode = mode;
+    btnRouteFree?.classList.toggle('active', mode === 'free');
+    btnRouteManhattan?.classList.toggle('active', mode === 'manhattan');
+    btnRouteFree?.setAttribute('aria-pressed', mode === 'free' ? 'true' : 'false');
+    btnRouteManhattan?.setAttribute('aria-pressed', mode === 'manhattan' ? 'true' : 'false');
+    if (selectedWireGroups.size > 0) {
+      selectedWireGroups.forEach((group) => {
+        const wire = wires.get(group.dataset.id);
+        if (!wire || isHbLeadWire(wire) || isAssetWire(wire)) return;
+        if (wire.routeMode === mode) return;
+        wire.routeMode = mode;
+        if (mode === 'manhattan') {
+          const start = getAttachPoint(wire, 'start');
+          const end = getAttachPoint(wire, 'end');
+          wire.anchors = normalizeManhattanAnchors(start, end, wire.anchors || []);
+          wire.slack = 0;
+        }
+        updateWirePosition(wire);
+        markProjectDirty();
+      });
+      updateSelectionStatus();
+    }
+    if (wireMode) {
+      setStatus(
+        wireDraftStart
+          ? wireRouteDraftHint()
+          : `Click start terminal (Layer ${activeLayer}) — then ${
+              mode === 'manhattan' ? 'orthogonal corners' : 'anchors'
+            }, then end terminal`
+      );
+    }
   }
 
   function setWireColor(color) {
@@ -22216,6 +23188,12 @@
     wireStyle = wire.dashed ? 'dashed' : 'solid';
     btnSolid.classList.toggle('active', !wire.dashed);
     btnDashed.classList.toggle('active', !!wire.dashed);
+    const mode = wire.routeMode === 'manhattan' ? 'manhattan' : 'free';
+    wireRouteMode = mode;
+    btnRouteFree?.classList.toggle('active', mode === 'free');
+    btnRouteManhattan?.classList.toggle('active', mode === 'manhattan');
+    btnRouteFree?.setAttribute('aria-pressed', mode === 'free' ? 'true' : 'false');
+    btnRouteManhattan?.setAttribute('aria-pressed', mode === 'manhattan' ? 'true' : 'false');
     if (Number.isFinite(wire.gaugeMm)) {
       wireGaugeMm = wire.gaugeMm;
       syncWireGaugeUi();
@@ -22296,17 +23274,33 @@
 
   function updatePreviewLine(clientX, clientY) {
     if (!wireDraftStart) return;
-    const end = clientToWorld(clientX, clientY);
-    const pts = [
+    const free = false;
+    let end = clientToWorld(clientX, clientY);
+    if (wireRouteMode === 'manhattan') {
+      const prev = wireDraftAnchors.length
+        ? wireDraftAnchors[wireDraftAnchors.length - 1]
+        : { x: wireDraftStart.x, y: wireDraftStart.y };
+      end = manhattanAxisSnap(prev, end.x, end.y, free);
+    }
+    let pts = [
       { x: wireDraftStart.x, y: wireDraftStart.y },
       ...wireDraftAnchors,
       { x: end.x, y: end.y },
     ];
+    if (wireRouteMode === 'manhattan') pts = expandPointsToOrtho(pts);
     const preview = ensurePreviewLine();
-    preview.setAttribute('d', buildSmoothPathThroughPoints(pts));
+    const pathD = wireRouteMode === 'manhattan'
+      ? buildFilletedOrthoPathThroughPoints(pts, WIRE_ORTHO_FILLET_PX)
+      : buildSmoothPathThroughPoints(pts);
+    preview.setAttribute('d', pathD);
     preview.setAttribute('stroke', WIRE_COLORS[wireColor]);
     applyPreviewStrokeWidth();
-    preview.setAttribute('class', `wire-preview ${wireStyle === 'dashed' ? 'dashed' : ''}`);
+    preview.setAttribute(
+      'class',
+      `wire-preview ${wireStyle === 'dashed' ? 'dashed' : ''}${
+        wireRouteMode === 'manhattan' ? ' ortho-route' : ''
+      }`
+    );
   }
 
   function getSelectedWireObject() {
@@ -22359,10 +23353,227 @@
     return d;
   }
 
+  /** Sharp Manhattan / polyline path (schematic-style corners). */
+  function buildOrthoPathThroughPoints(points) {
+    if (!points || points.length < 2) return '';
+    let d = `M ${points[0].x} ${points[0].y}`;
+    for (let i = 1; i < points.length; i++) {
+      d += ` L ${points[i].x} ${points[i].y}`;
+    }
+    return d;
+  }
+
+  /** Slight fillet radius for workspace Manhattan corners (px). */
+  const WIRE_ORTHO_FILLET_PX = 5.5;
+  /** Neighboring remake strokes may share this fraction of their width (5%). */
+  const REMAKE_STROKE_OVERLAP = 0.05;
+  /** Fallback CSS wire stroke when dimensional preview is off. */
+  const WIRE_CSS_STROKE_PX = 2;
+
+  function getWireVisualStrokePx(wire) {
+    if (!wire) return WIRE_CSS_STROKE_PX;
+    if (dimensionalWireGauge && wireGaugePreview
+      && Number.isFinite(wire.gaugeMm) && wire.gaugeMm > 0
+      && !isDimensionalGaugeExempt(wire)) {
+      return gaugeMmToStroke(wire.gaugeMm);
+    }
+    const inline = parseFloat(wire.visible?.style?.strokeWidth);
+    if (Number.isFinite(inline) && inline > 0) return inline;
+    return WIRE_CSS_STROKE_PX;
+  }
+
+  /** Center-to-center pitch so stroke boundaries overlap by ~5%. */
+  function remakeLanePitchFromStroke(strokePx) {
+    const s = Math.max(WIRE_CSS_STROKE_PX, Number(strokePx) || WIRE_CSS_STROKE_PX);
+    // 5% width overlap. Floor keeps thin CSS strokes from stacking too tightly.
+    return Math.max(s * (1 - REMAKE_STROKE_OVERLAP), 8);
+  }
+
+  /**
+   * Orthogonal polyline with small quadratic fillets at corners.
+   * Straights stay straight; only the corner is softened.
+   */
+  function buildFilletedOrthoPathThroughPoints(points, fillet = WIRE_ORTHO_FILLET_PX) {
+    if (!points || points.length < 2) return '';
+    if (points.length === 2 || !(fillet > 0.5)) {
+      return buildOrthoPathThroughPoints(points);
+    }
+    let d = `M ${points[0].x} ${points[0].y}`;
+    for (let i = 1; i < points.length - 1; i++) {
+      const prev = points[i - 1];
+      const cur = points[i];
+      const next = points[i + 1];
+      const inDx = cur.x - prev.x;
+      const inDy = cur.y - prev.y;
+      const outDx = next.x - cur.x;
+      const outDy = next.y - cur.y;
+      const inLen = Math.hypot(inDx, inDy);
+      const outLen = Math.hypot(outDx, outDy);
+      const r = Math.min(fillet, inLen * 0.45, outLen * 0.45);
+      if (r < 0.75 || inLen < 1e-6 || outLen < 1e-6) {
+        d += ` L ${cur.x} ${cur.y}`;
+        continue;
+      }
+      const ax = cur.x - (inDx / inLen) * r;
+      const ay = cur.y - (inDy / inLen) * r;
+      const bx = cur.x + (outDx / outLen) * r;
+      const by = cur.y + (outDy / outLen) * r;
+      d += ` L ${ax} ${ay} Q ${cur.x} ${cur.y} ${bx} ${by}`;
+    }
+    const last = points[points.length - 1];
+    d += ` L ${last.x} ${last.y}`;
+    return d;
+  }
+
+  function sampleFilletedOrthoRoute(points, fillet = WIRE_ORTHO_FILLET_PX, stepsPerSeg = 10) {
+    if (!points || points.length < 2) return points ? [...points] : [];
+    if (points.length === 2 || !(fillet > 0.5)) {
+      const out = [];
+      for (let i = 0; i < points.length - 1; i++) {
+        const p0 = points[i];
+        const p1 = points[i + 1];
+        for (let s = 0; s <= stepsPerSeg; s++) {
+          if (i > 0 && s === 0) continue;
+          const t = s / stepsPerSeg;
+          out.push({
+            x: p0.x + (p1.x - p0.x) * t,
+            y: p0.y + (p1.y - p0.y) * t,
+          });
+        }
+      }
+      return out;
+    }
+    const out = [{ x: points[0].x, y: points[0].y }];
+    for (let i = 1; i < points.length - 1; i++) {
+      const prev = points[i - 1];
+      const cur = points[i];
+      const next = points[i + 1];
+      const inDx = cur.x - prev.x;
+      const inDy = cur.y - prev.y;
+      const outDx = next.x - cur.x;
+      const outDy = next.y - cur.y;
+      const inLen = Math.hypot(inDx, inDy);
+      const outLen = Math.hypot(outDx, outDy);
+      const r = Math.min(fillet, inLen * 0.45, outLen * 0.45);
+      if (r < 0.75 || inLen < 1e-6 || outLen < 1e-6) {
+        out.push({ x: cur.x, y: cur.y });
+        continue;
+      }
+      const a = {
+        x: cur.x - (inDx / inLen) * r,
+        y: cur.y - (inDy / inLen) * r,
+      };
+      const b = {
+        x: cur.x + (outDx / outLen) * r,
+        y: cur.y + (outDy / outLen) * r,
+      };
+      // Straight into fillet
+      const from = out[out.length - 1];
+      const straightSteps = Math.max(2, Math.round(stepsPerSeg * (Math.hypot(a.x - from.x, a.y - from.y) / Math.max(inLen, 1))));
+      for (let s = 1; s <= straightSteps; s++) {
+        const t = s / straightSteps;
+        out.push({
+          x: from.x + (a.x - from.x) * t,
+          y: from.y + (a.y - from.y) * t,
+        });
+      }
+      const filletSteps = Math.max(4, Math.round(stepsPerSeg * 0.7));
+      for (let s = 1; s <= filletSteps; s++) {
+        out.push(sampleQuadratic(a, cur, b, s / filletSteps));
+      }
+    }
+    const last = points[points.length - 1];
+    const from = out[out.length - 1];
+    for (let s = 1; s <= stepsPerSeg; s++) {
+      const t = s / stepsPerSeg;
+      out.push({
+        x: from.x + (last.x - from.x) * t,
+        y: from.y + (last.y - from.y) * t,
+      });
+    }
+    return out;
+  }
+
+  function wireRoutePointsAreOrthogonal(points, tol = 1.5) {
+    if (!points || points.length < 2) return false;
+    for (let i = 1; i < points.length; i++) {
+      const dx = Math.abs(points[i].x - points[i - 1].x);
+      const dy = Math.abs(points[i].y - points[i - 1].y);
+      if (dx > tol && dy > tol) return false;
+    }
+    return true;
+  }
+
+  /** Snap a draft/bend point to horizontal or vertical from `prev`. */
+  function manhattanAxisSnap(prev, x, y, free) {
+    if (!prev || !Number.isFinite(prev.x) || !Number.isFinite(prev.y)) {
+      return { x: snapWorkspace(x, free), y: snapWorkspace(y, free) };
+    }
+    const dx = Math.abs(x - prev.x);
+    const dy = Math.abs(y - prev.y);
+    if (dx >= dy) {
+      return { x: snapWorkspace(x, free), y: prev.y };
+    }
+    return { x: prev.x, y: snapWorkspace(y, free) };
+  }
+
+  /**
+   * Insert L-elbows so every hop is axis-aligned (render-safe; pure).
+   */
+  function expandPointsToOrtho(points, tol = 1.5) {
+    if (!points || points.length < 2) return points ? points.map((p) => ({ x: p.x, y: p.y })) : [];
+    const out = [{ x: points[0].x, y: points[0].y }];
+    for (let i = 1; i < points.length; i++) {
+      const prev = out[out.length - 1];
+      const cur = { x: points[i].x, y: points[i].y };
+      const dx = Math.abs(cur.x - prev.x);
+      const dy = Math.abs(cur.y - prev.y);
+      if (dx < tol && dy < tol) continue;
+      if (dx > tol && dy > tol) {
+        let elbow;
+        if (out.length >= 2) {
+          const p2 = out[out.length - 2];
+          const wasH = Math.abs(prev.y - p2.y) < tol;
+          elbow = wasH ? { x: prev.x, y: cur.y } : { x: cur.x, y: prev.y };
+        } else {
+          elbow = dx >= dy ? { x: cur.x, y: prev.y } : { x: prev.x, y: cur.y };
+        }
+        out.push(elbow);
+      }
+      out.push(cur);
+    }
+    return out;
+  }
+
+  /** Persistable mid-anchors for a Manhattan route between start/end. */
+  function normalizeManhattanAnchors(start, end, anchors) {
+    const chain = expandPointsToOrtho([
+      { x: start.x, y: start.y },
+      ...((anchors || []).filter((a) => a && Number.isFinite(a.x) && Number.isFinite(a.y))
+        .map((a) => ({ x: a.x, y: a.y }))),
+      { x: end.x, y: end.y },
+    ]);
+    if (chain.length <= 2) return [];
+    return chain.slice(1, -1).map((p) => ({ x: p.x, y: p.y }));
+  }
+
+  function isManhattanWire(wire) {
+    return !!(wire && wire.routeMode === 'manhattan');
+  }
+
+  /** Finish draft anchors so the last hop reaches `end` on H/V only. */
+  function finalizeManhattanDraftAnchors(start, end, anchors) {
+    return normalizeManhattanAnchors(start, end, anchors || []);
+  }
+
   function buildRoutedWirePath(points, slack) {
     if (!points || points.length < 2) return '';
     if (points.length === 2) {
       return buildWirePath(points[0].x, points[0].y, points[1].x, points[1].y, slack || 0);
+    }
+    // Axis-aligned anchor routes: straight runs + slight corner fillets
+    if (wireRoutePointsAreOrthogonal(points)) {
+      return buildFilletedOrthoPathThroughPoints(points, WIRE_ORTHO_FILLET_PX);
     }
     return buildSmoothPathThroughPoints(points);
   }
@@ -22409,6 +23620,10 @@
       }
       return out;
     }
+    // Orthogonal remake / Manhattan routes: straight runs + slight corner fillets
+    if (wireRoutePointsAreOrthogonal(points)) {
+      return sampleFilletedOrthoRoute(points, WIRE_ORTHO_FILLET_PX, stepsPerSeg);
+    }
     const out = [];
     for (let i = 0; i < points.length - 1; i++) {
       const p0 = points[Math.max(0, i - 1)];
@@ -22449,6 +23664,43 @@
     return { ...samples[samples.length - 1] };
   }
 
+  /** Path length from one end until the heading turns (~first bend). */
+  function runLengthBeforeCorner(samples, segLens, fromStart) {
+    if (!samples || samples.length < 2 || !segLens.length) return 0;
+    const dirAt = (i) => {
+      const a = samples[i];
+      const b = samples[i + 1];
+      return { dx: b.x - a.x, dy: b.y - a.y };
+    };
+    if (fromStart) {
+      let ref = dirAt(0);
+      const rLen = Math.hypot(ref.dx, ref.dy) || 1;
+      ref = { dx: ref.dx / rLen, dy: ref.dy / rLen };
+      let acc = segLens[0];
+      for (let i = 1; i < segLens.length; i++) {
+        let d = dirAt(i);
+        const L = Math.hypot(d.dx, d.dy) || 1;
+        d = { dx: d.dx / L, dy: d.dy / L };
+        if (ref.dx * d.dx + ref.dy * d.dy < 0.94) break;
+        acc += segLens[i];
+      }
+      return acc;
+    }
+    const last = segLens.length - 1;
+    let ref = dirAt(last);
+    const rLen = Math.hypot(ref.dx, ref.dy) || 1;
+    ref = { dx: ref.dx / rLen, dy: ref.dy / rLen };
+    let acc = segLens[last];
+    for (let i = last - 1; i >= 0; i--) {
+      let d = dirAt(i);
+      const L = Math.hypot(d.dx, d.dy) || 1;
+      d = { dx: d.dx / L, dy: d.dy / L };
+      if (ref.dx * d.dx + ref.dy * d.dy < 0.94) break;
+      acc += segLens[i];
+    }
+    return acc;
+  }
+
   function tipPathsFromSamples(samples, options = {}) {
     const wantStart = options.start !== false;
     const wantEnd = options.end !== false;
@@ -22468,11 +23720,25 @@
       return { start: '', end: '', mid: polylinePath(samples) };
     }
 
-    let tipLen = Math.max(WIRE_TIP_MIN_PX, total * fraction);
-    tipLen = Math.min(tipLen, total * 0.45);
-    const underlap = underSleeve && wantEnd ? Math.min(tipLen * 0.65, tipLen) : 0;
-    const startCut = wantStart ? tipLen : 0;
-    const midEnd = wantEnd ? total - tipLen : total;
+    const tipMax = Number.isFinite(options.tipMaxPx) ? options.tipMaxPx : WIRE_TIP_MAX_PX;
+    const baseTip = Math.min(
+      tipMax,
+      Math.max(WIRE_TIP_MIN_PX, total * fraction),
+      total * 0.12,
+    );
+    // Never wrap a bend near the pad — keep copper on the exit stub only
+    const startRun = runLengthBeforeCorner(samples, segLens, true);
+    const endRun = runLengthBeforeCorner(samples, segLens, false);
+    const startTipLen = wantStart
+      ? Math.min(baseTip, Math.max(WIRE_TIP_MIN_PX, startRun * 0.72))
+      : 0;
+    const endTipLen = wantEnd
+      ? Math.min(baseTip, Math.max(WIRE_TIP_MIN_PX, endRun * 0.72))
+      : 0;
+
+    const underlap = underSleeve && wantEnd ? Math.min(endTipLen * 0.35, endTipLen) : 0;
+    const startCut = startTipLen;
+    const midEnd = wantEnd ? total - endTipLen : total;
     const tipBegin = wantEnd ? Math.max(startCut, midEnd - underlap) : total;
     const startJoin = pointAlongSamples(samples, segLens, total, startCut);
     const midJoin = pointAlongSamples(samples, segLens, total, midEnd);
@@ -22617,13 +23883,13 @@
       if (wire.cloth) wire.cloth.setAttribute('d', sleeveD);
       if (wire.tipStart) {
         wire.tipStart.setAttribute('stroke', WIRE_TIP_COLOR);
-        wire.tipStart.setAttribute('stroke-linecap', 'butt');
+        wire.tipStart.setAttribute('stroke-linecap', 'round');
         // Width: CSS tip 1 when legacy; dimensional stroke via applyNonHbWireGaugeStroke.
         wire.tipStart.removeAttribute('stroke-width');
       }
       if (wire.tipEnd) {
         wire.tipEnd.setAttribute('stroke', WIRE_TIP_COLOR);
-        wire.tipEnd.setAttribute('stroke-linecap', 'butt');
+        wire.tipEnd.setAttribute('stroke-linecap', 'round');
         wire.tipEnd.removeAttribute('stroke-width');
       }
     } else {
@@ -22745,50 +24011,16 @@
       return { x: endpoint.x, y: endpoint.y };
     }
 
-    const terminal = endpoint.terminal;
-    const center = getTerminalCenter(terminal);
+    // Always dock at the pad centre so tips/sleeves visually meet the terminal.
+    // Multi-wire separation is handled by route fans/stubs, not by lifting off the pad.
+    // If the host is hidden/not laid out, keep the last known world point (do not
+    // write zeros from getBoundingClientRect on display:none nodes).
+    if (!isDomElementLaidOut(endpoint.terminal)) {
+      return { x: endpoint.x, y: endpoint.y };
+    }
+    const center = getTerminalCenter(endpoint.terminal);
     const world = clientToWorld(center.x, center.y);
-    let cx = world.x;
-    let cy = world.y;
-
-    const attachedIds = terminalWireMap.get(terminal);
-    if (!attachedIds || attachedIds.size <= 1) {
-      return { x: cx, y: cy };
-    }
-
-    const attached = [...attachedIds]
-      .map((id) => wires.get(id))
-      .filter(Boolean)
-      .filter((w) => w.start.terminal === terminal || w.end.terminal === terminal);
-
-    const myIndex = attached.findIndex((w) => w.id === wire.id);
-    const count = attached.length;
-    if (myIndex === -1 || count <= 1) {
-      return { x: cx, y: cy };
-    }
-
-    const other = which === 'start' ? wire.end : wire.start;
-    let ox;
-    let oy;
-    if (other.terminal && document.body.contains(other.terminal)) {
-      const oc = getTerminalCenter(other.terminal);
-      const ow = clientToWorld(oc.x, oc.y);
-      ox = ow.x;
-      oy = ow.y;
-    } else {
-      ox = other.x;
-      oy = other.y;
-    }
-
-    const angle = Math.atan2(oy - cy, ox - cx);
-    const perp = angle + Math.PI / 2;
-    const spreadIndex = myIndex - (count - 1) / 2;
-    const offset = spreadIndex * 5;
-
-    return {
-      x: cx + Math.cos(perp) * offset,
-      y: cy + Math.sin(perp) * offset,
-    };
+    return { x: world.x, y: world.y };
   }
 
   function createWire(start, end, anchors) {
@@ -22824,6 +24056,7 @@
       // Always store current AWG for future wires; visuals only when dimensional ON.
       gaugeMm: wireGaugeMm,
       dashed: wireStyle === 'dashed',
+      routeMode: wireRouteMode === 'manhattan' ? 'manhattan' : 'free',
       layer: activeLayer,
       slack: 0,
       anchors: (anchors || [])
@@ -22832,6 +24065,15 @@
       start: { x: start.x, y: start.y, terminal: start.terminal || null },
       end: { x: end.x, y: end.y, terminal: end.terminal || null },
     };
+
+    if (wire.routeMode === 'manhattan') {
+      wire.anchors = normalizeManhattanAnchors(
+        { x: start.x, y: start.y },
+        { x: end.x, y: end.y },
+        wire.anchors,
+      );
+      wire.slack = 0;
+    }
 
     appendWireVisualLayers(wire, wire.dashed);
     syncWireBorderClasses(wire);
@@ -22889,12 +24131,29 @@
       }
     }
 
-    const points = (hbRoute || awRoute)
+    const pointsRaw = (hbRoute || awRoute)
       ? [routeStart, routeEnd]
       : getWireRoutePoints(wire, startPt, endPt);
+    const points = (!hbRoute && !awRoute && isManhattanWire(wire))
+      ? expandPointsToOrtho(pointsRaw)
+      : pointsRaw;
     const hasAnchors = !hbRoute && !awRoute && (wire.anchors || []).length > 0;
-    const slack = hasAnchors ? 0 : (wire.slack || 0);
-    const pathD = buildRoutedWirePath(points, slack);
+    const slack = hasAnchors || isManhattanWire(wire) ? 0 : (wire.slack || 0);
+    const pathD = isManhattanWire(wire) && points.length > 2
+      ? buildFilletedOrthoPathThroughPoints(points, WIRE_ORTHO_FILLET_PX)
+      : buildRoutedWirePath(points, slack);
+    const ortho = !hbRoute && !awRoute && (
+      isManhattanWire(wire) || (hasAnchors && wireRoutePointsAreOrthogonal(points))
+    );
+    wire.group.classList.toggle('ortho-route', ortho);
+    // Filleted ortho corners read cleaner with round joins
+    const join = 'round';
+    const cap = ortho ? 'butt' : 'round';
+    [wire.visible, wire.hit, wire.outline, wire.cloth, wire.selectBorder, wire.tipStart, wire.tipEnd].forEach((el) => {
+      if (!el) return;
+      el.setAttribute('stroke-linejoin', join);
+      if (el !== wire.hit) el.setAttribute('stroke-linecap', cap);
+    });
 
     applyWireGeometry(wire, pathD, { points, slack });
     wire.visible.setAttribute('stroke', WIRE_COLORS[wire.color]);
@@ -23315,14 +24574,22 @@
       ensurePreviewLine();
       setStatus(
         endpoint.terminal
-          ? 'Click canvas for curve anchors, or a terminal to finish'
-          : 'Click anchors to route, then a terminal to finish'
+          ? (wireRouteMode === 'manhattan'
+            ? 'Click canvas for orthogonal corners, or a terminal to finish'
+            : 'Click canvas for curve anchors, or a terminal to finish')
+          : (wireRouteMode === 'manhattan'
+            ? 'Click orthogonal corners, then a terminal to finish'
+            : 'Click anchors to route, then a terminal to finish')
       );
       return true;
     }
 
     if (endpoint.terminal) {
-      createWire(wireDraftStart, endpoint, wireDraftAnchors);
+      let finishAnchors = wireDraftAnchors;
+      if (wireRouteMode === 'manhattan') {
+        finishAnchors = finalizeManhattanDraftAnchors(wireDraftStart, endpoint, wireDraftAnchors);
+      }
+      createWire(wireDraftStart, endpoint, finishAnchors);
       cancelWireDraft();
       clearSnapState();
       reportGroundingStatus(`Wire on Layer ${activeLayer} — click for next wire`);
@@ -23330,14 +24597,31 @@
     }
 
     const free = e.shiftKey;
-    const ax = snapWorkspace(endpoint.x, free);
-    const ay = snapWorkspace(endpoint.y, free);
+    const prev = wireDraftAnchors.length
+      ? wireDraftAnchors[wireDraftAnchors.length - 1]
+      : { x: wireDraftStart.x, y: wireDraftStart.y };
+    let ax;
+    let ay;
+    if (wireRouteMode === 'manhattan') {
+      const snapped = manhattanAxisSnap(prev, endpoint.x, endpoint.y, free);
+      ax = snapped.x;
+      ay = snapped.y;
+    } else {
+      ax = snapWorkspace(endpoint.x, free);
+      ay = snapWorkspace(endpoint.y, free);
+    }
+    if (Math.hypot(ax - prev.x, ay - prev.y) < 1.5) {
+      setStatus('Corner too close to previous point — click farther along an axis');
+      return true;
+    }
     wireDraftAnchors.push({ x: ax, y: ay });
     clearSnapState();
     ensurePreviewLine();
     updatePreviewLine(e.clientX, e.clientY);
     setStatus(
-      `Anchor ${wireDraftAnchors.length} set — click more anchors, or a terminal to finish (Esc cancels)`
+      wireRouteMode === 'manhattan'
+        ? `Corner ${wireDraftAnchors.length} set — click more corners, or a terminal to finish (Esc cancels)`
+        : `Anchor ${wireDraftAnchors.length} set — click more anchors, or a terminal to finish (Esc cancels)`
     );
     return true;
   }
@@ -23368,9 +24652,17 @@
         wireDraftAnchors = [];
         clearSnapState();
         ensurePreviewLine();
-        setStatus('Click canvas for curve anchors, or a terminal to finish');
+        setStatus(
+          wireRouteMode === 'manhattan'
+            ? 'Click canvas for orthogonal corners, or a terminal to finish'
+            : 'Click canvas for curve anchors, or a terminal to finish'
+        );
       } else {
-        createWire(wireDraftStart, endpoint, wireDraftAnchors);
+        let finishAnchors = wireDraftAnchors;
+        if (wireRouteMode === 'manhattan') {
+          finishAnchors = finalizeManhattanDraftAnchors(wireDraftStart, endpoint, wireDraftAnchors);
+        }
+        createWire(wireDraftStart, endpoint, finishAnchors);
         cancelWireDraft();
         clearSnapState();
         reportGroundingStatus(`Wire on Layer ${activeLayer} — click for next wire`);
@@ -23412,6 +24704,12 @@
       if (wireMode) return;
       e.stopPropagation();
     });
+  }
+
+  function isDomElementLaidOut(el) {
+    if (!el || !document.body.contains(el)) return false;
+    if (typeof el.getClientRects !== 'function') return false;
+    return el.getClientRects().length > 0;
   }
 
   function getTerminalCenter(terminalEl) {
@@ -23977,7 +25275,7 @@
     if (activeWorkspacePage === 'electronics') {
       if (page !== 'electronics') el.classList.add('workspace-page-underlay');
     } else if (page === 'electronics') {
-      el.classList.add('workspace-page-hidden');
+      el.classList.add('workspace-page-underlay');
     }
 
     el.addEventListener('mousedown', (e) => {
@@ -24038,22 +25336,32 @@
       let wireSnapshot = null;
       let wiresDetached = false;
       let dragPrimary = el;
+      let dragMoveRaf = 0;
+      let pendingDragEvent = null;
+      let dragEnded = false;
       const movePack = resolveGroupUnitMoveTargets();
       // Group translate only when unit-select is active (not marquee / deep-select bypass)
       let dragTargets = movePack.components.length ? movePack.components : [...selectedComponents];
       let wireTargets = movePack.wires;
       const dragCopy = !!e.altKey;
+      const pointerId = typeof e.pointerId === 'number' ? e.pointerId : null;
 
       const rect = el.getBoundingClientRect();
       dragOffsetX = e.clientX - rect.left;
       dragOffsetY = e.clientY - rect.top;
 
-      function onMove(e) {
+      try {
+        if (pointerId != null) el.setPointerCapture(pointerId);
+      } catch (_) { /* ignore */ }
+
+      function applyDragFrame(ev) {
         if (!isDragging) {
-          const dx = e.clientX - startClientX;
-          const dy = e.clientY - startClientY;
+          const dx = ev.clientX - startClientX;
+          const dy = ev.clientY - startClientY;
           if (Math.hypot(dx, dy) < MARQUEE_MIN_PX) return;
           isDragging = true;
+          document.body.classList.add('is-selection-dragging');
+          markViewportInteracting(180);
 
           if (dragCopy) {
             const origLeft = parseFloat(dragPrimary.style.left) || 0;
@@ -24085,11 +25393,12 @@
           dragTargets.forEach((c) => c.classList.add('dragging'));
         }
 
+        markViewportInteracting(160);
         const dragScale = viewportScale();
         const canvasRect = canvas.getBoundingClientRect();
-        let newX = (e.clientX - dragOffsetX - canvasRect.left + canvas.scrollLeft - panX) / dragScale;
-        let newY = (e.clientY - dragOffsetY - canvasRect.top + canvas.scrollTop - panY) / dragScale;
-        const free = e.shiftKey && !snapPoint;
+        let newX = (ev.clientX - dragOffsetX - canvasRect.left + canvas.scrollLeft - panX) / dragScale;
+        let newY = (ev.clientY - dragOffsetY - canvasRect.top + canvas.scrollTop - panY) / dragScale;
+        const free = ev.shiftKey && !snapPoint;
 
         const primary = dragSnapshot.find((s) => s.el === dragPrimary);
         if (!primary) return;
@@ -24133,18 +25442,42 @@
         // Selected wires translate rigidly with assets (ends + bend midpoints)
         if (wireSnapshot) applyWireTranslateSnapshots(wireSnapshot, dx, dy);
 
-        updateAllWirePositions();
-        updateAssetConfigChrome();
-        if (activeWorkspaceGroupId) refreshActiveWorkspaceGroupVisual();
+        // Coalesce expensive wire/chrome work — full flush on pointer up.
+        scheduleViewportHeavyUpdate();
+      }
+
+      function onMove(ev) {
+        if (dragEnded) return;
+        pendingDragEvent = ev;
+        if (dragMoveRaf) return;
+        dragMoveRaf = requestAnimationFrame(() => {
+          dragMoveRaf = 0;
+          const frame = pendingDragEvent;
+          pendingDragEvent = null;
+          if (!frame || dragEnded) return;
+          applyDragFrame(frame);
+        });
       }
 
       function onUp() {
+        if (dragEnded) return;
+        dragEnded = true;
+        if (dragMoveRaf) {
+          cancelAnimationFrame(dragMoveRaf);
+          dragMoveRaf = 0;
+        }
+        if (pendingDragEvent) {
+          applyDragFrame(pendingDragEvent);
+          pendingDragEvent = null;
+        }
+        document.body.classList.remove('is-selection-dragging');
+        try {
+          if (pointerId != null) el.releasePointerCapture(pointerId);
+        } catch (_) { /* ignore */ }
         if (isDragging) {
           dragTargets.forEach((c) => c.classList.remove('dragging'));
           if (wiresDetached && wireSnapshot) restoreWireTerminalsAfterTranslate(wireSnapshot);
-          updateAllWirePositions();
-          updateAssetConfigChrome();
-          if (activeWorkspaceGroupId) refreshActiveWorkspaceGroupVisual();
+          flushViewportHeavyUpdate();
           markProjectDirty();
           refreshLightningWireGlow();
           refreshShortCircuitCheck();
@@ -24152,12 +25485,20 @@
         }
         dragSnapshot = null;
         wireSnapshot = null;
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('pointermove', onMove, true);
+        document.removeEventListener('pointerup', onUp, true);
+        document.removeEventListener('pointercancel', onUp, true);
+        document.removeEventListener('mousemove', onMove, true);
+        document.removeEventListener('mouseup', onUp, true);
+        window.removeEventListener('blur', onUp);
       }
 
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      document.addEventListener('pointermove', onMove, true);
+      document.addEventListener('pointerup', onUp, true);
+      document.addEventListener('pointercancel', onUp, true);
+      document.addEventListener('mousemove', onMove, true);
+      document.addEventListener('mouseup', onUp, true);
+      window.addEventListener('blur', onUp);
     });
   }
 
@@ -24483,6 +25824,81 @@
     setWireMode(!wireMode);
   });
 
+  btnErase?.addEventListener('click', () => {
+    setEraseMode(!eraseMode);
+  });
+
+  btnSettings?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = appSettingsPanel?.classList.contains('hidden');
+    setSettingsPanelOpen(!!open);
+  });
+
+  appSettingsPanel?.addEventListener('mousedown', (e) => e.stopPropagation());
+  appSettingsPanel?.addEventListener('click', (e) => e.stopPropagation());
+
+  document.addEventListener('mousedown', (e) => {
+    if (!appSettingsPanel || appSettingsPanel.classList.contains('hidden')) return;
+    if (appSettingsPanel.contains(e.target) || btnSettings?.contains(e.target)) return;
+    setSettingsPanelOpen(false);
+  });
+
+  window.addEventListener('resize', () => {
+    if (appSettingsPanel && !appSettingsPanel.classList.contains('hidden')) {
+      positionSettingsPanel();
+    }
+  });
+
+  settingsColorblind?.addEventListener('change', () => {
+    applyColorblindMode(settingsColorblind.value);
+    saveUiPrefs();
+    setStatus(`Colorblind mode: ${settingsColorblind.options[settingsColorblind.selectedIndex]?.text || settingsColorblind.value}`);
+  });
+
+  settingsUiText?.addEventListener('input', () => {
+    uiTextScalePct = Number(settingsUiText.value) || 100;
+    applyUiScalePrefs();
+    saveUiPrefs();
+  });
+
+  settingsUiElement?.addEventListener('input', () => {
+    uiElementScalePct = Number(settingsUiElement.value) || 100;
+    applyUiScalePrefs();
+    saveUiPrefs();
+  });
+
+  document.getElementById('settings-ui-text-reset')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    uiTextScalePct = 100;
+    applyUiScalePrefs();
+    saveUiPrefs();
+  });
+
+  document.getElementById('settings-ui-element-reset')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    uiElementScalePct = 100;
+    applyUiScalePrefs();
+    saveUiPrefs();
+  });
+
+  document.getElementById('settings-colorblind-reset')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    applyColorblindMode('off');
+    saveUiPrefs();
+    setStatus('Colorblind mode: Off');
+  });
+
+  settingsHeaderDither?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    applyHeaderDitherEnabled(!headerDitherEnabled);
+    saveUiPrefs();
+    setStatus(`Header dither: ${headerDitherEnabled ? 'On' : 'Off'}`);
+  });
+
   wireGaugeDimensionalToggle?.addEventListener('change', (e) => {
     e.stopPropagation();
     setDimensionalWireGauge(!!wireGaugeDimensionalToggle.checked);
@@ -24552,6 +25968,8 @@
 
   btnSolid.addEventListener('click', () => setWireStyle('solid'));
   btnDashed.addEventListener('click', () => setWireStyle('dashed'));
+  btnRouteFree?.addEventListener('click', () => setWireRouteMode('free'));
+  btnRouteManhattan?.addEventListener('click', () => setWireRouteMode('manhattan'));
 
   btnLayerVisibility.addEventListener('click', toggleLayerVisibility);
   btnLayerFront.addEventListener('click', () => setLayerAbove(activeLayer, true));
@@ -24770,7 +26188,7 @@
     swatch.addEventListener('click', () => setWireColor(swatch.dataset.color));
   });
 
-  btnAccentCycle.addEventListener('click', cycleAccentTheme);
+  btnAccentCycle?.addEventListener('click', cycleAccentTheme);
 
   assetConfigBtn?.addEventListener('mousedown', (e) => {
     e.stopPropagation();
@@ -24801,6 +26219,23 @@
       reportGroundingStatus(`${comp.dataset.type}: no grounding (NOGROUND)`);
     }
   });
+
+  document.getElementById('asset-config-hb-wiring')?.addEventListener('change', (e) => {
+    const comp = getSingleSelectedComponent();
+    if (!comp || !isDualCoilComponent(comp)) return;
+    const mode = e.target.value === 'leads' ? 'leads' : 'series';
+    if (mode === 'series') delete comp.dataset.hbWiringMode;
+    else comp.dataset.hbWiringMode = 'leads';
+    notifySchematicCircuitChanged();
+    markProjectDirty();
+    setStatus(
+      mode === 'series'
+        ? `${comp.dataset.type}: stock series (N↔R, S+G)`
+        : `${comp.dataset.type}: independent 4-conductor leads`
+    );
+  });
+  document.getElementById('asset-config-hb-wiring')?.addEventListener('mousedown', (e) => e.stopPropagation());
+  document.getElementById('asset-config-hb-wiring')?.addEventListener('click', (e) => e.stopPropagation());
 
   document.getElementById('asset-config-switch-type')?.addEventListener('change', (e) => {
     const comp = getSingleSelectedComponent();
@@ -25964,6 +27399,7 @@
       canvas.focus();
       return;
     }
+    if (eraseMode) return;
     if (moveTool) return;
     // Capture: rapid double-click cycles overlaps; triple-click opens cog → first value field
     if (
@@ -26035,12 +27471,25 @@
     if (canStartMarquee(e)) {
       marqueeStart = getCanvasCoords(e);
       marqueeActive = false;
-      canvas.focus();
+      marqueeLastClient = { x: e.clientX, y: e.clientY };
+      marqueeFinishing = false;
+      canvas.focus({ preventScroll: true });
       return;
     }
     if (e.target === canvas || e.target === workspace || e.target.closest('.wire-stack')) {
       canvas.focus();
     }
+  }, true);
+
+  document.addEventListener('mousedown', (e) => {
+    if (!eraseMode || e.button !== 0 || eraseStrokeActive) return;
+    if (spacePanHeld) return;
+    if (e.target.closest?.(
+      '.app-header, .toolbar, .app-settings, .context-menu, .wire-gauge-panel, .project-switcher, .status-bar, .schematic-peek, #asset-config-menu, #asset-config-btn, #asset-state-chrome, #asset-state-term-menu, #workspace-group-chrome, .note-window, .schematic-pin-window, .layer-help-popup, .workspace-layer-rail, .workspace-page-bar'
+    )) return;
+    beginEraseStroke(e.clientX, e.clientY);
+    e.preventDefault();
+    e.stopPropagation();
   }, true);
 
   // Native dblclick is too loose — overlap cycle / cog open use quick-succession clicks only
@@ -26050,7 +27499,12 @@
       moveSpacePanDrag(e.clientX, e.clientY);
       return;
     }
+    if (eraseStrokeActive) {
+      continueEraseStroke(e.clientX, e.clientY);
+      return;
+    }
     if (marqueeStart) {
+      marqueeLastClient = { x: e.clientX, y: e.clientY };
       const current = getCanvasCoords(e);
       const rect = normalizeRect(marqueeStart.x, marqueeStart.y, current.x, current.y);
       if (!marqueeActive
@@ -26064,15 +27518,44 @@
     }
   });
 
+  function endMarqueePointer(e) {
+    if (spacePanDragging || eraseStrokeActive) return;
+    if (!marqueeStart) return;
+    if (e && Number.isFinite(e.clientX)) {
+      marqueeLastClient = { x: e.clientX, y: e.clientY };
+    }
+    finishMarquee(e);
+  }
+
   document.addEventListener('mouseup', (e) => {
     if (spacePanDragging) {
       endSpacePanDrag();
       suppressNextClick = true;
       return;
     }
-    if (marqueeStart) {
-      finishMarquee(e);
+    if (eraseStrokeActive) {
+      endEraseStroke();
+      suppressNextClick = true;
+      return;
     }
+    endMarqueePointer(e);
+  });
+  document.addEventListener('pointerup', endMarqueePointer, true);
+  document.addEventListener('pointercancel', (e) => {
+    // Commit selection if the drag already crossed threshold; otherwise clear.
+    if (!marqueeStart) return;
+    if (marqueeActive) endMarqueePointer(e);
+    else cancelMarqueeInteraction();
+  }, true);
+  window.addEventListener('blur', () => {
+    if (marqueeStart && marqueeActive) finishMarquee(null);
+    else if (marqueeStart) cancelMarqueeInteraction();
+    document.body.classList.remove('is-selection-dragging', 'is-viewport-interacting');
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'hidden') return;
+    if (marqueeStart && marqueeActive) finishMarquee(null);
+    else if (marqueeStart) cancelMarqueeInteraction();
   });
 
   canvas.addEventListener('mousemove', (e) => {
@@ -26207,6 +27690,21 @@
 
     const mod = e.ctrlKey || e.metaKey;
     if (!isTypingTarget() && !textCommandOpen && !isEditorOpen()) {
+      if (mod && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        handleProjectSaveClick();
+        return;
+      }
+      if (mod && e.shiftKey && (e.key === 'g' || e.key === 'G')) {
+        e.preventDefault();
+        ungroupWorkspaceSelection();
+        return;
+      }
+      if (mod && (e.key === 'g' || e.key === 'G')) {
+        e.preventDefault();
+        createWorkspaceGroupFromSelection();
+        return;
+      }
       if (mod && (e.key === 'z' || e.key === 'Z')) {
         e.preventDefault();
         if (e.shiftKey) redoEdit();
@@ -26236,12 +27734,17 @@
     }
 
     if (e.key === 'q' || e.key === 'Q') {
-      if (isTypingTarget() || isEditorOpen() || textCommandOpen) return;
+      if (!canUseAssetStateHotkeys()) return;
       if (e.repeat) return;
       qKeyHeld = true;
       qOpenedWheel = false;
       qKeyDownAt = performance.now();
       scheduleQHoldWheel();
+      return;
+    }
+    if ((e.key === 'e' || e.key === 'E') && canUseAssetStateHotkeys()) {
+      if (e.repeat) return;
+      if (tryCycleSelectedAssetState(1)) e.preventDefault();
       return;
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -26323,16 +27826,12 @@
         setLayerAbove(activeLayer, e.key === 'ArrowUp');
       }
     }
-    if ((e.key === 'e' || e.key === 'E')
-      && !isTypingTarget()
-      && !isEditorOpen()
-      && !textCommandOpen
-      && document.getElementById('asset-editor')?.classList.contains('hidden')) {
-      if (selectedComponents.size > 0 && cycleSelectedComponentState(1)) {
-        e.preventDefault();
-      }
-    }
     if (e.key === 'Escape') {
+      if (marqueeStart) {
+        e.preventDefault();
+        cancelMarqueeInteraction();
+        return;
+      }
       if (textCommandOpen) {
         e.preventDefault();
         closeTextCommandBox();
@@ -26379,6 +27878,17 @@
         closeAssetConfigMenu();
         return;
       }
+      if (appSettingsPanel && !appSettingsPanel.classList.contains('hidden')) {
+        e.preventDefault();
+        setSettingsPanelOpen(false);
+        return;
+      }
+      if (eraseMode) {
+        e.preventDefault();
+        endEraseStroke();
+        setEraseMode(false);
+        return;
+      }
       cancelWireDraft();
       setPlacementMode(null);
       setWireMode(false);
@@ -26395,26 +27905,31 @@
       return;
     }
     if (e.key !== 'q' && e.key !== 'Q') return;
-    if (isTypingTarget() || isEditorOpen()) return;
+    if (!canUseAssetStateHotkeys()) return;
     clearTimeout(qHoldTimer);
     const wasTap = performance.now() - qKeyDownAt < Q_TAP_MAX_MS;
     if (qOpenedWheel && !wasTap) {
       confirmAssetWheelSelection();
     } else if (selectedComponents.size > 0) {
-      cycleSelectedComponentState(-1);
+      tryCycleSelectedAssetState(-1);
     }
     qKeyHeld = false;
     qOpenedWheel = false;
     closeAssetWheel();
-  });
+  }, true);
 
   window.addEventListener('blur', () => {
     setSpacePanHeld(false);
     endSpacePanDrag();
   });
 
-  const PROJECTS_STORAGE_KEY = 'guitar-wiring-projects-v1';
-  const DEFAULT_PROJECT_NAME = 'Unsaved Project';
+  const PROJECTS_STORAGE_KEY = 'endo-asd-projects-v1';
+  const PROJECTS_STORAGE_KEY_LEGACY = 'guitar-wiring-projects-v1';
+  const DEFAULT_PROJECT_NAME = 'New Project';
+  const DEMO_SSS_PROJECT_ID = 'demo-sss';
+  const DEMO_SSS_PROJECT_NAME = 'SSS Demo';
+  const DEMO_SSS2_PROJECT_ID = 'demo-sss-2';
+  const DEMO_SSS2_PROJECT_NAME = 'HSS Demo';
 
   let projectRecords = [];
   let activeProjectId = null;
@@ -26429,6 +27944,19 @@
   const projectSwitcherEl = () => document.getElementById('project-switcher');
   const projectDetailsEl = () => document.getElementById('project-details-dialog');
   const projectDetailsNameEl = () => document.getElementById('project-details-name');
+
+  function isDemoProjectId(id) {
+    return id === DEMO_SSS_PROJECT_ID || id === DEMO_SSS2_PROJECT_ID;
+  }
+
+  function isActiveDemoProject() {
+    return isDemoProjectId(activeProjectId);
+  }
+
+  function demoProjectNameForId(id) {
+    if (id === DEMO_SSS2_PROJECT_ID) return DEMO_SSS2_PROJECT_NAME;
+    return DEMO_SSS_PROJECT_NAME;
+  }
 
   function markProjectDirty() {
     if (!historySuspended) {
@@ -26615,6 +28143,7 @@
       hbLoomSlack: el.dataset.hbLoomSlack || '',
       hbLoomAnchors: el.dataset.hbLoomAnchors || '',
       hbWireLayer: el.dataset.hbWireLayer || '',
+      hbWiringMode: el.dataset.hbWiringMode || '',
       hbTip0Left: el.dataset.hbTip0Left || '',
       hbTip0Top: el.dataset.hbTip0Top || '',
       hbTip1Left: el.dataset.hbTip1Left || '',
@@ -26662,6 +28191,7 @@
       id: wire.id,
       color: wire.color,
       dashed: !!wire.dashed,
+      routeMode: wire.routeMode === 'manhattan' ? 'manhattan' : 'free',
       layer: wire.layer,
       slack: wire.slack || 0,
       anchors: (wire.anchors || []).map((a) => ({ x: a.x, y: a.y })),
@@ -26901,16 +28431,25 @@
 
   function loadProjectRecords() {
     try {
-      const raw = JSON.parse(localStorage.getItem(PROJECTS_STORAGE_KEY) || 'null');
+      const raw = JSON.parse(
+        localStorage.getItem(PROJECTS_STORAGE_KEY)
+        || localStorage.getItem(PROJECTS_STORAGE_KEY_LEGACY)
+        || 'null'
+      );
       if (!raw || !Array.isArray(raw.projects)) {
         projectRecords = [];
         activeProjectId = null;
         return;
       }
-      projectRecords = raw.projects.filter((p) => p && p.id && p.name);
-      activeProjectId = raw.activeId && projectRecords.some((p) => p.id === raw.activeId)
-        ? raw.activeId
-        : null;
+      projectRecords = raw.projects.filter((p) => p && p.id && p.name && !isDemoProjectId(p.id) && !p.isDemo);
+      // Never restore temporary demos as the active board — default is a clear New Project.
+      if (isDemoProjectId(raw.activeId)) {
+        activeProjectId = null;
+      } else {
+        activeProjectId = raw.activeId && projectRecords.some((p) => p.id === raw.activeId)
+          ? raw.activeId
+          : null;
+      }
     } catch {
       projectRecords = [];
       activeProjectId = null;
@@ -26918,9 +28457,13 @@
   }
 
   function persistProjectRecords() {
+    const projects = projectRecords.filter((p) => p && p.id && !isDemoProjectId(p.id) && !p.isDemo);
     localStorage.setItem(
       PROJECTS_STORAGE_KEY,
-      JSON.stringify({ projects: projectRecords, activeId: activeProjectId })
+      JSON.stringify({
+        projects,
+        activeId: activeProjectId || null,
+      })
     );
   }
 
@@ -26952,8 +28495,9 @@
       activeWorkspacePage,
       panelActiveLayer: pageLayerStacks.panel.activeLayer,
       panelLayerCount: pageLayerStacks.panel.layerCount,
-      wireColor,
+      color: wireColor,
       wireStyle,
+      wireRouteMode,
       wireGaugeMm,
       layerState: JSON.parse(JSON.stringify(layerState)),
       panelLayerState: JSON.parse(JSON.stringify(pageLayerStacks.panel.layerState)),
@@ -27065,6 +28609,7 @@
       // Legacy projects omit gaugeMm → leave unset so CSS stroke-width: 2 remains
       gaugeMm: Number.isFinite(data.gaugeMm) ? data.gaugeMm : undefined,
       dashed: !!data.dashed,
+      routeMode: data.routeMode === 'manhattan' ? 'manhattan' : 'free',
       layer: data.layer || 1,
       slack: data.slack || 0,
       anchors: Array.isArray(data.anchors)
@@ -27203,6 +28748,13 @@
       wireStyle = data.wireStyle;
       btnSolid.classList.toggle('active', wireStyle === 'solid');
       btnDashed.classList.toggle('active', wireStyle === 'dashed');
+    }
+    if (data.wireRouteMode === 'free' || data.wireRouteMode === 'manhattan') {
+      wireRouteMode = data.wireRouteMode;
+      btnRouteFree?.classList.toggle('active', wireRouteMode === 'free');
+      btnRouteManhattan?.classList.toggle('active', wireRouteMode === 'manhattan');
+      btnRouteFree?.setAttribute('aria-pressed', wireRouteMode === 'free' ? 'true' : 'false');
+      btnRouteManhattan?.setAttribute('aria-pressed', wireRouteMode === 'manhattan' ? 'true' : 'false');
     }
     if (Number.isFinite(data.wireGaugeMm) && data.wireGaugeMm > 0) {
       wireGaugeMm = data.wireGaugeMm;
@@ -27393,6 +28945,7 @@
   }
 
   function writeActiveProjectSnapshot() {
+    if (isActiveDemoProject()) return;
     const data = serializeProjectData();
     const now = Date.now();
     if (!activeProjectId) {
@@ -27441,7 +28994,9 @@
     const itemsEl = document.getElementById('project-switcher-items');
     if (!itemsEl) return;
     itemsEl.innerHTML = '';
-    const sorted = [...projectRecords].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const sorted = [...projectRecords]
+      .filter((p) => !isDemoProjectId(p.id) && !p.isDemo)
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     sorted.forEach((project) => {
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -27453,6 +29008,44 @@
       btn.addEventListener('click', () => switchToProject(project.id));
       itemsEl.appendChild(btn);
     });
+
+    // Temporary SSS demo sits under saved projects
+    const demoBtn = document.createElement('button');
+    demoBtn.type = 'button';
+    demoBtn.className = 'project-switcher-item is-demo';
+    if (activeProjectId === DEMO_SSS_PROJECT_ID) demoBtn.classList.add('is-active');
+    demoBtn.textContent = DEMO_SSS_PROJECT_NAME;
+    demoBtn.title = 'Temporary SSS Strat demo (not permanently saved)';
+    demoBtn.setAttribute('role', 'listitem');
+    demoBtn.addEventListener('click', () => switchToProject(DEMO_SSS_PROJECT_ID));
+    itemsEl.appendChild(demoBtn);
+  }
+
+  function beginBugtestRecordingQuiet() {
+    try {
+      if (window.ErrorReporting && typeof window.ErrorReporting.startRecording === 'function') {
+        const st = typeof window.ErrorReporting.getState === 'function'
+          ? window.ErrorReporting.getState()
+          : null;
+        if (!st || st.mode !== 'recording') {
+          window.ErrorReporting.startRecording();
+        }
+        if (typeof window.ErrorReporting.setTermOpen === 'function') {
+          window.ErrorReporting.setTermOpen(true);
+        }
+      }
+    } catch (_) { /* ignore */ }
+  }
+
+  function openSssDemoProject() {
+    activeProjectId = DEMO_SSS_PROJECT_ID;
+    projectName = DEMO_SSS_PROJECT_NAME;
+    projectDirty = false;
+    persistProjectRecords();
+    seedSssRendererDemo({ temporary: true });
+    projectDirty = false;
+    updateProjectSwitcherUI();
+    setStatus(`Opened temporary “${DEMO_SSS_PROJECT_NAME}”`);
   }
 
   function waitMs(ms) {
@@ -27530,7 +29123,7 @@
   }
 
   function handleProjectSaveClick() {
-    if (!activeProjectId || !projectName.trim()) {
+    if (isActiveDemoProject() || !activeProjectId || !projectName.trim()) {
       openProjectDetails('save-first');
       return;
     }
@@ -27538,6 +29131,10 @@
   }
 
   function handleProjectRenameClick() {
+    if (isActiveDemoProject()) {
+      openProjectDetails('save-first');
+      return;
+    }
     openProjectDetails(activeProjectId && projectName.trim() ? 'rename' : 'save-first');
   }
 
@@ -27550,6 +29147,15 @@
     const title = document.getElementById('asset-delete-confirm-title');
     const message = document.getElementById('asset-delete-confirm-message');
     if (!dialog || !title || !message) return;
+    if (isActiveDemoProject()) {
+      const demoLabel = projectName.trim() || demoProjectNameForId(activeProjectId);
+      title.textContent = 'Close temporary demo?';
+      message.textContent = `"${demoLabel}" is temporary and is not stored with your saves. Close it and return to a blank board?`;
+      pendingProjectDelete = true;
+      dialog.classList.remove('hidden');
+      document.getElementById('asset-delete-confirm-cancel')?.focus();
+      return;
+    }
     const label = projectName.trim() || DEFAULT_PROJECT_NAME;
     title.textContent = 'Delete project?';
     message.textContent = `Delete "${label}"? This cannot be undone.`;
@@ -27564,6 +29170,19 @@
 
     const deletedName = projectName.trim() || DEFAULT_PROJECT_NAME;
     const deletedId = activeProjectId;
+
+    if (isDemoProjectId(deletedId)) {
+      const closedName = deletedName || demoProjectNameForId(deletedId);
+      activeProjectId = null;
+      projectName = '';
+      projectDirty = false;
+      persistProjectRecords();
+      applyProjectData(null, { resetHistory: true });
+      document.getElementById('asset-delete-confirm')?.classList.add('hidden');
+      updateProjectSwitcherUI();
+      setStatus(`Closed temporary “${closedName}”`);
+      return;
+    }
 
     if (deletedId) {
       projectRecords = projectRecords.filter((p) => p.id !== deletedId);
@@ -27639,6 +29258,10 @@
     }
 
     projectName = name;
+    if (isActiveDemoProject()) {
+      // Promote temporary demo board into a real saved project
+      activeProjectId = null;
+    }
     writeActiveProjectSnapshot();
     projectDirty = false;
     updateProjectSwitcherUI();
@@ -27648,10 +29271,19 @@
 
   function switchToProject(projectId) {
     if (projectId === activeProjectId) return;
+
+    if (projectId === DEMO_SSS_PROJECT_ID) {
+      if (projectDirty && activeProjectId && projectName.trim() && !isActiveDemoProject()) {
+        writeActiveProjectSnapshot();
+      }
+      openSssDemoProject();
+      return;
+    }
+
     const record = projectRecords.find((p) => p.id === projectId);
     if (!record) return;
 
-    if (projectDirty && activeProjectId && projectName.trim()) {
+    if (projectDirty && activeProjectId && projectName.trim() && !isActiveDemoProject()) {
       writeActiveProjectSnapshot();
     }
 
@@ -27666,7 +29298,7 @@
 
   function initProjectSwitcher() {
     loadProjectRecords();
-    if (activeProjectId) {
+    if (activeProjectId && !isDemoProjectId(activeProjectId)) {
       const record = getActiveProjectRecord();
       if (record) {
         projectName = record.name;
@@ -27678,9 +29310,14 @@
         applyProjectData(null, { resetHistory: true });
       }
     } else {
+      activeProjectId = null;
+      projectName = '';
+      projectDirty = false;
       applyProjectData(null, { resetHistory: true });
+      persistProjectRecords();
     }
     updateProjectSwitcherUI();
+    setSchematicPeekOpen(false);
 
     document.getElementById('project-switcher-chevron')?.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -27742,8 +29379,101 @@
 
   function initLogoMark() {
     const logoMark = document.querySelector('[data-logo-flash]');
-    const logoBubbles = document.querySelectorAll('.logo-mark__blob');
+    const logoBubbles = logoMark ? logoMark.querySelectorAll('.logo-mark__blob') : [];
+    const appHeader = document.querySelector('.app-header');
     if (!logoMark) return;
+
+    /** Original half-tone light, slightly darker — dither start state. */
+    const BASE_DITHER = [
+      { r: 198, g: 198, b: 204, a: 0.14 },
+      { r: 186, g: 186, b: 192, a: 0.11 },
+      { r: 176, g: 176, b: 182, a: 0.09 },
+      { r: 192, g: 192, b: 198, a: 0.1 },
+      { r: 168, g: 168, b: 174, a: 0.07 },
+    ];
+    const DITHER_TARGET_ALPHAS = [0.2, 0.16, 0.13, 0.15, 0.11];
+    const DITHER_BLEND_MS = 60_000;
+
+    let ditherFrom = BASE_DITHER.map((c) => ({ ...c }));
+    let ditherTo = BASE_DITHER.map((c) => ({ ...c }));
+    let ditherBlendStart = 0;
+    let ditherBlendRaf = 0;
+
+    function parseCssRgb(cssColor) {
+      const m = String(cssColor || '').match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i);
+      if (!m) return null;
+      return {
+        r: Math.round(Number(m[1])),
+        g: Math.round(Number(m[2])),
+        b: Math.round(Number(m[3])),
+      };
+    }
+
+    function applyDitherColors(colors) {
+      if (!appHeader) return;
+      colors.forEach((c, i) => {
+        appHeader.style.setProperty(
+          `--header-dither-${i + 1}`,
+          `rgba(${Math.round(c.r)}, ${Math.round(c.g)}, ${Math.round(c.b)}, ${c.a})`,
+        );
+      });
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function sampleDitherAt(t) {
+      const u = Math.max(0, Math.min(1, t));
+      return ditherFrom.map((from, i) => {
+        const to = ditherTo[i] || from;
+        return {
+          r: lerp(from.r, to.r, u),
+          g: lerp(from.g, to.g, u),
+          b: lerp(from.b, to.b, u),
+          a: lerp(from.a, to.a, u),
+        };
+      });
+    }
+
+    function tickDitherBlend(now) {
+      const t = (now - ditherBlendStart) / DITHER_BLEND_MS;
+      const colors = sampleDitherAt(t);
+      applyDitherColors(colors);
+      if (t >= 1) {
+        ditherFrom = ditherTo.map((c) => ({ ...c }));
+        ditherBlendRaf = 0;
+        return;
+      }
+      ditherBlendRaf = requestAnimationFrame(tickDitherBlend);
+    }
+
+    /** Slowly introduce current lava blob colours into the dither (~1 min). */
+    function beginDitherColourBleed() {
+      if (!appHeader) return;
+      const now = performance.now();
+      const progress = ditherBlendRaf
+        ? Math.min(1, (now - ditherBlendStart) / DITHER_BLEND_MS)
+        : 1;
+      ditherFrom = sampleDitherAt(progress);
+      ditherTo = [...logoBubbles].map((bubble, i) => {
+        const rgb = parseCssRgb(getComputedStyle(bubble).backgroundColor) || BASE_DITHER[i];
+        return {
+          r: rgb.r,
+          g: rgb.g,
+          b: rgb.b,
+          a: DITHER_TARGET_ALPHAS[i] ?? 0.12,
+        };
+      });
+      while (ditherTo.length < BASE_DITHER.length) {
+        ditherTo.push({ ...BASE_DITHER[ditherTo.length] });
+      }
+      if (ditherBlendRaf) cancelAnimationFrame(ditherBlendRaf);
+      ditherBlendStart = now;
+      ditherBlendRaf = requestAnimationFrame(tickDitherBlend);
+    }
+
+    applyDitherColors(BASE_DITHER);
 
     logoMark.addEventListener('click', () => {
       logoBubbles.forEach((bubble) => {
@@ -27752,6 +29482,8 @@
         const lightness = 35 + Math.floor(Math.random() * 25);
         bubble.style.backgroundColor = `hsl(${hue} ${saturation}% ${lightness}%)`;
       });
+      // Do not snap dither colours — ease lava hues in over ~1 minute (only when dither is on)
+      if (headerDitherEnabled) beginDitherColourBleed();
 
       logoMark.classList.remove('is-flashing');
       void logoMark.offsetWidth;
@@ -28075,9 +29807,8 @@
     const template = GuitarAssets.getTemplate(id);
     const subtype = template?.subtype || id;
     if (subtype === 'singlecoil' || id === 'singlecoil') return 'pickup-sc';
-    if (subtype === 'dualcoil' || subtype === '4conductor' || id === 'dualcoil' || id === '4conductor') {
-      return 'pickup-hb';
-    }
+    if (subtype === 'dualcoil' || id === 'dualcoil') return 'pickup-hb';
+    if (subtype === '4conductor' || id === '4conductor') return 'pickup-4c';
     if (subtype === 'push-pot-on-on' || id === 'push-pot-on-on' || !!template?.pushPull) {
       return 'push-pot';
     }
@@ -28126,6 +29857,7 @@
     const order = {
       'pickup-sc': 0,
       'pickup-hb': 0,
+      'pickup-4c': 0,
       battery: 1,
       'dc-jack': 1,
       'heater-supply': 1,
@@ -28172,6 +29904,8 @@
       if (!comp) return null;
       if (getComponentWorkspacePage(comp) !== 'electronics') return null;
       if (comp.classList.contains('workspace-page-hidden')) return null;
+      // Disabled subgroups: visible for reference, excluded from schematic + engines
+      if (comp.classList.contains('is-subgroup-disabled')) return null;
       if (groupId && !isComponentActiveInGroupSource(comp, groupId)) return null;
       const id = comp.dataset.id;
       if (!id) return null;
@@ -28184,6 +29918,7 @@
     wires.forEach((wire) => {
       if (!wire?.start?.terminal || !wire?.end?.terminal) return;
       if (wire.group?.classList.contains('workspace-page-hidden')) return;
+      if (wire.group?.classList.contains('is-subgroup-disabled')) return;
       if (groupId && !isWireActiveInGroupSource(wire, groupId)) return;
       const a = wire.start.terminal.closest?.('.component');
       const b = wire.end.terminal.closest?.('.component');
@@ -28277,12 +30012,21 @@
       if (a.y !== b.y) return a.y - b.y;
       return a.x - b.x;
     });
-    const islands = ranked.map((entry, index) => ({
-      index,
-      ids: entry.ids,
-      idSet: new Set(entry.ids),
-      label: `Circuit ${index + 1}`,
-    }));
+    const islands = ranked.map((entry, index) => {
+      const idSet = new Set(entry.ids);
+      const group = findWorkspaceGroupForCircuitIsland(idSet);
+      return {
+        index,
+        ids: entry.ids,
+        idSet,
+        label: formatSchematicCircuitTitle({
+          circuitIndex: index,
+          islandCount: ranked.length,
+          group,
+          hasCircuit: true,
+        }),
+      };
+    });
     return { ...graph, islands };
   }
 
@@ -28425,10 +30169,38 @@
   }
 
   /**
+   * Wire neighbors plus cap / HB / asset tip docks attached to this terminal
+   * (same sources as eachCapTipAttachmentPair / peers).
+   */
+  function schematicNeighborTerminalsIncludingDocks(term) {
+    const out = schematicWireNeighborTerminals(term);
+    if (!term) return out;
+    const seen = new Set(out);
+    function add(other) {
+      if (!other || other === term || seen.has(other)) return;
+      seen.add(other);
+      out.push(other);
+    }
+    eachCapTipAttachmentPair((tip, target) => {
+      if (tip === term) add(target);
+      else if (target === term) add(tip);
+    });
+    eachHbTipAttachmentPair((tip, target) => {
+      if (tip === term) add(target);
+      else if (target === term) add(tip);
+    });
+    eachAssetWireTipAttachmentPair((tip, target) => {
+      if (tip === term) add(target);
+      else if (target === term) add(tip);
+    });
+    return out;
+  }
+
+  /**
    * NA guitar practice: volume cold lug (1) is soldered to the pot case.
    * Bond on the schematic when the case is on the ground net and lug 1 is not
-   * used as a signal node (no non-ground wires). Also mirrored in the DC graph
-   * and as a dashed workspace solder link (`syncPotCaseBondVisual`).
+   * used as a signal node (no non-ground wires or tip docks). Also mirrored in
+   * the DC graph and as a dashed workspace solder link (`syncPotCaseBondVisual`).
    */
   function computePotBondCaseToLug1(comp) {
     if (!isPotentiometerComponent(comp)) return false;
@@ -28436,9 +30208,9 @@
     const lug1 = track?.lug1;
     const caseG = track?.caseG;
     if (!lug1 || !caseG || !schematicTerminalLooksLikeGround(caseG)) return false;
-    const caseN = schematicWireNeighborTerminals(caseG);
+    const caseN = schematicNeighborTerminalsIncludingDocks(caseG);
     if (!caseN.length) return false;
-    const lug1N = schematicWireNeighborTerminals(lug1);
+    const lug1N = schematicNeighborTerminalsIncludingDocks(lug1);
     const lug1HasSignal = lug1N.some((t) => !schematicTerminalLooksLikeGround(t));
     if (lug1HasSignal) return false;
     return true;
@@ -28748,23 +30520,60 @@
       addPin(-22, 0, terms[0]);
       addPin(22, 0, terms[1]);
       // Chassis G joins the ideal ground rail — no local earth glyph (avoids double marks)
-    } else if (kind === 'pickup-hb') {
-      // Dual coil (series-linked inductors) — pins H N R S G
+    } else if (kind === 'pickup-hb' || kind === 'pickup-4c') {
+      /*
+       * Humbucker / 4-conductor (NA guitar practice): two series coils.
+       * DOM tip order: H · N · R · S · G  (SD-style color code)
+       *   N ──∩∩∩── R ──∩∩∩── S     (coil starts / series link / coil finish)
+       *   series link = N↔R; hot out = H; ground = S+G (shield)
+       */
+      const is4c = kind === 'pickup-4c';
+      schematicTitleLabel(labelsG, 0, nameY - 10, is4c ? '4-Conductor' : 'HB', 6.5, '#555');
+
+      // North coil (top)
       g.appendChild(svgEl('path', strokeAttrs({
-        d: 'M-12 -8 c0-6 6-6 6 0 s6 6 6 0 s6 -6 6 0',
+        d: 'M-10 -10 c0-6 6-6 6 0 s6 6 6 0 s6 -6 6 0',
       })));
+      // South coil (bottom)
       g.appendChild(svgEl('path', strokeAttrs({
-        d: 'M-12 8 c0-6 6-6 6 0 s6 6 6 0 s6 -6 6 0',
+        d: 'M-10 10 c0-6 6-6 6 0 s6 6 6 0 s6 -6 6 0',
       })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -6, y1: -2, x2: -6, y2: 2 })));
-      const n = Math.max(terms.length, 5);
-      const pinYs = [-16, -8, 0, 8, 16];
-      for (let i = 0; i < n; i++) {
-        const y = pinYs[i] ?? (-16 + i * 8);
-        g.appendChild(svgEl('line', strokeAttrs({ x1: -20, y1: y, x2: -12, y2: y * 0.5 })));
-        addPin(-22, y, terms[i]);
+      // Series link (R junction between coils)
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: 8, y1: -10, x2: 8, y2: 10, 'stroke-width': 1.25,
+      })));
+      g.appendChild(svgEl('circle', {
+        cx: 8, cy: 0, r: 1.6, fill: '#111', stroke: '#111', 'stroke-width': 0.8,
+      }));
+      // Core / bar magnet hint between coils
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: -6, y1: 0, x2: 4, y2: 0, 'stroke-width': 2.2, 'stroke-linecap': 'round',
+      })));
+
+      // Pin stubs — left stack: N, H, S ; right: R ; bottom: G
+      const pinLayout = [
+        { x: -22, y: -14 }, // H
+        { x: -22, y: -10 }, // N (align near north coil start)
+        { x: 20, y: 0 },    // R series link
+        { x: -22, y: 10 },  // S
+        { x: -22, y: 18 },  // G
+      ];
+      // Lead-ins
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: -14, x2: -10, y2: -10 }))); // H→north finish-ish
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: -10, x2: -10, y2: -10 }))); // N
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 8, y1: 0, x2: 20, y2: 0 }))); // R
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: 10, x2: -10, y2: 10 }))); // S
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: -22, y1: 18, x2: -8, y2: 18, 'stroke-dasharray': '2 1.5', 'stroke-width': 1.1,
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: -8, y1: 18, x2: -8, y2: 12, 'stroke-dasharray': '2 1.5', 'stroke-width': 1.1,
+      })));
+
+      for (let i = 0; i < Math.max(terms.length, 5); i++) {
+        const p = pinLayout[i] || { x: -22 + i * 8, y: 22 };
+        addPin(p.x, p.y, terms[i]);
       }
-      // Chassis G joins the ideal ground rail — no local earth glyph
     } else if (kind === 'pot') {
       // ANSI Y32.2 / IEEE 315 potentiometer — longer track + lead stubs so
       // lug/ground/wiper wiring doesn’t crowd the body.
@@ -29122,39 +30931,120 @@
       if (terms[3]) addPin(0, -20, terms[3]); // V+
       if (terms[4]) addPin(0, 20, terms[4]); // V−
     } else if (kind === 'tube-dual') {
-      // Dual triode envelope (12AX7) — pins: P1 G1 K1 H H P2 G2 K2 CT
-      g.appendChild(svgEl('ellipse', strokeAttrs({ cx: 0, cy: 0, rx: 16, ry: 14, fill: '#fff' })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -10, y1: -6, x2: -10, y2: 6 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -14, y1: 0, x2: -10, y2: 0 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -10, y1: -3, x2: -4, y2: -8 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -10, y1: 3, x2: -4, y2: 8 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: 10, y1: -6, x2: 10, y2: 6 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: 10, y1: 0, x2: 14, y2: 0 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: 10, y1: -3, x2: 4, y2: -8 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: 10, y1: 3, x2: 4, y2: 8 })));
-      addPin(-18, 0, terms[0]);
-      addPin(-6, -16, terms[1]);
-      addPin(-6, 16, terms[2]);
-      addPin(-2, 20, terms[3]);
-      addPin(2, 20, terms[4]);
-      addPin(18, 0, terms[5]);
-      addPin(6, -16, terms[6]);
-      addPin(6, 16, terms[7]);
-      if (terms[8]) addPin(0, 22, terms[8]);
+      /*
+       * Dual-triode envelope (12AX7-class). DOM pins:
+       * P1 G1 K1 H H P2 G2 K2 [CT]
+       */
+      g.appendChild(svgEl('ellipse', strokeAttrs({
+        cx: 0, cy: 0, rx: 20, ry: 18, fill: '#fff',
+      })));
+      // Left triode (A): plate / grid / cathode
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -12, y1: -8, x2: -12, y2: 6, 'stroke-width': 1.8 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -16, y1: -2, x2: -12, y2: -2 }))); // grid stub
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -12, y1: -6, x2: -4, y2: -12 }))); // plate
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -12, y1: 4, x2: -4, y2: 12 }))); // cathode
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-6 9 L-4 12 L-2 10', 'stroke-width': 1.2,
+      })));
+      // Right triode (B)
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 12, y1: -8, x2: 12, y2: 6, 'stroke-width': 1.8 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 12, y1: -2, x2: 16, y2: -2 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 12, y1: -6, x2: 4, y2: -12 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 12, y1: 4, x2: 4, y2: 12 })));
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M6 9 L4 12 L2 10', 'stroke-width': 1.2,
+      })));
+      // Heater filament (bottom)
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-6 8 L-3 12 L0 8 L3 12 L6 8', 'stroke-width': 1.15,
+      })));
+
+      const tubePins = [
+        { x: -4, y: -20 },  // P1
+        { x: -22, y: -2 },  // G1
+        { x: -4, y: 20 },   // K1
+        { x: -10, y: 22 },  // H
+        { x: 10, y: 22 },   // H
+        { x: 4, y: -20 },   // P2
+        { x: 22, y: -2 },   // G2
+        { x: 4, y: 20 },    // K2
+        { x: 0, y: 24 },    // CT
+      ];
+      // Lead stubs into envelope
+      [
+        [-4, -20, -4, -12],
+        [-22, -2, -16, -2],
+        [-4, 20, -4, 12],
+        [-10, 22, -6, 12],
+        [10, 22, 6, 12],
+        [4, -20, 4, -12],
+        [22, -2, 16, -2],
+        [4, 20, 4, 12],
+        [0, 24, 0, 14],
+      ].forEach(([x1, y1, x2, y2], i) => {
+        if (!terms[i] && i === 8) return;
+        g.appendChild(svgEl('line', strokeAttrs({ x1, y1, x2, y2, 'stroke-width': 1.05 })));
+      });
+      tubePins.forEach((p, i) => {
+        if (i === 8 && !terms[8]) return;
+        addPin(p.x, p.y, terms[i]);
+      });
     } else if (kind === 'tube-power') {
-      // Beam / pentode power tube — pins: NC H P G2 G1 NC K H
-      g.appendChild(svgEl('ellipse', strokeAttrs({ cx: 0, cy: 0, rx: 15, ry: 16, fill: '#fff' })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -6, y1: -8, x2: -6, y2: 8, 'stroke-width': 2 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -2, y1: -6, x2: -2, y2: 6 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: 2, y1: -5, x2: 2, y2: 5 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -6, y1: -4, x2: 10, y2: -12 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -6, y1: 4, x2: 10, y2: 12 })));
-      addPin(-20, -10, terms[1]);
-      addPin(-20, 0, terms[2]);
-      addPin(-20, 10, terms[3]);
-      addPin(16, -12, terms[4]);
-      addPin(16, 12, terms[6]);
-      addPin(0, 20, terms[7]);
+      /*
+       * Beam / pentode power tube (6V6-class). Typical DOM:
+       * NC H P G2 G1 NC K H  — draw the live electrodes.
+       */
+      g.appendChild(svgEl('ellipse', strokeAttrs({
+        cx: 0, cy: 0, rx: 18, ry: 20, fill: '#fff',
+      })));
+      // Cathode
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -8, y1: 4, x2: 8, y2: 4, 'stroke-width': 1.6 })));
+      // Grid 1 (control)
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: -10, y1: 0, x2: 10, y2: 0, 'stroke-dasharray': '1.5 1.5', 'stroke-width': 1.1,
+      })));
+      // Grid 2 (screen)
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: -10, y1: -4, x2: 10, y2: -4, 'stroke-dasharray': '1.5 1.5', 'stroke-width': 1.1,
+      })));
+      // Plate / anode
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-10 -10 L10 -10 L8 -14 L-8 -14 Z', fill: '#fff',
+      })));
+      // Beam plates / suppressor hint
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -12, y1: -8, x2: -12, y2: 6, 'stroke-width': 1.2 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 12, y1: -8, x2: 12, y2: 6, 'stroke-width': 1.2 })));
+      // Heater
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-5 8 L-2 12 L1 8 L4 12 L7 8', 'stroke-width': 1.1,
+      })));
+
+      const powerPins = [
+        { x: -22, y: -16 }, // 0 NC / spare
+        { x: -16, y: 22 },  // 1 H
+        { x: 0, y: -24 },   // 2 P
+        { x: 18, y: -8 },   // 3 G2
+        { x: -18, y: -2 },  // 4 G1
+        { x: 22, y: -16 },  // 5 NC
+        { x: 0, y: 22 },    // 6 K
+        { x: 16, y: 22 },   // 7 H
+      ];
+      powerPins.forEach((p, i) => {
+        if (!terms[i]) return;
+        // Skip drawing stub for unused NC if label empty / inactive
+        const lab = (terms[i].label || '').trim();
+        if ((i === 0 || i === 5) && (!lab || lab === 'NC')) {
+          addPin(p.x, p.y, { ...terms[i], label: '' });
+          return;
+        }
+        g.appendChild(svgEl('line', strokeAttrs({
+          x1: p.x, y1: p.y,
+          x2: Math.max(-14, Math.min(14, p.x * 0.4)),
+          y2: Math.max(-14, Math.min(14, p.y * 0.45)),
+          'stroke-width': 1.05,
+        })));
+        addPin(p.x, p.y, terms[i]);
+      });
     } else if (kind === 'battery') {
       // IEEE single-cell battery (+ long / − short)
       g.appendChild(svgEl('line', strokeAttrs({ x1: -5, y1: -11, x2: -5, y2: 11, 'stroke-width': 2.6 })));
@@ -29169,14 +31059,14 @@
       addPin(-18, 0, terms[0]);
       addPin(18, 0, terms[1]);
     } else if (kind === 'dc-jack') {
-      // DC barrel: tip (+) / sleeve (G) with earth on return
+      // DC barrel: tip (+) / sleeve (G) with chassis return (guitar/pedal practice)
       g.appendChild(svgEl('circle', strokeAttrs({ cx: 0, cy: 0, r: 9, fill: '#fff' })));
       g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: 0, x2: -9, y2: 0 })));
       g.appendChild(svgEl('line', strokeAttrs({ x1: 9, y1: 0, x2: 18, y2: 0 })));
       g.appendChild(svgEl('line', strokeAttrs({ x1: 12, y1: -4, x2: 12, y2: 4 })));
       addPin(-18, 0, terms[0]);
       addPin(18, 0, terms[1]);
-      addEarth(18, 10);
+      addChassisGround(18, 10);
     } else if (kind === 'heater-supply') {
       // AC heater secondary (sine + coil)
       g.appendChild(svgEl('path', strokeAttrs({
@@ -29354,7 +31244,7 @@
    * Workspace XY is NOT used for absolute placement — only relative order within a column.
    */
   function schematicColumnForKind(kind, meta) {
-    if (kind === 'pickup-sc' || kind === 'pickup-hb'
+    if (kind === 'pickup-sc' || kind === 'pickup-hb' || kind === 'pickup-4c'
       || kind === 'battery' || kind === 'dc-jack'
       || kind === 'heater-supply' || kind === 'hv-supply'
       || kind === 'dual-rail' || kind === 'power-transformer') {
@@ -29407,8 +31297,10 @@
     const titlePad = (kind === 'push-pot') ? 64
       : (kind === 'pot') ? 52
         : (kind === 'switch') ? 46
-          : (kind === 'capacitor' || kind === 'resistor') ? 40
-            : 38;
+          : (kind === 'pickup-hb' || kind === 'pickup-4c'
+            || kind === 'tube-dual' || kind === 'tube-power') ? 48
+            : (kind === 'capacitor' || kind === 'resistor') ? 40
+              : 38;
     // Bonded pot chassis glyph sits below pin bbox; independent case G is already a pin.
     const caseExtra = (kind === 'push-pot') ? 28
       : (kind === 'pot') ? 18
@@ -29613,6 +31505,13 @@
   function resetSchematicPeekPan() {
     schematicPeekPanX = 0;
     schematicPeekPanY = 0;
+    applySchematicPeekViewBox();
+  }
+
+  function resetSchematicPeekHome() {
+    schematicPeekPanX = 0;
+    schematicPeekPanY = 0;
+    setSchematicPeekZoom(1);
     applySchematicPeekViewBox();
   }
 
@@ -30002,6 +31901,597 @@
     bodyEl.replaceChildren(frag);
   }
 
+  /**
+   * Ideal schematic placements for a connected island (same math as refreshSchematicInto).
+   * Returns Map(compId → { x, y, pack, kind, meta }) in schematic SVG units.
+   * @param {object[]} nodes
+   * @param {{ colGap?: number, rowGap?: number }} [opts]
+   */
+  function computeSchematicPlacements(nodes, opts = {}) {
+    const roleColumns = [[], [], [], [], []];
+    const nodesById = new Map(nodes.map((n) => [n.id, n]));
+    nodes.forEach((node) => {
+      roleColumns[schematicColumnForKind(node.kind, node.meta)].push(node);
+    });
+    roleColumns.forEach((col, ci) => {
+      if (ci === 2) col.sort((a, b) => compareSchematicControlsColumn(a, b, nodesById));
+      else col.sort(compareSchematicWorkspaceOrder);
+    });
+    const columns = roleColumns.filter((col) => col.length > 0);
+
+    const colGap = Number.isFinite(opts.colGap) ? opts.colGap : 184;
+    const rowGap = Number.isFinite(opts.rowGap) ? opts.rowGap : 30;
+    const originX = 64;
+    const originY = 56;
+    const placements = new Map();
+    const colCursorY = columns.map(() => originY);
+    const colCenterX = columns.map((_, ci) => originX + ci * colGap);
+
+    columns.forEach((colNodes, ci) => {
+      colNodes.forEach((node) => {
+        const sym = buildSchematicSymbol(node.kind, node.label, node.meta);
+        const pack = schematicSymbolPack(node.kind, sym.pins);
+        const x = colCenterX[ci];
+        const y = colCursorY[ci] - pack.minY;
+        const absPins = sym.pins.map((p) => ({
+          x: p.x,
+          y: p.y,
+          absX: x + p.x,
+          absY: y + p.y,
+        }));
+        placements.set(node.id, {
+          x,
+          y,
+          kind: node.kind,
+          meta: node.meta,
+          pins: absPins,
+          localPins: sym.pins,
+          pack,
+        });
+        colCursorY[ci] = y + pack.maxY + rowGap;
+      });
+    });
+
+    const colSpans = columns.map((colNodes) => {
+      if (!colNodes.length) return { mid: originY, min: originY, max: originY };
+      let min = Infinity;
+      let max = -Infinity;
+      colNodes.forEach((n) => {
+        const p = placements.get(n.id);
+        if (!p) return;
+        min = Math.min(min, p.y + p.pack.minY);
+        max = Math.max(max, p.y + p.pack.maxY);
+      });
+      return { mid: (min + max) / 2, min, max };
+    });
+    const globalMid = colSpans.reduce((acc, s, i) => (
+      columns[i].length ? Math.max(acc, s.max - s.min) : acc
+    ), 0);
+    const targetMid = originY + globalMid / 2;
+    columns.forEach((colNodes, ci) => {
+      if (colNodes.length < 1) return;
+      const shift = targetMid - colSpans[ci].mid;
+      if (Math.abs(shift) < 4) return;
+      colNodes.forEach((n) => {
+        const p = placements.get(n.id);
+        if (!p) return;
+        p.y += shift;
+        p.pins.forEach((pin, i) => {
+          pin.absY = p.y + p.localPins[i].y;
+          pin.y = p.localPins[i].y;
+        });
+      });
+    });
+
+    return { placements, columns, colGap, originX, originY };
+  }
+
+  function collectSchematicNodesFromGraph(compById, connectedIds) {
+    return connectedIds.map((id) => {
+      const el = compById.get(id);
+      const kind = getSchematicSymbolKind(el);
+      const meta = collectSchematicTerminalMeta(el);
+      const raw = (getAssetDisplayName(el) || el.dataset.type || meta.template?.name || 'Part')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const short = raw.length > 16 ? `${raw.slice(0, 14)}…` : raw;
+      return {
+        id,
+        el,
+        kind,
+        meta,
+        label: short,
+        canvasX: parseFloat(el.style.left) || 0,
+        canvasY: parseFloat(el.style.top) || 0,
+      };
+    });
+  }
+
+  /**
+   * Orthogonal trunk anchors between two workspace points (schematic-style).
+   * lane shifts the shared vertical/horizontal trunk so parallel runs stay separated.
+   * Keep the shared-axis coords exact (do not snap them) so segments stay truly H/V.
+   * @param {number} [lanePitch] px between lanes (remake uses stroke-based pitch)
+   * @param {boolean} [snapTrunk] snap trunk to workspace grid (off for fine remake lanes)
+   */
+  function buildManhattanWireAnchors(
+    x1, y1, x2, y2, preferHorizontalFirst, lane = 0, lanePitch = WORKSPACE_GRID, snapTrunk = true,
+  ) {
+    const dx = Math.abs(x2 - x1);
+    const dy = Math.abs(y2 - y1);
+    if (dx < 1.5 || dy < 1.5) return [];
+    const pitch = Number.isFinite(lanePitch) && lanePitch > 0 ? lanePitch : WORKSPACE_GRID;
+    const laneOff = (Number(lane) || 0) * pitch;
+    const hx = preferHorizontalFirst !== false;
+    if (hx) {
+      let trunkX = (x1 + x2) / 2 + laneOff;
+      const lo = Math.min(x1, x2) + 8;
+      const hi = Math.max(x1, x2) - 8;
+      if (hi > lo) trunkX = Math.max(lo, Math.min(hi, trunkX));
+      if (snapTrunk) trunkX = snapWorkspace(trunkX);
+      return [
+        { x: trunkX, y: y1 },
+        { x: trunkX, y: y2 },
+      ];
+    }
+    let trunkY = (y1 + y2) / 2 + laneOff;
+    const lo = Math.min(y1, y2) + 8;
+    const hi = Math.max(y1, y2) - 8;
+    if (hi > lo) trunkY = Math.max(lo, Math.min(hi, trunkY));
+    if (snapTrunk) trunkY = snapWorkspace(trunkY);
+    return [
+      { x: x1, y: trunkY },
+      { x: x2, y: trunkY },
+    ];
+  }
+
+  /**
+   * Remake route: per-terminal fan stubs + lanened trunk.
+   * Exit along the run first, then offset, so pads with many wires don’t share one stroke.
+   */
+  function buildRemakeRoutedAnchors(x1, y1, x2, y2, preferH, trunkLane, fanStart, fanEnd, pitch) {
+    const dx = Math.abs(x2 - x1);
+    const dy = Math.abs(y2 - y1);
+    if (dx < 1.5 && dy < 1.5) return [];
+    const p = Math.max(1.5, Number(pitch) || WIRE_CSS_STROKE_PX);
+    const stub = Math.max(p * 1.6, 10);
+    const tOff = (Number(trunkLane) || 0) * p;
+    const fs = (Number(fanStart) || 0) * p;
+    const fe = (Number(fanEnd) || 0) * p;
+    const hx = preferH !== false;
+
+    const pushUnique = (arr, pt) => {
+      const last = arr[arr.length - 1];
+      if (last && Math.hypot(pt.x - last.x, pt.y - last.y) < 0.75) return;
+      arr.push(pt);
+    };
+
+    if (hx || dy < 1.5) {
+      if (dx < 1.5) {
+        // Pure vertical — fan in X
+        const midY = (y1 + y2) / 2 + tOff;
+        const pts = [];
+        pushUnique(pts, { x: x1 + fs, y: y1 + Math.sign(y2 - y1 || 1) * stub });
+        pushUnique(pts, { x: x1 + fs, y: midY });
+        pushUnique(pts, { x: x2 + fe, y: midY });
+        pushUnique(pts, { x: x2 + fe, y: y2 - Math.sign(y2 - y1 || 1) * stub });
+        return pts;
+      }
+      const dir = x2 >= x1 ? 1 : -1;
+      let trunkX = (x1 + x2) / 2 + tOff;
+      const lo = Math.min(x1 + dir * stub, x2 - dir * stub);
+      const hi = Math.max(x1 + dir * stub, x2 - dir * stub);
+      if (hi - lo > 4) trunkX = Math.max(lo, Math.min(hi, trunkX));
+      const pts = [];
+      pushUnique(pts, { x: x1 + dir * stub, y: y1 });
+      pushUnique(pts, { x: x1 + dir * stub, y: y1 + fs });
+      pushUnique(pts, { x: trunkX, y: y1 + fs });
+      pushUnique(pts, { x: trunkX, y: y2 + fe });
+      pushUnique(pts, { x: x2 - dir * stub, y: y2 + fe });
+      pushUnique(pts, { x: x2 - dir * stub, y: y2 });
+      return pts;
+    }
+
+    const dir = y2 >= y1 ? 1 : -1;
+    let trunkY = (y1 + y2) / 2 + tOff;
+    const lo = Math.min(y1 + dir * stub, y2 - dir * stub);
+    const hi = Math.max(y1 + dir * stub, y2 - dir * stub);
+    if (hi - lo > 4) trunkY = Math.max(lo, Math.min(hi, trunkY));
+    const pts = [];
+    pushUnique(pts, { x: x1, y: y1 + dir * stub });
+    pushUnique(pts, { x: x1 + fs, y: y1 + dir * stub });
+    pushUnique(pts, { x: x1 + fs, y: trunkY });
+    pushUnique(pts, { x: x2 + fe, y: trunkY });
+    pushUnique(pts, { x: x2 + fe, y: y2 - dir * stub });
+    pushUnique(pts, { x: x2, y: y2 - dir * stub });
+    return pts;
+  }
+
+  /** Spread lanes 0, +1, -1, +2, -2… so parallel runs fan around the corridor center. */
+  function remakeLaneIndex(n) {
+    const i = Math.max(0, Math.floor(n) || 0);
+    if (i === 0) return 0;
+    const k = Math.ceil(i / 2);
+    return (i % 2 === 1) ? k : -k;
+  }
+
+  /**
+   * Grow/shrink routed path toward targetPx without changing terminal attachments.
+   * Length is derived from geometry (1 grid = 1 mm); gaugeMm is left untouched.
+   * opts: { maxDepth, acceptTol, acceptRatio, noSlack, preferOrtho } — remake uses
+   * soft caps + preferOrtho so routes stay sharp Manhattan (no diagonal wipe).
+   */
+  function restoreWirePathLengthPx(wire, targetPx, opts = {}) {
+    if (!wire || !Number.isFinite(targetPx) || targetPx <= 0) return;
+    updateWirePosition(wire);
+    let cur = getWirePathLengthPx(wire);
+    const start = getAttachPoint(wire, 'start');
+    const end = getAttachPoint(wire, 'end');
+    const minLen = Math.hypot(end.x - start.x, end.y - start.y);
+    const goal = Math.max(minLen, targetPx);
+    const maxDepth = Number.isFinite(opts.maxDepth) ? opts.maxDepth : 160;
+    const acceptTol = Number.isFinite(opts.acceptTol) ? opts.acceptTol : 2;
+    const acceptRatio = Number.isFinite(opts.acceptRatio) ? opts.acceptRatio : 0;
+    const noSlack = !!opts.noSlack;
+    const preferOrtho = !!opts.preferOrtho;
+
+    if (cur > goal + Math.max(4, acceptTol)) {
+      // Prefer a simpler trunk; never fall back to a diagonal when preferOrtho
+      wire.anchors = buildManhattanWireAnchors(start.x, start.y, end.x, end.y, true, 0);
+      wire.slack = 0;
+      updateWirePosition(wire);
+      cur = getWirePathLengthPx(wire);
+      if (cur > goal + Math.max(4, acceptTol) && !preferOrtho) {
+        wire.anchors = [];
+        wire.slack = 0;
+        updateWirePosition(wire);
+        cur = getWirePathLengthPx(wire);
+      }
+    }
+
+    if (cur >= goal - acceptTol) return;
+    if (acceptRatio > 0 && cur >= goal * (1 - acceptRatio)) return;
+    // Already longer than goal but kept ortho — stop (schematic remake)
+    if (preferOrtho && cur > goal) return;
+
+    let deficit = goal - cur;
+    const midX = (start.x + end.x) / 2;
+    const midY = (start.y + end.y) / 2;
+    const horizontal = Math.abs(end.x - start.x) >= Math.abs(end.y - start.y);
+    // Rectangular bump: extra length ≈ 2 * depth (keep shallow for remake)
+    let depth = Math.max(WORKSPACE_GRID, Math.min(maxDepth, deficit / 2));
+    const attempts = maxDepth <= WORKSPACE_GRID * 4 ? 3 : 6;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (horizontal) {
+        const yOff = midY + depth;
+        const span = Math.max(WORKSPACE_GRID * 2, Math.min(WORKSPACE_GRID * 6, Math.abs(end.x - start.x) / 3));
+        wire.anchors = [
+          { x: snapWorkspace(midX - span / 2), y: start.y },
+          { x: snapWorkspace(midX - span / 2), y: yOff },
+          { x: snapWorkspace(midX + span / 2), y: yOff },
+          { x: snapWorkspace(midX + span / 2), y: end.y },
+        ];
+      } else {
+        const xOff = midX + depth;
+        const span = Math.max(WORKSPACE_GRID * 2, Math.min(WORKSPACE_GRID * 6, Math.abs(end.y - start.y) / 3));
+        wire.anchors = [
+          { x: start.x, y: snapWorkspace(midY - span / 2) },
+          { x: xOff, y: snapWorkspace(midY - span / 2) },
+          { x: xOff, y: snapWorkspace(midY + span / 2) },
+          { x: end.x, y: snapWorkspace(midY + span / 2) },
+        ];
+      }
+      wire.slack = 0;
+      updateWirePosition(wire);
+      cur = getWirePathLengthPx(wire);
+      if (cur >= goal - acceptTol) return;
+      if (acceptRatio > 0 && cur >= goal * (1 - acceptRatio)) return;
+      deficit = goal - cur;
+      depth = Math.min(maxDepth, depth + Math.max(WORKSPACE_GRID, deficit / 2));
+      if (depth >= maxDepth - 0.5) break;
+    }
+
+    // Last resort: bow the open span with slack (ignored when anchors exist)
+    if (!noSlack && (wire.anchors || []).length === 0) {
+      let lo = 0;
+      let hi = SLACK_MAX;
+      for (let i = 0; i < 10; i++) {
+        const mid = (lo + hi) / 2;
+        wire.slack = mid;
+        updateWirePosition(wire);
+        cur = getWirePathLengthPx(wire);
+        if (cur < goal) lo = mid;
+        else hi = mid;
+      }
+      wire.slack = hi;
+      updateWirePosition(wire);
+    }
+  }
+
+  /**
+   * Explain + confirm remake in a modal before rearranging the workplace.
+   */
+  function openRemakeWorkplaceConfirm(onConfirm) {
+    if (typeof onConfirm !== 'function') return;
+    const dialog = document.getElementById('remake-workplace-confirm');
+    if (!dialog) {
+      onConfirm();
+      return;
+    }
+    pendingRemakeWorkplaceConfirm = onConfirm;
+    dialog.classList.remove('hidden');
+    dialog.removeAttribute('hidden');
+    document.getElementById('remake-workplace-confirm-cancel')?.focus();
+  }
+
+  function closeRemakeWorkplaceConfirm() {
+    pendingRemakeWorkplaceConfirm = null;
+    const dialog = document.getElementById('remake-workplace-confirm');
+    if (!dialog) return;
+    dialog.classList.add('hidden');
+    dialog.setAttribute('hidden', '');
+  }
+
+  function confirmRemakeWorkplace() {
+    const fn = pendingRemakeWorkplaceConfirm;
+    closeRemakeWorkplaceConfirm();
+    if (typeof fn === 'function') fn();
+  }
+
+  function initRemakeWorkplaceConfirmDialog() {
+    const dialog = document.getElementById('remake-workplace-confirm');
+    if (!dialog || dialog.dataset.bound === '1') return;
+    dialog.dataset.bound = '1';
+    document.getElementById('remake-workplace-confirm-ok')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      confirmRemakeWorkplace();
+    });
+    document.getElementById('remake-workplace-confirm-cancel')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeRemakeWorkplaceConfirm();
+    });
+    dialog.addEventListener('click', (e) => {
+      if (e.target === dialog) closeRemakeWorkplaceConfirm();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (dialog.classList.contains('hidden')) return;
+      e.preventDefault();
+      closeRemakeWorkplaceConfirm();
+    });
+  }
+
+  /**
+   * Rearrange workspace assets/wires for this pin's circuit to roughly match the
+   * schematic layout. Connectivity + gaugeMm stay; routes use sharp Manhattan trunks.
+   */
+  function remakeWorkplaceCircuitFromPin(pin) {
+    if (!pin) return;
+    const isPinned = !!(pin.id && schematicPinWindows.has(pin.id));
+    const groupId = pin.sourceGroupId || null;
+    const islandGraph = collectSchematicCircuitIslands({ groupId });
+    const islands = islandGraph.islands;
+    const circuitIndex = clampSchematicCircuitIndex(
+      isPinned ? (pin.circuitIndex ?? 0) : schematicPeekCircuitIndex,
+      islands.length,
+    );
+    if (isPinned) pin.circuitIndex = circuitIndex;
+    else schematicPeekCircuitIndex = circuitIndex;
+    const island = islands.length >= 2 ? islands[circuitIndex] : null;
+    const componentIds = island ? island.idSet : null;
+    const { compById, edges, connectedIds } = componentIds
+      ? collectConnectedCircuitGraph({ groupId, componentIds })
+      : islandGraph;
+
+    if (!connectedIds.length) {
+      setStatus('Nothing to remake — connect assets or pick a group source');
+      return;
+    }
+
+    const nodes = collectSchematicNodesFromGraph(compById, connectedIds);
+    // Wider than peek schematic so remade workplace parts/wires breathe
+    const remakeColGap = 248;
+    const { placements } = computeSchematicPlacements(nodes, {
+      colGap: remakeColGap,
+      rowGap: 48,
+    });
+    if (!placements.size) {
+      setStatus('Remake failed — no schematic layout');
+      return;
+    }
+
+    // Current workspace centroid (keep circuit roughly where it already sits)
+    let sumX = 0;
+    let sumY = 0;
+    let count = 0;
+    connectedIds.forEach((id) => {
+      const el = compById.get(id);
+      if (!el) return;
+      const r = getComponentRect(el);
+      sumX += (r.left + r.right) / 2;
+      sumY += (r.top + r.bottom) / 2;
+      count += 1;
+    });
+    const worldCx = count ? sumX / count : 200;
+    const worldCy = count ? sumY / count : 200;
+
+    let schemMinX = Infinity;
+    let schemMaxX = -Infinity;
+    let schemMinY = Infinity;
+    let schemMaxY = -Infinity;
+    placements.forEach((p) => {
+      schemMinX = Math.min(schemMinX, p.x + p.pack.minX);
+      schemMaxX = Math.max(schemMaxX, p.x + p.pack.maxX);
+      schemMinY = Math.min(schemMinY, p.y + p.pack.minY);
+      schemMaxY = Math.max(schemMaxY, p.y + p.pack.maxY);
+    });
+    const schemCx = (schemMinX + schemMaxX) / 2;
+    const schemCy = (schemMinY + schemMaxY) / 2;
+    // Schematic units → workspace px (roomier than peek so trunks don’t pile up)
+    const scale = Math.max(0.78, Math.min(1.4, (WORKSPACE_GRID * 20) / remakeColGap));
+
+    placements.forEach((p, id) => {
+      const el = compById.get(id);
+      if (!el) return;
+      const w = Math.max(24, el.offsetWidth || 48);
+      const h = Math.max(18, el.offsetHeight || 32);
+      const wx = worldCx + (p.x - schemCx) * scale;
+      const wy = worldCy + (p.y - schemCy) * scale;
+      el.style.left = `${snapWorkspace(wx - w / 2)}px`;
+      el.style.top = `${snapWorkspace(wy - h / 2)}px`;
+    });
+
+    updateAllWirePositions();
+
+    // Shared chassis bus under the remade parts (mirrors schematic ground rail idea)
+    let busY = -Infinity;
+    connectedIds.forEach((id) => {
+      const el = compById.get(id);
+      if (!el) return;
+      busY = Math.max(busY, getComponentRect(el).bottom);
+    });
+    busY = snapWorkspace(busY + WORKSPACE_GRID * 4);
+
+    const trunkLaneByKey = new Map();
+    const termFanByKey = new Map();
+    const allocRemakeLane = (key) => {
+      const k = String(key || 'misc');
+      const n = trunkLaneByKey.get(k) || 0;
+      trunkLaneByKey.set(k, n + 1);
+      return remakeLaneIndex(n);
+    };
+    const termFanKey = (term) => {
+      if (!term) return null;
+      const comp = term.closest?.('.component');
+      const idx = terminalIndexOnComponent(comp, term);
+      return `${comp?.dataset?.id || 't'}:${idx}`;
+    };
+    const allocTermFan = (term) => {
+      const k = termFanKey(term);
+      if (!k) return 0;
+      const n = termFanByKey.get(k) || 0;
+      termFanByKey.set(k, n + 1);
+      return remakeLaneIndex(n);
+    };
+    const remakeCorridorKey = (start, end, preferH) => {
+      if (preferH) {
+        const mid = Math.round(((start.x + end.x) / 2) / 36);
+        const y0 = Math.round(Math.min(start.y, end.y) / 28);
+        const y1 = Math.round(Math.max(start.y, end.y) / 28);
+        return `v:${mid}:${y0}-${y1}`;
+      }
+      const mid = Math.round(((start.y + end.y) / 2) / 36);
+      const x0 = Math.round(Math.min(start.x, end.x) / 28);
+      const x1 = Math.round(Math.max(start.x, end.x) / 28);
+      return `h:${mid}:${x0}-${x1}`;
+    };
+
+    // Stable order → predictable lane stacking in shared corridors
+    const remakeEdges = edges
+      .filter((edge) => edge?.wire && !isHbLeadWire(edge.wire) && !isAssetWire(edge.wire))
+      .sort((ea, eb) => {
+        const sa = getAttachPoint(ea.wire, 'start');
+        const sb = getAttachPoint(eb.wire, 'start');
+        return (sa.y - sb.y) || (sa.x - sb.x);
+      });
+
+    let maxStroke = WIRE_CSS_STROKE_PX;
+    remakeEdges.forEach((edge) => {
+      maxStroke = Math.max(maxStroke, getWireVisualStrokePx(edge.wire));
+    });
+    const lanePitch = remakeLanePitchFromStroke(maxStroke);
+
+    remakeEdges.forEach((edge) => {
+      const wire = edge.wire;
+      const start = getAttachPoint(wire, 'start');
+      const end = getAttachPoint(wire, 'end');
+      const pitch = remakeLanePitchFromStroke(getWireVisualStrokePx(wire)) || lanePitch;
+      const pa = placements.get(edge.aId);
+      const pb = placements.get(edge.bId);
+      const ia = terminalIndexOnComponent(compById.get(edge.aId), edge.aTerm);
+      const ib = terminalIndexOnComponent(compById.get(edge.bId), edge.bTerm);
+      const termA = pa?.meta?.terms?.[ia];
+      const termB = pb?.meta?.terms?.[ib];
+      const aLeadG = pa?.meta?.leadGroundEnd === ia;
+      const bLeadG = pb?.meta?.leadGroundEnd === ib;
+      const aG = isSchematicChassisGroundTerm(termA, edge.aTerm) || aLeadG;
+      const bG = isSchematicChassisGroundTerm(termB, edge.bTerm) || bLeadG;
+      const fanStart = allocTermFan(wire.start?.terminal);
+      const fanEnd = allocTermFan(wire.end?.terminal);
+
+      if (aG && bG) {
+        const lane = allocRemakeLane('bus');
+        const y = busY + lane * pitch;
+        const stub = Math.max(pitch * 1.6, 10);
+        const dirS = Math.sign(y - start.y) || 1;
+        const dirE = Math.sign(y - end.y) || 1;
+        wire.anchors = [
+          { x: start.x, y: start.y + dirS * stub },
+          { x: start.x + fanStart * pitch, y: start.y + dirS * stub },
+          { x: start.x + fanStart * pitch, y },
+          { x: end.x + fanEnd * pitch, y },
+          { x: end.x + fanEnd * pitch, y: end.y + dirE * stub },
+          { x: end.x, y: end.y + dirE * stub },
+        ];
+        wire.slack = 0;
+        wire.routeMode = 'manhattan';
+      } else {
+        const preferH = !pa || !pb || Math.abs(pa.x - pb.x) >= Math.abs(pa.y - pb.y);
+        const trunkLane = allocRemakeLane(remakeCorridorKey(start, end, preferH));
+        wire.anchors = buildRemakeRoutedAnchors(
+          start.x, start.y, end.x, end.y,
+          preferH, trunkLane, fanStart, fanEnd, pitch,
+        );
+        wire.slack = 0;
+        wire.routeMode = 'manhattan';
+      }
+      updateWirePosition(wire);
+    });
+
+    // Same-component jumpers / leftover island wires (not in edge list)
+    const routedIds = new Set(edges.map((e) => e.wire?.id).filter(Boolean));
+    const idSet = new Set(connectedIds);
+    wires.forEach((wire) => {
+      if (!wire || routedIds.has(wire.id)) return;
+      if (isHbLeadWire(wire) || isAssetWire(wire)) return;
+      if (!wire.start?.terminal || !wire.end?.terminal) return;
+      const a = wire.start.terminal.closest?.('.component');
+      const b = wire.end.terminal.closest?.('.component');
+      const aId = a?.dataset?.id;
+      const bId = b?.dataset?.id;
+      if (!idSet.has(aId) && !idSet.has(bId)) return;
+      const start = getAttachPoint(wire, 'start');
+      const end = getAttachPoint(wire, 'end');
+      const preferH = Math.abs(end.x - start.x) >= Math.abs(end.y - start.y);
+      const pitch = remakeLanePitchFromStroke(getWireVisualStrokePx(wire)) || lanePitch;
+      const fanStart = allocTermFan(wire.start?.terminal);
+      const fanEnd = allocTermFan(wire.end?.terminal);
+      const trunkLane = allocRemakeLane(remakeCorridorKey(start, end, preferH));
+      wire.anchors = buildRemakeRoutedAnchors(
+        start.x, start.y, end.x, end.y,
+        preferH, trunkLane, fanStart, fanEnd, pitch,
+      );
+      wire.slack = 0;
+      wire.routeMode = 'manhattan';
+      updateWirePosition(wire);
+    });
+
+    updateAllWirePositions();
+    if (groupId) {
+      setActiveWorkspaceGroup(groupId);
+      refreshActiveWorkspaceGroupVisual();
+    }
+    if (isPinned) refreshSchematicPinWindow(pin);
+    schematicPinWindows.forEach((other) => {
+      if (other !== pin) refreshSchematicPinWindow(other);
+    });
+    notifySchematicCircuitChanged();
+    markProjectDirty();
+    setStatus(`Remade workplace circuit${groupId ? ` · ${getWorkspaceGroup(groupId)?.name || groupId}` : ''}`);
+  }
+
   function refreshSchematicInto(targets = {}) {
     const peekSvg = document.getElementById('schematic-peek-svg');
     const svg = targets.svg || peekSvg;
@@ -30027,6 +32517,16 @@
     const island = islands.length >= 2 ? islands[circuitIndex] : null;
     const componentIds = island ? island.idSet : null;
 
+    if (isPeek) {
+      syncSchematicPeekCircuitName({
+        islands,
+        circuitIndex,
+        groupId,
+      });
+    } else if (targets.pin) {
+      syncSchematicPinCircuitName(targets.pin);
+    }
+
     const { compById, edges, connectedIds } = componentIds
       ? collectConnectedCircuitGraph({ groupId, componentIds })
       : islandGraph;
@@ -30040,6 +32540,15 @@
         empty.textContent = (targets.pin?.sourceGroupId || targets.groupId)
           ? 'Group is empty — add assets with GROUP'
           : 'Connect assets with wires to generate a circuit';
+      }
+      if (isPeek) {
+        syncSchematicPeekCircuitName({
+          islands: [],
+          circuitIndex: 0,
+          groupId,
+        });
+      } else if (targets.pin) {
+        syncSchematicPinCircuitName(targets.pin);
       }
       if (isPeek && schematicPeekBuildList?.open) {
         renderSchematicBuildList({
@@ -30552,7 +33061,9 @@
       });
       const baseStroke = chassis
         ? '#5a5a5a'
-        : ((edge.color === '#ffffff' || edge.color === '#fff') ? '#555' : edge.color);
+        : schematicWireColourEnabled
+          ? ((edge.color === '#ffffff' || edge.color === '#fff') ? '#555' : edge.color)
+          : '#6a6a72';
       const selected = !!(edge.wire?.group && selectedWireGroups.has(edge.wire.group));
       const path = svgEl('path', {
         d,
@@ -30853,7 +33364,6 @@
     document.body.appendChild(analysisEl);
 
     const infoBtns = [
-      document.getElementById('schematic-peek-info'),
       document.getElementById('schematic-peek-info-fab'),
     ].filter(Boolean);
 
@@ -30909,9 +33419,10 @@
     const el = target.analysisEl;
     const gap = 8;
     const width = el.offsetWidth || 268;
+    // Circuit information always opens to the right of the preview
     let left = r.right + gap;
     if (left + width > window.innerWidth - 8) {
-      left = Math.max(8, r.left - width - gap);
+      left = Math.max(8, window.innerWidth - width - 8);
     }
     const top = Math.max(8, r.top);
     el.style.position = 'fixed';
@@ -31022,14 +33533,9 @@
     const el = target.panelEl;
     const gap = 8;
     const width = el.offsetWidth || 300;
-    let left = r.right + gap;
-    if (schematicPeekAnalysis?.statsOpen && schematicPeekAnalysis.analysisEl) {
-      const ar = schematicPeekAnalysis.analysisEl.getBoundingClientRect();
-      if (ar.width > 0) left = ar.right + gap;
-    }
-    if (left + width > window.innerWidth - 8) {
-      left = Math.max(8, r.left - width - gap);
-    }
+    // Build list always opens to the left of the preview
+    let left = r.left - width - gap;
+    if (left < 8) left = 8;
     const top = Math.max(8, r.top);
     el.style.position = 'fixed';
     el.style.left = `${left}px`;
@@ -31060,6 +33566,8 @@
     const chevron = document.getElementById('schematic-peek-chevron');
     const refreshBtn = document.getElementById('schematic-peek-refresh');
     const pinBtn = document.getElementById('schematic-peek-pin');
+    const colourBtn = document.getElementById('schematic-peek-colour');
+    const remakeBtn = document.getElementById('schematic-peek-remake');
     const canvas = document.getElementById('schematic-peek-canvas');
     const zoomInBtn = document.getElementById('schematic-zoom-in');
     const zoomOutBtn = document.getElementById('schematic-zoom-out');
@@ -31068,6 +33576,7 @@
 
     syncSchematicZoomLabel();
     syncSchematicPinButtonState();
+    syncSchematicColourButtonState();
     ensureSchematicPeekAnalysis();
     ensureSchematicPeekBuildList();
 
@@ -31119,6 +33628,26 @@
       pinSchematicToWorkspace();
     });
 
+    colourBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!panel.classList.contains('is-open')) return;
+      setSchematicWireColourEnabled(!schematicWireColourEnabled);
+      setStatus(schematicWireColourEnabled ? 'Schematic wires: colour' : 'Schematic wires: monochrome');
+    });
+
+    remakeBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!panel.classList.contains('is-open')) return;
+      openRemakeWorkplaceConfirm(() => {
+        remakeWorkplaceCircuitFromPin({
+          sourceGroupId: null,
+          circuitIndex: schematicPeekCircuitIndex,
+        });
+      });
+    });
+
     zoomInBtn?.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -31133,7 +33662,7 @@
     panHomeBtn?.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      resetSchematicPeekPan();
+      resetSchematicPeekHome();
     });
 
     // Drag to pan
@@ -31285,18 +33814,21 @@
         { name: '[[R-click]]', description: 'Place menu' },
         { name: '[[L-click]] drag', description: 'Marquee select' },
         { name: '[[Shift]] drag', description: 'Free move' },
-        { name: '[[Alt]] drag', description: 'Drag a copy of the selection' },
+        { name: '[[Alt]] drag', description: 'Drag a copy' },
         { name: `[[${mod}]] + [[C]] / [[X]] / [[V]]`, description: 'Copy / cut / paste' },
-        { name: '[[Delete]] / [[Backspace]]', description: 'Delete selection' },
-        { name: '[[Space]] + drag', description: 'Pan the canvas' },
-        { name: '[[+]] / [[−]]', description: 'Rotate assets or adjust wire slack' },
-        { name: '[[1]] – [[9]]', description: 'Switch active wire layer' },
-        { name: '[[Enter]]', description: 'Text command box (MOVE, NOTE, DIM…)' },
-        { name: '[[Escape]]', description: 'Cancel / clear selection' },
+        { name: `[[${mod}]] + [[G]]`, description: 'Group' },
+        { name: `[[${mod}]] + [[Shift]] + [[G]]`, description: 'Ungroup' },
+        { name: `[[${mod}]] + [[S]]`, description: 'Save project' },
+        { name: '[[`]]', description: 'Bugtest error terminal' },
         { name: '[[Q]] / [[E]]', description: 'Cycle asset state' },
-        { name: '[[Q]] hold', description: 'Recent-asset / wire wheel' },
-        { name: 'Align / Rotate', description: 'Status-bar tools for selection' },
-        { name: 'Mouse wheel', description: 'Zoom; rotates or adjusts slack when selected' },
+        { name: '[[Delete]] / [[Backspace]]', description: 'Delete selection' },
+        { name: '[[Space]] + drag', description: 'Pan' },
+        { name: '[[+]] / [[−]]', description: 'Rotate or wire slack' },
+        { name: '[[1]] – [[9]]', description: 'Wire layer' },
+        { name: '[[Enter]]', description: 'Text command' },
+        { name: '[[Escape]]', description: 'Cancel / clear' },
+        { name: '[[Q]] hold', description: 'Asset / wire wheel' },
+        { name: 'Mouse wheel', description: 'Zoom' },
       ];
     }
 
@@ -31347,12 +33879,17 @@
   initLayerGroups();
   initLayerUI();
   initPanelLayerUI();
-  applyAccentTheme(0);
+  loadUiPrefs();
+  applyAccentTheme(accentThemeIndex);
+  applyUiScalePrefs();
+  applyColorblindMode(colorblindMode);
+  applyHeaderDitherEnabled(headerDitherEnabled);
   initLogoMark();
   initCadImportDialog();
   initPanelCadDrop();
   initCommandsPanel();
   initSchematicPeek();
+  initRemakeWorkplaceConfirmDialog();
   textCommandInput?.addEventListener('input', updateTextCommandHint);
   textCommandInput?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
@@ -31475,18 +34012,19 @@
    * Tone: lug 3 from volume hot · wiper → cap → ground · case on ground.
    */
   function wireNaVolumeToneChassis({
-    vol, tone, cap, out, switchCaseG = null, pickupGrounds = [],
+    vol, tone, cap, out, switchCaseG = null, pickupGrounds = [], connect = null,
   }) {
+    const link = typeof connect === 'function' ? connect : wireBetweenTerminals;
     const volT = [...vol.querySelectorAll('.terminal')];
     const toneT = [...tone.querySelectorAll('.terminal')];
     const capT = [...cap.querySelectorAll('.terminal')];
     const outH = terminalByRole(out, 'H');
     const outG = terminalByRole(out, 'G');
 
-    wireBetweenTerminals(volT[1], outH);
-    wireBetweenTerminals(volT[2], toneT[2]);
-    wireBetweenTerminals(toneT[1], capT[0]);
-    wireBetweenTerminals(capT[1], outG);
+    link(volT[1], outH);
+    link(volT[2], toneT[2]);
+    link(toneT[1], capT[0]);
+    link(capT[1], outG);
 
     const grounds = [
       ...pickupGrounds,
@@ -31503,7 +34041,7 @@
       return true;
     });
     for (let i = 1; i < unique.length; i++) {
-      wireBetweenTerminals(unique[0], unique[i]);
+      link(unique[0], unique[i]);
     }
 
     ensurePotCaseGroundPosition(vol);
@@ -31516,7 +34054,8 @@
    * 3× SC + ON-ON-ON 3-way + 2-way ON-ON (mid phase) + volume + tone + shunt cap
    * + chassis bus + mono out.
    */
-  function seedSssRendererDemo() {
+  function seedSssRendererDemo(opts = {}) {
+    const temporary = !!opts.temporary;
     clearElectronicsDemoBoard();
 
     const neck = placeDemoAsset('singlecoil', 40, 40);
@@ -31553,16 +34092,28 @@
     const midH = terminalByRole(mid, 'H');
     const midG = terminalByRole(mid, 'G');
 
-    wireBetweenTerminals(midH, phT[4]);
-    wireBetweenTerminals(midH, phT[1]);
-    wireBetweenTerminals(midG, phT[5]);
-    wireBetweenTerminals(midG, phT[0]);
-    wireBetweenTerminals(phT[2], swT[0]);
+    // Distinct colours so remake / overlap testing is easy to read
+    const demoColors = ['red', 'yellow', 'green', 'blue', 'orange', 'copper', 'white', 'black'];
+    let demoColorIdx = 0;
+    const savedColor = wireColor;
+    const savedStyle = wireStyle;
+    wireStyle = 'solid';
+    const connect = (a, b) => {
+      wireColor = demoColors[demoColorIdx % demoColors.length];
+      demoColorIdx += 1;
+      return wireBetweenTerminals(a, b);
+    };
 
-    wireBetweenTerminals(terminalByRole(neck, 'H'), swT[4]);
-    wireBetweenTerminals(terminalByRole(bridge, 'H'), swT[1]);
-    wireBetweenTerminals(swT[2], swT[3]);
-    wireBetweenTerminals(swT[2], getPotentiometerTrackTerms(vol)?.lug3);
+    connect(midH, phT[4]);
+    connect(midH, phT[1]);
+    connect(midG, phT[5]);
+    connect(midG, phT[0]);
+    connect(phT[2], swT[0]);
+
+    connect(terminalByRole(neck, 'H'), swT[4]);
+    connect(terminalByRole(bridge, 'H'), swT[1]);
+    connect(swT[2], swT[3]);
+    connect(swT[2], getPotentiometerTrackTerms(vol)?.lug3);
 
     wireNaVolumeToneChassis({
       vol,
@@ -31577,8 +34128,11 @@
         phT[3],
         phT[6],
       ],
+      connect,
     });
 
+    wireColor = savedColor;
+    wireStyle = savedStyle;
     deselectAll();
     refreshLightningWireGlow();
     refreshGroundCheckAlert();
@@ -31590,10 +34144,233 @@
     zoom = 1;
     applyViewport();
     setStatus('SSS — 3× SC · 3WAY + 2WAY mid-phase · Vol+Tone · chassis bus · mono out');
-    markProjectDirty();
+    if (temporary) {
+      projectDirty = false;
+      updateProjectSwitcherUI();
+    } else {
+      markProjectDirty();
+    }
   }
 
-  if (new URLSearchParams(location.search).get('demo') === 'sss') {
-    setTimeout(() => seedSssRendererDemo(), 80);
+  /**
+   * Fill electromagnet dimensional + materials fields and enable calc bridge.
+   * Exercises bobbin UI / derived Z/L paths under Bugtest.
+   */
+  function fillDemoPickupDimensional(el, profile) {
+    if (!el || !supportsBobbinDimensionalConfig(el)) return;
+    applyBobbinGeometryFromRecord(el, {
+      bobbinCalcBridge: '1',
+      bobbinCircuitDerived: '1',
+      ...profile,
+    });
+    setBobbinCalcBridgeEnabled(el, true);
+    renderBobbinPreview(el);
+    updateAssetLabelBox(el);
+  }
+
+  /**
+   * Guitar-centric HSS Strat demo (Bugtest / schematic showcase):
+   * Neck SC + Mid SC + Bridge HB · 3-way + mid phase · Vol + Neck/Mid tones · chassis · mono out.
+   * Dimensional pickup fields filled; no amp/pedal clutter.
+   */
+  function seedSss2ExtendedDemo(opts = {}) {
+    const temporary = !!opts.temporary;
+    clearElectronicsDemoBoard();
+
+    const neck = placeDemoAsset('singlecoil', 40, 40);
+    const mid = placeDemoAsset('singlecoil', 40, 180);
+    const bridge = placeDemoAsset('dualcoil', 40, 320);
+    const sw = placeDemoAsset('dpdt', 260, 160);
+    const phase = placeDemoAsset('dpdt-on-on', 420, 160);
+    const vol = placeDemoAsset('potentiometer', 600, 50);
+    const toneN = placeDemoAsset('potentiometer', 600, 200);
+    const toneM = placeDemoAsset('potentiometer', 600, 350);
+    const capN = placeDemoAsset('capacitor', 720, 230);
+    const capM = placeDemoAsset('capacitor', 720, 380);
+    const out = placeDemoAsset('mono-output', 880, 180);
+
+    fillDemoPickupDimensional(neck, {
+      bobbinLengthMm: '70.3',
+      bobbinWidthMm: '18.2',
+      bobbinMagnetCount: '6',
+      bobbinStringSpacingMm: '10.5',
+      bobbinMagnetDiameterMm: '4.76',
+      bobbinCavityHeightMm: '10.5',
+      bobbinThicknessMm: '2.0',
+      bobbinBottomThicknessMm: '2.3',
+      bobbinCoilWireAwg: '42',
+      bobbinCoilInsulation: 'plainEnamel',
+      bobbinMagnetType: 'alnico5',
+      bobbinMagnetHeightsMm: [12.7, 12.5, 12.2, 12.0, 11.8, 12.7],
+      bobbinBaseplateEnabled: '1',
+      bobbinBaseplateThicknessMm: '1.0',
+      bobbinBaseplateType: 'nickelSilver',
+      bobbinCoilTurns: [8200],
+      bobbinCoilTurnsManual: '1',
+      bobbinPoleTypes: ['M', 'M', 'M', 'M', 'M', 'M'],
+    });
+    fillDemoPickupDimensional(mid, {
+      bobbinLengthMm: '70.3',
+      bobbinWidthMm: '18.2',
+      bobbinMagnetCount: '6',
+      bobbinStringSpacingMm: '10.5',
+      bobbinMagnetDiameterMm: '4.76',
+      bobbinCavityHeightMm: '10.5',
+      bobbinThicknessMm: '2.0',
+      bobbinBottomThicknessMm: '2.3',
+      bobbinCoilWireAwg: '43',
+      bobbinCoilInsulation: 'formvar',
+      bobbinMagnetType: 'alnico2',
+      bobbinMagnetHeightsMm: [12.5, 12.3, 12.0, 11.8, 11.6, 12.5],
+      bobbinBaseplateEnabled: '0',
+      bobbinCoilTurns: [7800],
+      bobbinCoilTurnsManual: '1',
+      bobbinPoleTypes: ['S', 'M', 'M', 'M', 'M', 'S'],
+    });
+    fillDemoPickupDimensional(bridge, {
+      bobbinLengthMm: '70.0',
+      bobbinWidthMm: '16.5',
+      bobbinMagnetCounts: [6, 6],
+      bobbinStringSpacingMm: '10.5',
+      bobbinMagnetDiametersMm: [4.76, 4.76],
+      bobbinCavityHeightMm: '12.0',
+      bobbinThicknessMm: '2.0',
+      bobbinBottomThicknessMm: '2.0',
+      bobbinCoilWireAwgs: [42, 42],
+      bobbinCoilInsulations: ['plainEnamel', 'plainEnamel'],
+      bobbinMagnetType: 'alnico5',
+      bobbinBarMagnetType: 'alnico5',
+      bobbinCoilGapMm: '3.2',
+      bobbinCoilTurns: [4500, 4700],
+      bobbinCoilTurnsManual: '1',
+      bobbinPoleTypes: ['S', 'S', 'S', 'S', 'S', 'S', 'P', 'P', 'P', 'P', 'P', 'P'],
+    });
+
+    setComponentResistance(vol, '250000');
+    setComponentResistance(toneN, '250000');
+    setComponentResistance(toneM, '250000');
+    setComponentCapacitance(capN, '0.022');
+    setComponentCapacitance(capM, '0.022');
+    [neck, mid, bridge, vol, toneN, toneM, capN, capM, sw, phase].forEach((el) => {
+      setComponentGroundTag(el, true);
+    });
+
+    setToggleSwitchType(sw, 1);
+    GuitarAssets.setComponentStateIndex(sw, 0);
+    setToggleSwitchType(phase, 1);
+    GuitarAssets.setComponentStateIndex(phase, 0);
+
+    const swT = [...sw.querySelectorAll('.terminal')];
+    const phT = [...phase.querySelectorAll('.terminal')];
+    ensureSwitchCaseGroundPosition(sw);
+    ensureSwitchCaseGroundPosition(phase);
+
+    const midH = terminalByRole(mid, 'H');
+    const midG = terminalByRole(mid, 'G');
+    const hbH = terminalByRole(bridge, 'H');
+    const hbG = terminalByRole(bridge, 'G');
+
+    const demoColors = ['red', 'yellow', 'green', 'blue', 'orange', 'copper', 'white', 'black'];
+    let demoColorIdx = 0;
+    const savedColor = wireColor;
+    const savedStyle = wireStyle;
+    wireStyle = 'solid';
+    const connect = (a, b) => {
+      if (!a || !b) return null;
+      wireColor = demoColors[demoColorIdx % demoColors.length];
+      demoColorIdx += 1;
+      return wireBetweenTerminals(a, b);
+    };
+
+    // Mid → phase reverse → 3-way common
+    connect(midH, phT[4]);
+    connect(midH, phT[1]);
+    connect(midG, phT[5]);
+    connect(midG, phT[0]);
+    connect(phT[2], swT[0]);
+
+    connect(terminalByRole(neck, 'H'), swT[4]);
+    connect(hbH, swT[1]);
+    connect(swT[2], swT[3]);
+    connect(swT[2], getPotentiometerTrackTerms(vol)?.lug3);
+
+    // Neck tone off volume hot; mid tone off mid hot (post-phase)
+    const volTerms = getPotentiometerTrackTerms(vol);
+    const toneNT = [...toneN.querySelectorAll('.terminal')];
+    const toneMT = [...toneM.querySelectorAll('.terminal')];
+    const capNT = [...capN.querySelectorAll('.terminal')];
+    const capMT = [...capM.querySelectorAll('.terminal')];
+    const outH = terminalByRole(out, 'H');
+    const outG = terminalByRole(out, 'G');
+
+    connect(volTerms?.wiper, outH);
+    connect(volTerms?.lug3, toneNT[2]);
+    connect(toneNT[1], capNT[0]);
+    connect(capNT[1], outG);
+    connect(phT[2], toneMT[2]);
+    connect(toneMT[1], capMT[0]);
+    connect(capMT[1], outG);
+
+    const grounds = [
+      terminalByRole(neck, 'G'),
+      midG,
+      hbG,
+      phT[3],
+      phT[6],
+      volTerms?.lug1,
+      volTerms?.caseG,
+      toneNT[3],
+      toneMT[3],
+      swT[6],
+      outG,
+    ].filter(Boolean);
+    const seen = new Set();
+    const unique = grounds.filter((t) => {
+      if (seen.has(t)) return false;
+      seen.add(t);
+      return true;
+    });
+    for (let i = 1; i < unique.length; i++) {
+      connect(unique[0], unique[i]);
+    }
+
+    ensurePotCaseGroundPosition(vol);
+    ensurePotCaseGroundPosition(toneN);
+    ensurePotCaseGroundPosition(toneM);
+
+    try {
+      [neck, mid, bridge].forEach((el) => {
+        applyBobbinDerivedCircuitValues(el, { force: true, notify: false });
+        ensureBobbinGeometry(el);
+        renderBobbinPreview(el);
+      });
+    } catch (err) {
+      console.error(err);
+    }
+
+    wireColor = savedColor;
+    wireStyle = savedStyle;
+    deselectAll();
+    refreshLightningWireGlow();
+    refreshGroundCheckAlert();
+    notifySchematicCircuitChanged();
+    openSchematicPeekDemo();
+
+    panX = 20;
+    panY = 20;
+    zoom = 0.95;
+    applyViewport();
+    setStatus('HSS — Neck/Mid SC · Bridge HB · 3WAY + mid-phase · Vol + 2×Tone · chassis · mono');
+    if (temporary) {
+      projectDirty = false;
+      updateProjectSwitcherUI();
+    } else {
+      markProjectDirty();
+    }
+  }
+
+  const demoParam = new URLSearchParams(location.search).get('demo');
+  if (demoParam === 'sss') {
+    setTimeout(() => openSssDemoProject(), 80);
   }
 })();

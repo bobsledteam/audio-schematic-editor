@@ -17,7 +17,8 @@
   const EDITOR_LOOM_STROKE = 4.3;
   const EDITOR_FAN_STROKE = 1.9;
   const EDITOR_DEFAULT_LOOM_COLOR = '#111111';
-  const STORAGE_KEY = 'guitar-custom-assets';
+  const STORAGE_KEY = 'endo-asd-custom-assets';
+  const STORAGE_KEY_LEGACY = 'guitar-custom-assets';
   const TERM_W = 22;
   const TERM_H = 18;
   const TERM_RECT_W = 39;
@@ -57,7 +58,7 @@
     { id: 'jack', label: 'Jacks' },
     { id: 'power', label: 'Power' },
     { id: 'component', label: 'Components' },
-    /* Hidden from placement menu — templates still load/save */
+    /* Wire / 4-conductor: data + editor only — not in the place menu */
     { id: 'wire', label: 'Wire', hidden: true },
     { id: 'custom', label: 'User' },
   ];
@@ -118,6 +119,7 @@
     pickup: [
       { id: 'singlecoil', label: 'Single Coil' },
       { id: 'dualcoil', label: 'Dual Coil' },
+      { id: '4conductor', label: '4 Conductor HB' },
     ],
     switch: [
       { id: 'dpdt-on-on', label: 'ON-ON' },
@@ -151,7 +153,7 @@
       { id: 'opamp', label: 'Op Amp' },
       { id: 'vacuum-tube', label: 'Vacuum Tube' },
     ],
-    wire: [{ id: '4conductor', label: '4 Conductor' }],
+    wire: [],
   };
 
   /** Electronics grid unit (px) — matches app WORKSPACE_GRID. */
@@ -698,10 +700,10 @@
   };
 
   function defaultValueFieldsForSubtype(category, subtype) {
-    if (subtype === '4conductor') {
-      return ['impedance', 'inductance'];
-    }
-    if (category === 'pickup' || subtype === 'singlecoil' || subtype === 'dualcoil') {
+    if (subtype === '4conductor'
+      || category === 'pickup'
+      || subtype === 'singlecoil'
+      || subtype === 'dualcoil') {
       return ['coilWinds', 'impedance', 'inductance'];
     }
     if (subtype === 'capacitor' || (category === 'component' && subtype === 'capacitor')) {
@@ -757,6 +759,7 @@
   /**
    * Default YESGROUND for parts whose metalwork / return path should reach jack G.
    * Jacks are ground sources — never YESGROUND.
+   * Signal-only passives (cap, R, diode, …) default NOGROUND unless the template opts in.
    */
   function defaultNeedsGrounding(category, subtype) {
     if (category === 'jack') return false;
@@ -769,23 +772,27 @@
     if (category === 'switch'
       || subtype === 'dpdt'
       || subtype === 'dpdt-on-on'
-      || subtype === 'dpdt-on-off-on') {
+      || subtype === 'dpdt-on-off-on'
+      || subtype === 'footswitch') {
       return true;
     }
     if (subtype === 'potentiometer'
       || subtype === 'push-pot-on-on'
-      || subtype === 'capacitor'
+      || subtype === 'vacuum-tube'
+      || subtype === 'tube-generic'
+      || subtype === 'audio-transformer'
+      || subtype === 'power-transformer'
+      || subtype === 'relay') {
+      return true;
+    }
+    // Signal-only passives — chassis YESGROUND only when template opts in
+    if (subtype === 'capacitor'
       || subtype === 'resistor'
       || subtype === 'diode'
       || subtype === 'transistor'
       || subtype === 'opamp'
-      || subtype === 'vacuum-tube'
-      || subtype === 'tube-generic'
-      || subtype === 'inductor'
-      || subtype === 'audio-transformer'
-      || subtype === 'relay'
-      || subtype === 'footswitch') {
-      return true;
+      || subtype === 'inductor') {
+      return false;
     }
     // Power sources / LED indicators: return path is electrical (P− / K), not chassis YESGROUND
     if (subtype === 'led-indicator'
@@ -793,8 +800,7 @@
       || subtype === 'dc-jack'
       || subtype === 'heater-supply'
       || subtype === 'hv-supply'
-      || subtype === 'dual-rail'
-      || subtype === 'power-transformer') {
+      || subtype === 'dual-rail') {
       return false;
     }
     if (category === 'power') {
@@ -964,7 +970,10 @@
 
   /**
    * Dual coil / humbucker — 5-conductor loom exits horizontally to the right.
-   * State menu / wires: H black, N white, R red, S green, G copper.
+   * SD-style 4-conductor colour code (NA guitar practice):
+   *   H black = North start (hot) · N white = North finish
+   *   R red = South finish (series) · S green = South start · G bare = shield
+   * Stock series: solder N↔R, take hot from H, ground S+G.
    */
   function dualCoilTerminals(bx, by, bw, bodyH) {
     const tip = 10;
@@ -978,9 +987,9 @@
         label: 'H',
         role: 'H',
         tipLabel: 'H',
-        menuLabel: 'Hot (H)',
+        menuLabel: 'Hot / North start (H)',
         wireColor: '#111111',
-        termName: 'Hot',
+        termName: 'Hot (North start)',
         symbol: 'H',
         keepColorWhenActive: true,
         textColor: '#eeeeee',
@@ -989,9 +998,9 @@
         label: 'N',
         role: 'N',
         tipLabel: 'N',
-        menuLabel: 'North coil (N)',
+        menuLabel: 'North finish (N)',
         wireColor: '#ffffff',
-        termName: 'North coil',
+        termName: 'North finish',
         symbol: 'N',
         keepColorWhenActive: true,
       },
@@ -999,9 +1008,9 @@
         label: 'R',
         role: 'R',
         tipLabel: 'R',
-        menuLabel: 'Red (R)',
+        menuLabel: 'South finish / series (R)',
         wireColor: '#e74c3c',
-        termName: 'Red',
+        termName: 'South finish',
         symbol: 'R',
         keepColorWhenActive: true,
       },
@@ -1009,9 +1018,9 @@
         label: 'S',
         role: 'S',
         tipLabel: 'S',
-        menuLabel: 'South coil (S)',
+        menuLabel: 'South start (S)',
         wireColor: '#2ecc71',
-        termName: 'South coil',
+        termName: 'South start',
         symbol: 'S',
         keepColorWhenActive: true,
       },
@@ -1019,9 +1028,9 @@
         label: 'G',
         role: 'G',
         tipLabel: 'G',
-        menuLabel: 'Ground (G)',
+        menuLabel: 'Shield / ground (G)',
         wireColor: '#b87333',
-        termName: 'Ground',
+        termName: 'Shield',
         symbol: 'G',
         isGround: true,
       },
@@ -3060,12 +3069,12 @@
     },
     {
       id: '4conductor',
-      name: '4 Conductor',
-      category: 'wire',
+      name: '4 Conductor HB',
+      category: 'pickup',
       subtype: '4conductor',
       builtin: true,
       needsGrounding: true,
-      valueFields: ['impedance', 'inductance'],
+      valueFields: ['coilWinds', 'impedance', 'inductance'],
       placeLabel: '4C',
       bodyX: 0,
       bodyY: 0,
@@ -3339,7 +3348,7 @@
         category: 'component',
         subtype: 'capacitor',
         builtin: true,
-        needsGrounding: true,
+        needsGrounding: false,
         valueFields: ['capacitance'],
         placeLabel: '',
         bodyX: parts.bodyX,
@@ -3364,7 +3373,7 @@
         category: 'component',
         subtype: 'diode',
         builtin: true,
-        needsGrounding: true,
+        needsGrounding: false,
         valueFields: ['forwardVoltage', 'reverseVoltage', 'forwardCurrent'],
         placeLabel: '',
         bodyX: parts.bodyX,
@@ -3391,7 +3400,7 @@
         category: 'component',
         subtype: 'resistor',
         builtin: true,
-        needsGrounding: true,
+        needsGrounding: false,
         valueFields: ['resistance', 'powerRating', 'tolerance'],
         placeLabel: '',
         bodyX: parts.bodyX,
@@ -3418,7 +3427,7 @@
         category: 'component',
         subtype: 'transistor',
         builtin: true,
-        needsGrounding: true,
+        needsGrounding: false,
         valueFields: ['hfe'],
         placeLabel: '',
         bodyX: parts.bodyX,
@@ -3443,7 +3452,7 @@
         category: 'component',
         subtype: 'opamp',
         builtin: true,
-        needsGrounding: true,
+        needsGrounding: false,
         valueFields: ['openLoopGain', 'gainBandwidth', 'slewRate', 'inputOffset', 'supplyVoltage'],
         placeLabel: 'OA',
         bodyX: parts.bodyX,
@@ -3581,7 +3590,7 @@
       category: 'power',
       subtype: 'power-transformer',
       builtin: true,
-      needsGrounding: false,
+      needsGrounding: true,
       valueFields: ['primaryVoltage', 'secondaryVoltage', 'powerRating'],
       placeLabel: 'PT',
       bodyX: 0,
@@ -3603,7 +3612,7 @@
         category: 'component',
         subtype: 'inductor',
         builtin: true,
-        needsGrounding: true,
+        needsGrounding: false,
         valueFields: ['inductance', 'currentRating'],
         placeLabel: 'L',
         bodyX: parts.bodyX,
@@ -4096,7 +4105,11 @@
 
   function loadCustomTemplates() {
     try {
-      customTemplates = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      const raw =
+        localStorage.getItem(STORAGE_KEY)
+        || localStorage.getItem(STORAGE_KEY_LEGACY)
+        || '[]';
+      customTemplates = JSON.parse(raw);
       customTemplates.forEach((template) => {
         if (!template.states?.length) {
           template.states = [{ id: 1, terminalActive: (template.terminals || []).map(() => false) }];
@@ -4140,10 +4153,7 @@
     if (category === 'pickup' && subtype === 'singlecoil') {
       return singleCoilTerminalPair(bx, by, bw, draft.bodyH, shape);
     }
-    if (category === 'pickup' && subtype === 'dualcoil') {
-      return dualCoilTerminals(bx, by, bw, draft.bodyH, shape);
-    }
-    if (category === 'wire' && subtype === '4conductor') {
+    if (category === 'pickup' && (subtype === 'dualcoil' || subtype === '4conductor')) {
       return dualCoilTerminals(bx, by, bw, draft.bodyH, shape);
     }
     if (category === 'jack' && subtype === 'monooutput') {
@@ -4456,11 +4466,8 @@
         placeLabel: 'TUBE',
       };
     }
-    if (category === 'pickup' && subtype === 'dualcoil') {
-      return { bodyW: 120, bodyH: 48, placeLabel: 'HB' };
-    }
-    if (category === 'wire' && subtype === '4conductor') {
-      return { bodyW: 120, bodyH: 48, placeLabel: '4C' };
+    if (category === 'pickup' && (subtype === 'dualcoil' || subtype === '4conductor')) {
+      return { bodyW: 120, bodyH: 48, placeLabel: subtype === '4conductor' ? '4C' : 'HB' };
     }
     return { bodyW: 70, bodyH: 48, placeLabel: 'PU' };
   }
@@ -4659,9 +4666,10 @@
       (editorDraft.category === 'switch' && (editorDraft.subtype === 'dpdt' || editorDraft.subtype === 'dpdt-on-off-on' || editorDraft.subtype === 'dpdt-on-on'))
       || (editorDraft.category === 'pickup' && editorDraft.subtype === 'singlecoil')
       || (editorDraft.category === 'pickup' && editorDraft.subtype === 'dualcoil')
+      || (editorDraft.category === 'pickup' && editorDraft.subtype === '4conductor')
     ) {
       editorDraft.terminals = defaultTerminals(editorDraft.category, editorDraft.subtype, editorDraft);
-      if (editorDraft.subtype === 'dualcoil') {
+      if (editorDraft.subtype === 'dualcoil' || editorDraft.subtype === '4conductor') {
         editorDraft.terminals = editorDraft.terminals.map((t) => (
           String(t.className || '').includes('hb-tip') ? { ...t, partKind: 'conductor' } : t
         ));
@@ -4870,6 +4878,30 @@
     }
     return true;
   }
+
+  const CONTEXT_FOCUS_ICON_ACTIVE =
+    '<svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+    '<path d="M13 2L4 14h7l-1 8 10-14h-7l1-6z" fill="currentColor"/>' +
+    '</svg>';
+  const CONTEXT_FOCUS_ICON_GROUND =
+    '<svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+    '<path d="M12 3v8M5 11h14M7.5 14.5h9M9.5 18h5M11 21h2" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>' +
+    '</svg>';
+  const CONTEXT_FOCUS_ICON_WIRE =
+    '<svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+    '<line x1="5" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"/>' +
+    '</svg>';
+  const CONTEXT_FOCUS_ICON_SHORT =
+    '<svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+    '<circle cx="10.5" cy="10.5" r="6.25" fill="none" stroke="currentColor" stroke-width="2.1"/>' +
+    '<line x1="15.2" y1="15.2" x2="20" y2="20" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"/>' +
+    '</svg>';
+  const CONTEXT_PANEL_SNAP_ICON =
+    '<svg class="context-menu-bullseye context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+    '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>' +
+    '<circle cx="12" cy="12" r="5" fill="none" stroke="currentColor" stroke-width="2"/>' +
+    '<circle cx="12" cy="12" r="1.75" fill="currentColor"/>' +
+    '</svg>';
 
   function syncContextMenuPowerButton() {
     const btn = document.getElementById('context-menu-power');
@@ -5159,19 +5191,14 @@
     const shortCheckBtn = document.getElementById('context-menu-short-check');
     if (powerBtn) {
       if (onPanel) {
-        powerBtn.innerHTML =
-          '<svg class="context-menu-bullseye" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
-          '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>' +
-          '<circle cx="12" cy="12" r="5" fill="none" stroke="currentColor" stroke-width="2"/>' +
-          '<circle cx="12" cy="12" r="1.75" fill="currentColor"/>' +
-          '</svg>';
+        powerBtn.innerHTML = CONTEXT_PANEL_SNAP_ICON;
         powerBtn.title = 'Place panel snap points';
         powerBtn.setAttribute('aria-label', 'Panel snap points');
         powerBtn.classList.toggle('panel-snap-active', !!deps.getPanelSnapMode?.());
         powerBtn.classList.remove('active');
         powerBtn.setAttribute('aria-pressed', deps.getPanelSnapMode?.() ? 'true' : 'false');
       } else {
-        powerBtn.textContent = '⚡';
+        powerBtn.innerHTML = CONTEXT_FOCUS_ICON_ACTIVE;
         powerBtn.title = 'Focus: Active — highlight wires on active signal path';
         powerBtn.setAttribute('aria-label', 'Focus: Active signal path');
         powerBtn.classList.remove('panel-snap-active');
@@ -5180,10 +5207,12 @@
     }
     if (groundBtn) {
       if (onPanel) {
+        groundBtn.innerHTML = CONTEXT_FOCUS_ICON_GROUND;
         groundBtn.title = 'Ground (panel — no action)';
         groundBtn.classList.remove('active');
         groundBtn.setAttribute('aria-pressed', 'false');
       } else {
+        groundBtn.innerHTML = CONTEXT_FOCUS_ICON_GROUND;
         groundBtn.title = 'Focus: Ground — highlight ungrounded YESGROUND assets';
         groundBtn.setAttribute('aria-label', 'Focus: Ground check');
         syncContextMenuGroundButton();
@@ -5192,6 +5221,7 @@
     if (wireFocusBtn) {
       wireFocusBtn.classList.toggle('hidden', onPanel);
       if (!onPanel) {
+        wireFocusBtn.innerHTML = CONTEXT_FOCUS_ICON_WIRE;
         wireFocusBtn.title = 'Focus: Wire — grey & lock assets, wires in front';
         wireFocusBtn.setAttribute('aria-label', 'Focus: Wire edit');
         syncContextMenuWireFocusButton();
@@ -5200,6 +5230,7 @@
     if (shortCheckBtn) {
       shortCheckBtn.classList.toggle('hidden', onPanel);
       if (!onPanel) {
+        shortCheckBtn.innerHTML = CONTEXT_FOCUS_ICON_SHORT;
         shortCheckBtn.title = 'Focus: Short — detect hard shorts (H↔G, tip–sleeve, battery)';
         shortCheckBtn.setAttribute('aria-label', 'Focus: Short check');
         syncContextMenuShortCheckButton();

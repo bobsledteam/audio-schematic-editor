@@ -20,20 +20,20 @@ jobs:
         run: python -m pip install -r requirements-build.txt
 
       - name: Build app bundle
-        run: python -m PyInstaller build/GuitarWiring-mac.spec --clean --noconfirm
+        run: python -m PyInstaller build/EndoASD-mac.spec --clean --noconfirm
 
       - name: Create DMG
         run: |
           hdiutil create \
-            -volname "Guitar Wiring" \
-            -srcfolder "dist/Guitar Wiring.app" \
+            -volname "Endo ASD" \
+            -srcfolder "dist/Endo ASD.app" \
             -ov -format UDZO \
-            dist/GuitarWiring.dmg
+            dist/EndoASD-mac-Bugtest.dmg
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: GuitarWiring-mac
+          name: EndoASD-mac
           path: |
-            dist/Guitar Wiring.app
-            dist/GuitarWiring.dmg
+            dist/Endo ASD.app
+            dist/EndoASD-mac-Bugtest.dmg

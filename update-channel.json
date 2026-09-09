@@ -1,0 +1,8 @@
+{
+  "build": 568,
+  "product": "Endo Audio Schematic Editor",
+  "branch": "cursor/audio-schematic-editor",
+  "gitUrl": "",
+  "archiveUrl": "",
+  "notes": "Set gitUrl (https://…/repo.git) or archiveUrl (zip of the branch) after the first push so Check update can reach the remote. Product name: EndoASD / Audio Schematic Editor."
+}

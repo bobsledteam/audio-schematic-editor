@@ -3,25 +3,106 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="application-name" content="Guitar Wiring Visualiser">
+  <meta name="application-name" content="Endo Audio Schematic Editor">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <title>Guitar Wiring Visualiser</title>
-  <link rel="stylesheet" href="styles.css?v=518">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <title>Endo Audio Schematic Editor</title>
+  <link rel="icon" type="image/png" href="assets/app-icon.png">
+  <link rel="stylesheet" id="app-gate-style" href="gate.css?v=568">
+  <link rel="stylesheet" href="styles.css?v=568">
 </head>
 <body>
+  <div
+    id="app-gate"
+    class="app-gate"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="app-gate-title"
+  >
+    <div class="app-gate__stage" aria-hidden="true">
+      <div class="app-gate__lava">
+        <span class="app-gate__blob app-gate__blob--1"></span>
+        <span class="app-gate__blob app-gate__blob--2"></span>
+        <span class="app-gate__blob app-gate__blob--3"></span>
+        <span class="app-gate__blob app-gate__blob--4"></span>
+        <span class="app-gate__blob app-gate__blob--5"></span>
+      </div>
+      <div class="app-gate__glass"></div>
+    </div>
+    <div class="app-gate__bugtest">
+      <button
+        type="button"
+        class="bugtest-badge bugtest-badge--gate"
+        data-bugtest-badge
+        title="Click to record bugs"
+        aria-label="Click to record bugs"
+      >
+        <span class="bugtest-badge__title" data-bugtest-title>Bugtest Ver.</span>
+        <span class="bugtest-badge__build" data-bugtest-build>568</span>
+      </button>
+      <button
+        type="button"
+        id="app-gate-check-update"
+        class="app-gate__check-update"
+        title="Compare this build to the pushed git remote and install if newer"
+      >Check update</button>
+      <p id="app-gate-update-status" class="app-gate__update-status" hidden role="status" aria-live="polite"></p>
+    </div>
+    <div class="app-gate__content">
+      <button
+        type="button"
+        id="app-gate-logo"
+        class="app-gate__logo"
+        title="Endo"
+        aria-label="Endo"
+      >
+        <img
+          class="app-gate__logo-img"
+          src="assets/logo-mark.png"
+          alt=""
+          width="220"
+          height="168"
+        />
+        <span class="app-gate__asd">ASD</span>
+      </button>
+      <h1 id="app-gate-title" class="visually-hidden">Enter password</h1>
+      <form id="app-gate-form" class="app-gate__form" autocomplete="off">
+        <label class="app-gate__terminal" for="app-gate-input">
+          <span id="app-gate-mask" class="app-gate__mask" aria-hidden="true"></span>
+          <span class="app-gate__caret" aria-hidden="true">|</span>
+          <input
+            type="password"
+            id="app-gate-input"
+            class="app-gate__input"
+            name="password"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            aria-describedby="app-gate-error"
+          />
+        </label>
+        <p id="app-gate-error" class="app-gate__error" hidden>Incorrect password</p>
+        <div id="app-gate-spinner" class="app-gate__spinner" hidden aria-hidden="true" aria-label="Unlocking">
+          <span class="app-gate__spinner-ring"></span>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="app-gate-unveil" class="app-gate-unveil" hidden aria-hidden="true">
+    <div class="app-gate-unveil__black"></div>
+  </div>
+
   <div class="app-chrome">
   <div class="app-header">
     <div class="logo-slot">
       <button
         class="logo-mark toolbar-logo"
         type="button"
-        aria-label="Projects"
+        aria-label="Endo Audio Schematic Editor — Projects"
         aria-expanded="false"
         aria-controls="project-switcher"
         data-logo-flash
+        title="Endo Audio Schematic Editor — Projects (click)"
       >
         <span class="logo-mark__lava" aria-hidden="true">
           <span class="logo-mark__blob logo-mark__blob--1"></span>
@@ -31,42 +112,62 @@
           <span class="logo-mark__blob logo-mark__blob--5"></span>
         </span>
         <span class="logo-mark__flash" aria-hidden="true"></span>
-        <img
-          class="logo-mark__img"
-          src="assets/logo-mark.png"
-          alt="Endo"
-          width="150"
-          height="150"
-        />
+        <span class="logo-mark__banner">
+          <img
+            class="logo-mark__img"
+            src="assets/logo-mark.png"
+            alt="Endo"
+            width="150"
+            height="115"
+          />
+          <span class="logo-mark__asd">ASD</span>
+        </span>
       </button>
     </div>
     <header class="toolbar">
       <div class="toolbar-actions">
-        <div class="layer-stack-btns" role="group" aria-label="Layer stack">
-          <button type="button" id="btn-layer-front" class="tool-btn layer-btn" title="Active layer above components">Front</button>
-          <button type="button" id="btn-layer-back" class="tool-btn layer-btn" title="Active layer behind components">Back</button>
-        </div>
-      <span class="toolbar-divider"></span>
-      <button type="button" id="btn-wire" class="tool-btn tool-btn-wire" title="Wire" aria-label="Wire">
-        <svg class="draw-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path d="M12 20h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </button>
+      <div class="wire-tool-stack">
+        <button type="button" id="btn-wire" class="tool-btn tool-btn-wire" title="Wire" aria-label="Wire">
+          <svg class="draw-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M12 20h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button type="button" id="btn-erase" class="tool-btn tool-btn-erase" title="Erase — drag to delete" aria-label="Erase" aria-pressed="false">
+          <svg class="erase-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M16.2 3.8l4 4-11.4 11.4H4.8l-2-2L16.2 3.8z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/>
+            <path d="M7.2 19.2H20" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
       <button type="button" id="wire-gauge-reopen" class="wire-gauge-reopen hidden" title="Wire gauge" aria-label="Open wire gauge" hidden>
         <span id="wire-gauge-reopen-label">22 AWG</span>
       </button>
-      <div class="wire-style-group" role="group" aria-label="Line style">
-        <button type="button" id="btn-solid" class="tool-btn style-btn active" data-style="solid" title="Solid" aria-label="Solid">
-          <svg class="style-btn-icon" viewBox="0 0 24 12" aria-hidden="true" focusable="false">
-            <line x1="2" y1="6" x2="22" y2="6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
-          </svg>
-        </button>
-        <button type="button" id="btn-dashed" class="tool-btn style-btn" data-style="dashed" title="Dashed" aria-label="Dashed">
-          <svg class="style-btn-icon" viewBox="0 0 24 12" aria-hidden="true" focusable="false">
-            <line x1="2" y1="6" x2="22" y2="6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="3.2 3.4"/>
-          </svg>
-        </button>
+      <div class="wire-draw-options">
+        <div class="wire-style-group" role="group" aria-label="Line style">
+          <button type="button" id="btn-solid" class="tool-btn style-btn active" data-style="solid" title="Solid" aria-label="Solid">
+            <svg class="style-btn-icon" viewBox="0 0 24 12" aria-hidden="true" focusable="false">
+              <line x1="2" y1="6" x2="22" y2="6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button type="button" id="btn-dashed" class="tool-btn style-btn" data-style="dashed" title="Dashed" aria-label="Dashed">
+            <svg class="style-btn-icon" viewBox="0 0 24 12" aria-hidden="true" focusable="false">
+              <line x1="2" y1="6" x2="22" y2="6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="3.2 3.4"/>
+            </svg>
+          </button>
+        </div>
+        <div class="wire-route-group" role="group" aria-label="Wire route style">
+          <button type="button" id="btn-route-free" class="tool-btn style-btn route-btn active" data-route="free" title="Freeform wire (smooth bends)" aria-label="Freeform wire" aria-pressed="true">
+            <svg class="route-btn-icon" viewBox="0 0 24 14" aria-hidden="true" focusable="false">
+              <path d="M2 11 C7 11 8 3 12 3 S17 11 22 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <button type="button" id="btn-route-manhattan" class="tool-btn style-btn route-btn" data-route="manhattan" title="Manhattan wire (orthogonal + soft fillets)" aria-label="Manhattan wire" aria-pressed="false">
+            <svg class="route-btn-icon" viewBox="0 0 24 14" aria-hidden="true" focusable="false">
+              <path d="M2 11 H10 Q12 11 12 9 V5 Q12 3 14 3 H22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
       </div>
       <div class="wire-colors" role="group" aria-label="Wire colour">
         <button type="button" class="color-swatch active" data-color="white" title="White" aria-label="White"></button>
@@ -79,7 +180,78 @@
       </div>
       </div>
     </header>
-    <button type="button" id="btn-accent-cycle" class="accent-swatch" title="Cycle accent colour" aria-label="Cycle accent colour"></button>
+    <div class="app-settings" id="app-settings">
+      <span class="app-settings-label" id="app-settings-label">UI</span>
+      <button
+        type="button"
+        id="btn-settings"
+        class="app-settings-cog"
+        title="Settings"
+        aria-label="Settings"
+        aria-expanded="false"
+        aria-controls="app-settings-panel"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M12 8.6a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8z" fill="none" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M19.4 13a7.6 7.6 0 0 0 .1-1l2-1.5-2-3.4-2.4 1a7.7 7.7 0 0 0-1.7-1l-.4-2.5h-4l-.4 2.5a7.7 7.7 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.5a7.6 7.6 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7.7 7.7 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.7 7.7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <div id="app-settings-panel" class="app-settings-panel hidden" role="dialog" aria-label="UI settings" hidden>
+        <div class="app-settings-section">
+          <div class="app-settings-section-title">Accent</div>
+          <button type="button" id="btn-accent-cycle" class="app-settings-accent-btn" title="Cycle accent colour">
+            <span class="app-settings-accent-swatch" id="app-settings-accent-swatch" aria-hidden="true"></span>
+            <span id="app-settings-accent-name">Red</span>
+          </button>
+        </div>
+        <details class="app-settings-style" id="app-settings-style" open>
+          <summary class="app-settings-style-summary">Style</summary>
+          <div class="app-settings-style-body">
+            <button
+              type="button"
+              id="settings-header-dither"
+              class="app-settings-toggle-btn"
+              aria-pressed="false"
+              title="Header dither half-tone"
+            >
+              <span class="app-settings-toggle-label">Header dither</span>
+              <span class="app-settings-toggle-state" id="settings-header-dither-state">Off</span>
+            </button>
+          </div>
+        </details>
+        <details class="app-settings-a11y" id="app-settings-a11y">
+          <summary class="app-settings-a11y-summary">Accessibility</summary>
+          <div class="app-settings-a11y-body">
+            <label class="app-settings-field">
+              <span class="app-settings-field-label">
+                Colorblind mode
+                <button type="button" id="settings-colorblind-reset" class="app-settings-reset" title="Reset colorblind mode">Reset</button>
+              </span>
+              <select id="settings-colorblind" class="app-settings-select" aria-label="Colorblind mode">
+                <option value="off">Off</option>
+                <option value="deut">Deuteranopia-safe</option>
+                <option value="prot">Protanopia-safe</option>
+                <option value="trit">Tritanopia-safe</option>
+              </select>
+            </label>
+            <label class="app-settings-field">
+              <span class="app-settings-field-label">
+                UI text size <span id="settings-ui-text-val" class="app-settings-val">100%</span>
+                <button type="button" id="settings-ui-text-reset" class="app-settings-reset" title="Reset text size">Reset</button>
+              </span>
+              <input type="range" id="settings-ui-text" class="app-settings-slider" min="85" max="140" step="5" value="100" aria-label="UI text size">
+            </label>
+            <label class="app-settings-field">
+              <span class="app-settings-field-label">
+                UI element size <span id="settings-ui-element-val" class="app-settings-val">100%</span>
+                <button type="button" id="settings-ui-element-reset" class="app-settings-reset" title="Reset element size">Reset</button>
+              </span>
+              <input type="range" id="settings-ui-element" class="app-settings-slider" min="85" max="140" step="5" value="100" aria-label="UI element size">
+            </label>
+          </div>
+        </details>
+      </div>
+    </div>
   </div>
 
   <div id="project-switcher" class="project-switcher" aria-hidden="true">
@@ -91,9 +263,9 @@
               <path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
           </button>
-          <button type="button" id="project-switcher-current" class="project-switcher-current" title="Current project">Unsaved Project</button>
+          <button type="button" id="project-switcher-current" class="project-switcher-current" title="Current project">New Project</button>
           <div class="project-switcher-actions">
-            <button type="button" id="project-switcher-save" class="project-switcher-action project-switcher-save" title="Save project" aria-label="Save project">
+            <button type="button" id="project-switcher-save" class="project-switcher-action project-switcher-save" title="Save (⌘/Ctrl+S)" aria-label="Save project">
               <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path d="M5 3h11l3 3v15H5V3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
                 <path d="M8 3v6h8V3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
@@ -257,20 +429,20 @@
         </div>
         <div id="workspace-group-chrome" class="workspace-group-chrome" role="toolbar" aria-label="Group controls">
           <div class="workspace-group-tools" role="group" aria-label="Group edit">
-            <button type="button" id="workspace-group-rename" class="workspace-group-chrome-btn" title="Rename group" aria-label="Rename group">
+            <button type="button" id="workspace-group-rename" class="workspace-group-chrome-btn" title="Rename" aria-label="Rename group">
               <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
                 <path d="M13.5 6.5l3 3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
               </svg>
             </button>
-            <button type="button" id="workspace-group-add" class="workspace-group-chrome-btn" title="Consume groups or add assets" aria-label="Consume groups or add assets">+</button>
-            <button type="button" id="workspace-group-remove" class="workspace-group-chrome-btn" title="Remove members from group" aria-label="Remove members from group">−</button>
+            <button type="button" id="workspace-group-add" class="workspace-group-chrome-btn" title="Add to group" aria-label="Add to group">+</button>
+            <button type="button" id="workspace-group-remove" class="workspace-group-chrome-btn" title="Remove from group" aria-label="Remove from group">−</button>
             <button
               type="button"
               id="workspace-group-help"
               class="workspace-group-chrome-btn workspace-group-help"
-              title="Group help"
-              aria-label="Group help"
+              title="Group tips"
+              aria-label="Group tips"
               aria-expanded="false"
               aria-controls="workspace-group-help-popup"
             >?</button>
@@ -316,7 +488,7 @@
         <div class="asset-config-ground-bar">
           <label id="asset-config-ground-row" class="asset-config-ground-row hidden">
             <input type="checkbox" id="asset-config-grounding" class="asset-config-ground-toggle">
-            <span class="asset-config-ground-label">Needs <span class="grounding-pulse">GROUNDING</span>? ⏚</span>
+            <span class="asset-config-ground-label">Needs <span class="grounding-pulse">GROUNDING</span>?</span>
           </label>
           <div id="asset-config-dimensional-controls" class="asset-config-dimensional-controls hidden">
             <button type="button" id="asset-config-dimensional-btn" class="asset-config-dimensional-btn" aria-expanded="false" aria-controls="asset-config-bobbin-section" title="Dimensional configuration">
@@ -694,6 +866,13 @@
           <input type="checkbox" id="asset-config-flashing" class="asset-config-ground-toggle" checked>
           <span class="asset-config-ground-label">Visual Flashing</span>
         </label>
+        <div id="asset-config-hb-wiring-row" class="asset-config-switch-type-row hidden">
+          <span class="asset-config-field-label">HB wiring</span>
+          <select id="asset-config-hb-wiring" class="asset-config-switch-type" aria-label="Humbucker wiring mode" title="Stock series bonds N↔R and S+G like a factory 4-conductor humbucker. Independent leads keeps all five tips free for coil-split / parallel.">
+            <option value="series">Stock series (N↔R, S+G)</option>
+            <option value="leads">Independent leads</option>
+          </select>
+        </div>
       </div>
     </div>
     <div id="snap-indicator" class="snap-indicator hidden" aria-hidden="true">
@@ -708,6 +887,16 @@
   </main>
 
   <div class="workspace-layer-rail" role="group" aria-label="Wire layers">
+    <div class="workspace-layer-stack" role="group" aria-label="Layer stack">
+      <button type="button" id="btn-layer-front" class="workspace-layer-stack-btn" title="Active layer above components" aria-label="Front">
+        <span class="workspace-layer-stack-mark" aria-hidden="true">↑</span>
+        <span class="workspace-layer-stack-label">Front</span>
+      </button>
+      <button type="button" id="btn-layer-back" class="workspace-layer-stack-btn" title="Active layer behind components" aria-label="Back">
+        <span class="workspace-layer-stack-mark" aria-hidden="true">↓</span>
+        <span class="workspace-layer-stack-label">Back</span>
+      </button>
+    </div>
     <div class="layer-buttons" id="layer-buttons" role="tablist" aria-label="Wire layer"></div>
     <button
       type="button"
@@ -803,15 +992,23 @@
     <div class="context-menu-power-row" role="group" aria-label="Focus modes">
       <span class="context-menu-focus-modes-label">Focus modes</span>
       <div class="context-menu-focus-modes-btns">
-        <button type="button" id="context-menu-power" class="context-menu-power-btn" title="Focus: Active — highlight wires on active signal path" aria-pressed="false" aria-label="Focus: Active signal path">⚡</button>
-        <button type="button" id="context-menu-ground" class="context-menu-power-btn" title="Focus: Ground — ungrounded YESGROUND; with Wire focus, chase the grounding net into ISGROUND" aria-pressed="false" aria-label="Focus: Ground check">⏚</button>
+        <button type="button" id="context-menu-power" class="context-menu-power-btn" title="Focus: Active — highlight wires on active signal path" aria-pressed="false" aria-label="Focus: Active signal path">
+          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M13 2L4 14h7l-1 8 10-14h-7l1-6z" fill="currentColor"/>
+          </svg>
+        </button>
+        <button type="button" id="context-menu-ground" class="context-menu-power-btn" title="Focus: Ground — ungrounded YESGROUND; with Wire focus, chase the grounding net into ISGROUND" aria-pressed="false" aria-label="Focus: Ground check">
+          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M12 3v8M5 11h14M7.5 14.5h9M9.5 18h5M11 21h2" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
+          </svg>
+        </button>
         <button type="button" id="context-menu-wire-focus" class="context-menu-power-btn" title="Focus: Wire — grey &amp; lock assets, wires in front" aria-pressed="false" aria-label="Focus: Wire edit">
-          <svg class="context-menu-wire-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <line x1="5" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"/>
           </svg>
         </button>
         <button type="button" id="context-menu-short-check" class="context-menu-power-btn" title="Focus: Short — detect hard shorts (H↔G, tip–sleeve, battery)" aria-pressed="false" aria-label="Focus: Short check">
-          <svg class="context-menu-short-check-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <circle cx="10.5" cy="10.5" r="6.25" fill="none" stroke="currentColor" stroke-width="2.1"/>
             <line x1="15.2" y1="15.2" x2="20" y2="20" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"/>
           </svg>
@@ -842,6 +1039,34 @@
       <div class="confirm-dialog-actions">
         <button type="button" id="asset-delete-confirm-cancel" class="tool-btn">Cancel</button>
         <button type="button" id="asset-delete-confirm-ok" class="tool-btn confirm-dialog-danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div
+    id="remake-workplace-confirm"
+    class="confirm-dialog remake-workplace-confirm hidden"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="remake-workplace-confirm-title"
+    aria-describedby="remake-workplace-confirm-message"
+    hidden
+  >
+    <div class="confirm-dialog-panel remake-workplace-confirm-panel">
+      <p id="remake-workplace-confirm-title" class="confirm-dialog-title remake-workplace-confirm-title">Remake workplace circuit?</p>
+      <div id="remake-workplace-confirm-message" class="confirm-dialog-message remake-workplace-confirm-message">
+        <p>This rearranges the workplace parts and wires to match the schematic layout.</p>
+        <ul>
+          <li>Parts move into schematic columns (pickups → controls → output).</li>
+          <li>Wires are re-routed as horizontal/vertical runs with slight corner fillets.</li>
+          <li>Connections and wire gauge stay the same.</li>
+          <li>Wire path lengths update to the new geometry.</li>
+        </ul>
+        <p>You can still undo with the project history if needed.</p>
+      </div>
+      <div class="confirm-dialog-actions">
+        <button type="button" id="remake-workplace-confirm-cancel" class="tool-btn">Cancel</button>
+        <button type="button" id="remake-workplace-confirm-ok" class="tool-btn remake-workplace-confirm-ok">Remake</button>
       </div>
     </div>
   </div>
@@ -896,7 +1121,7 @@
       </label>
       <label class="asset-editor-ground-option asset-editor-field-span">
         <input type="checkbox" id="asset-editor-grounding" class="asset-config-ground-toggle">
-        <span class="asset-config-ground-label">Needs <span class="grounding-pulse">GROUNDING</span>? ⏚</span>
+        <span class="asset-config-ground-label">Needs <span class="grounding-pulse">GROUNDING</span>?</span>
       </label>
       <div class="asset-editor-value-fields asset-editor-field-span">
         <span class="asset-editor-value-fields-label">Electrical values</span>
@@ -1105,6 +1330,12 @@
       </span>
     </div>
     <footer class="status-bar">
+      <div id="align-bar" class="align-bar hidden" aria-label="Align selection">
+        <button type="button" id="btn-align-column" class="tool-btn align-btn" title="Align to same Y">Align column</button>
+        <button type="button" id="btn-align-row" class="tool-btn align-btn" title="Align to same X">Align row</button>
+        <button type="button" id="btn-rotate-ccw" class="tool-btn align-btn" title="Rotate −7.5°">↺</button>
+        <button type="button" id="btn-rotate-cw" class="tool-btn align-btn" title="Rotate +7.5°">↻</button>
+      </div>
       <div id="schematic-peek" class="schematic-peek" aria-label="Circuit preview">
         <div class="schematic-peek-shell">
           <div class="schematic-peek-surface">
@@ -1136,13 +1367,18 @@
               </button>
               <button
                 type="button"
-                id="schematic-peek-info"
-                class="schematic-peek-info"
-                title="Circuit information"
-                aria-label="Show circuit information"
+                id="schematic-peek-colour"
+                class="schematic-peek-colour"
+                title="Show coloured wires"
+                aria-label="Show coloured wires"
                 aria-pressed="false"
-                aria-expanded="false"
-              >i</button>
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <circle cx="8" cy="9" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/>
+                  <circle cx="16" cy="9" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/>
+                  <circle cx="12" cy="15.5" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/>
+                </svg>
+              </button>
               <div class="schematic-peek-heading">
                 <span class="schematic-peek-title">Circuit</span>
                 <label class="schematic-circuit-select-wrap hidden" hidden>
@@ -1178,6 +1414,13 @@
               <div class="schematic-peek-body-inner">
                 <div class="schematic-peek-name-bar" aria-label="Circuit name">
                   <span id="schematic-peek-circuit-name" class="schematic-peek-circuit-name">Untitled circuit</span>
+                  <button
+                    type="button"
+                    id="schematic-peek-remake"
+                    class="schematic-peek-remake schematic-remake-btn"
+                    title="Remake workplace circuit to match this schematic"
+                    aria-label="Remake workplace circuit"
+                  >Remake</button>
                 </div>
                 <div class="schematic-peek-canvas" id="schematic-peek-canvas">
                   <svg id="schematic-peek-svg" class="schematic-peek-svg" aria-hidden="true"></svg>
@@ -1199,6 +1442,18 @@
                     </button>
                     <button
                       type="button"
+                      id="schematic-pan-home"
+                      class="schematic-pan-home"
+                      title="Reset pan and zoom"
+                      aria-label="Reset pan and zoom to home"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M4 11.5L12 4l8 7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M7 10.5V20h10v-9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
                       id="schematic-peek-info-fab"
                       class="schematic-peek-info-fab"
                       title="Circuit information"
@@ -1206,18 +1461,6 @@
                       aria-pressed="false"
                       aria-expanded="false"
                     >i</button>
-                    <button
-                      type="button"
-                      id="schematic-pan-home"
-                      class="schematic-pan-home"
-                      title="Reset pan"
-                      aria-label="Reset pan to home"
-                    >
-                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                        <path d="M4 11.5L12 4l8 7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                        <path d="M7 10.5V20h10v-9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                      </svg>
-                    </button>
                   </div>
                 </div>
               </div>
@@ -1226,13 +1469,35 @@
         </div>
       </div>
       <span id="status-text">Ready</span>
-      <div id="align-bar" class="align-bar hidden">
-        <button type="button" id="btn-align-column" class="tool-btn align-btn" title="Same Y">Align Column</button>
-        <button type="button" id="btn-align-row" class="tool-btn align-btn" title="Same X">Align Row</button>
-        <button type="button" id="btn-rotate-ccw" class="tool-btn align-btn" title="Rotate −7.5°">↺</button>
-        <button type="button" id="btn-rotate-cw" class="tool-btn align-btn" title="Rotate +7.5°">↻</button>
-      </div>
       <span id="snap-info"></span>
+      <div class="bugtest-dock" id="bugtest-dock">
+        <button
+          type="button"
+          id="bugtest-badge"
+          class="bugtest-badge"
+          data-bugtest-badge
+          title="Bugtest — click to record (silent)"
+          aria-label="Bugtest — click to record (silent)"
+        >
+          <span class="bugtest-badge__title" data-bugtest-title>Bugtest Ver.</span>
+          <span class="bugtest-badge__build" data-bugtest-build>568</span>
+        </button>
+        <div
+          id="bugtest-term"
+          class="bugtest-term hidden"
+          data-bugtest-term
+          hidden
+          role="log"
+          aria-live="polite"
+          aria-label="Bugtest error terminal"
+        >
+          <div class="bugtest-term__head">
+            <span class="bugtest-term__prompt">bugtest›</span>
+            <span class="bugtest-term__hint">` to close</span>
+          </div>
+          <div class="bugtest-term__scroll" data-bugtest-term-log></div>
+        </div>
+      </div>
       <div id="commands-panel" class="commands-panel" aria-label="Commands">
         <div class="commands-sheet">
           <div class="commands-panel-surface">
@@ -1325,10 +1590,12 @@
     </div>
   </div>
 
-  <script src="cad.js?v=518"></script>
-  <script src="assets.js?v=518"></script>
-  <script src="engines.js?v=518"></script>
-  <script src="materials.js?v=518"></script>
-  <script src="app.js?v=518"></script>
+  <script src="gate.js?v=568"></script>
+  <script src="cad.js?v=568"></script>
+  <script src="assets.js?v=568"></script>
+  <script src="engines.js?v=568"></script>
+  <script src="errorreporting.js?v=568"></script>
+  <script src="materials.js?v=568"></script>
+  <script src="app.js?v=568"></script>
 </body>
 </html>

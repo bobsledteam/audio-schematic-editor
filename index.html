@@ -6,7 +6,10 @@
   <meta name="application-name" content="Guitar Wiring Visualiser">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Guitar Wiring Visualiser</title>
-  <link rel="stylesheet" href="styles.css?v=221">
+  <link rel="stylesheet" href="styles.css?v=518">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
   <div class="app-chrome">
@@ -39,12 +42,7 @@
     </div>
     <header class="toolbar">
       <div class="toolbar-actions">
-        <div class="layer-panel" role="group" aria-label="Wire layers">
-          <div class="layer-buttons-grid">
-            <div class="layer-buttons" id="layer-buttons"></div>
-            <span class="layer-label">Layer</span>
-          </div>
-          <button type="button" id="btn-layer-visibility" class="tool-btn layer-btn" title="Show/hide active layer">Show</button>
+        <div class="layer-stack-btns" role="group" aria-label="Layer stack">
           <button type="button" id="btn-layer-front" class="tool-btn layer-btn" title="Active layer above components">Front</button>
           <button type="button" id="btn-layer-back" class="tool-btn layer-btn" title="Active layer behind components">Back</button>
         </div>
@@ -59,8 +57,16 @@
         <span id="wire-gauge-reopen-label">22 AWG</span>
       </button>
       <div class="wire-style-group" role="group" aria-label="Line style">
-        <button type="button" id="btn-solid" class="tool-btn style-btn active" data-style="solid">Solid</button>
-        <button type="button" id="btn-dashed" class="tool-btn style-btn" data-style="dashed">Dashed</button>
+        <button type="button" id="btn-solid" class="tool-btn style-btn active" data-style="solid" title="Solid" aria-label="Solid">
+          <svg class="style-btn-icon" viewBox="0 0 24 12" aria-hidden="true" focusable="false">
+            <line x1="2" y1="6" x2="22" y2="6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button type="button" id="btn-dashed" class="tool-btn style-btn" data-style="dashed" title="Dashed" aria-label="Dashed">
+          <svg class="style-btn-icon" viewBox="0 0 24 12" aria-hidden="true" focusable="false">
+            <line x1="2" y1="6" x2="22" y2="6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="3.2 3.4"/>
+          </svg>
+        </button>
       </div>
       <div class="wire-colors" role="group" aria-label="Wire colour">
         <button type="button" class="color-swatch active" data-color="white" title="White" aria-label="White"></button>
@@ -140,47 +146,47 @@
             <span class="wire-gauge-dropdown-caret" aria-hidden="true">▾</span>
           </button>
           <div id="wire-gauge-options" class="wire-gauge-options hidden" role="listbox" aria-label="Wire gauge" hidden>
-            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.32" data-mm="0.32" data-awg="28" data-ohm="0.213" style="--mm: 0.32" aria-selected="false">
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.32" data-mm="0.32" data-awg="28" style="--mm: 0.32" aria-selected="false">
               <span class="wire-gauge-option-sample" aria-hidden="true"></span>
               <span class="wire-gauge-option-label">28 AWG (0.32mm)</span>
               <span class="wire-gauge-option-divider" aria-hidden="true"></span>
-              <span class="wire-gauge-option-ohm">(0.213Ω/m)</span>
+              <span class="wire-gauge-option-ohm"></span>
             </button>
-            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.40" data-mm="0.40" data-awg="26" data-ohm="0.134" style="--mm: 0.40" aria-selected="false">
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.40" data-mm="0.40" data-awg="26" style="--mm: 0.40" aria-selected="false">
               <span class="wire-gauge-option-sample" aria-hidden="true"></span>
               <span class="wire-gauge-option-label">26 AWG (0.40mm)</span>
               <span class="wire-gauge-option-divider" aria-hidden="true"></span>
-              <span class="wire-gauge-option-ohm">(0.134Ω/m)</span>
+              <span class="wire-gauge-option-ohm"></span>
             </button>
-            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.51" data-mm="0.51" data-awg="24" data-ohm="0.084" style="--mm: 0.51" aria-selected="false">
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.51" data-mm="0.51" data-awg="24" style="--mm: 0.51" aria-selected="false">
               <span class="wire-gauge-option-sample" aria-hidden="true"></span>
               <span class="wire-gauge-option-label">24 AWG (0.51mm)</span>
               <span class="wire-gauge-option-divider" aria-hidden="true"></span>
-              <span class="wire-gauge-option-ohm">(0.084Ω/m)</span>
+              <span class="wire-gauge-option-ohm"></span>
             </button>
-            <button type="button" class="wire-gauge-option active" role="option" data-gauge="0.64" data-mm="0.64" data-awg="22" data-ohm="0.053" style="--mm: 0.64" aria-selected="true">
+            <button type="button" class="wire-gauge-option active" role="option" data-gauge="0.64" data-mm="0.64" data-awg="22" style="--mm: 0.64" aria-selected="true">
               <span class="wire-gauge-option-sample" aria-hidden="true"></span>
               <span class="wire-gauge-option-label">22 AWG (0.64mm)</span>
               <span class="wire-gauge-option-divider" aria-hidden="true"></span>
-              <span class="wire-gauge-option-ohm">(0.053Ω/m)</span>
+              <span class="wire-gauge-option-ohm"></span>
             </button>
-            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.81" data-mm="0.81" data-awg="20" data-ohm="0.033" style="--mm: 0.81" aria-selected="false">
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="0.81" data-mm="0.81" data-awg="20" style="--mm: 0.81" aria-selected="false">
               <span class="wire-gauge-option-sample" aria-hidden="true"></span>
               <span class="wire-gauge-option-label">20 AWG (0.81mm)</span>
               <span class="wire-gauge-option-divider" aria-hidden="true"></span>
-              <span class="wire-gauge-option-ohm">(0.033Ω/m)</span>
+              <span class="wire-gauge-option-ohm"></span>
             </button>
-            <button type="button" class="wire-gauge-option" role="option" data-gauge="1.02" data-mm="1.02" data-awg="18" data-ohm="0.021" style="--mm: 1.02" aria-selected="false">
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="1.02" data-mm="1.02" data-awg="18" style="--mm: 1.02" aria-selected="false">
               <span class="wire-gauge-option-sample" aria-hidden="true"></span>
               <span class="wire-gauge-option-label">18 AWG (1.02mm)</span>
               <span class="wire-gauge-option-divider" aria-hidden="true"></span>
-              <span class="wire-gauge-option-ohm">(0.021Ω/m)</span>
+              <span class="wire-gauge-option-ohm"></span>
             </button>
-            <button type="button" class="wire-gauge-option" role="option" data-gauge="1.29" data-mm="1.29" data-awg="16" data-ohm="0.013" style="--mm: 1.29" aria-selected="false">
+            <button type="button" class="wire-gauge-option" role="option" data-gauge="1.29" data-mm="1.29" data-awg="16" style="--mm: 1.29" aria-selected="false">
               <span class="wire-gauge-option-sample" aria-hidden="true"></span>
               <span class="wire-gauge-option-label">16 AWG (1.29mm)</span>
               <span class="wire-gauge-option-divider" aria-hidden="true"></span>
-              <span class="wire-gauge-option-ohm">(0.013Ω/m)</span>
+              <span class="wire-gauge-option-ohm"></span>
             </button>
           </div>
         </div>
@@ -204,7 +210,17 @@
     <div class="wire-gauge-surface">
       <div class="wire-gauge-readout wire-selection-readout-row">
         <span id="wire-gauge-length" class="wire-gauge-readout-length">—</span>
-        <span id="wire-gauge-resistance" class="wire-gauge-readout-resistance">—</span>
+      </div>
+      <div class="wire-gauge-formula-row wire-selection-formula-row electrical-formula" data-formula-id="conductor-resistance" data-electrical-formula="conductor-resistance" title="Copper conductor resistance R = ρL/A">
+        <span class="wire-resist-eq" aria-label="R equals rho L over A">
+          <i class="wire-resist-var">R</i>
+          <span class="wire-resist-op">=</span>
+          <span class="wire-resist-frac">
+            <span class="wire-resist-num"><i class="wire-resist-var">ρ</i><i class="wire-resist-var">L</i></span>
+            <span class="wire-resist-den"><i class="wire-resist-var">A</i></span>
+          </span>
+        </span>
+        <span id="wire-gauge-resistance" class="wire-resist-value">—</span>
       </div>
     </div>
   </div>
@@ -224,10 +240,52 @@
   </div>
 
   <main id="canvas" class="canvas" tabindex="0">
+    <div id="layer-switch-toast" class="layer-switch-toast" aria-hidden="true" hidden>
+      <div class="layer-switch-toast-inner">
+        <span id="layer-switch-toast-title" class="layer-switch-toast-title" hidden></span>
+        <span id="layer-switch-toast-label" class="layer-switch-toast-label">Layer 1</span>
+      </div>
+    </div>
     <div id="workspace" class="workspace">
       <svg id="wires-below" class="wire-stack below" aria-hidden="true"></svg>
       <svg id="wires-above" class="wire-stack above" aria-hidden="true"></svg>
       <div id="marquee-box" class="marquee-box hidden" aria-hidden="true"></div>
+      <div id="workspace-group-consume-frames" class="workspace-group-consume-frames" aria-hidden="true"></div>
+      <div id="workspace-group-frame" class="workspace-group-frame hidden" aria-hidden="true">
+        <div id="workspace-group-layer-bar" class="workspace-group-layer-bar" aria-label="Group subgroups">
+          <div id="workspace-group-layer-buttons" class="workspace-group-layer-buttons" role="tablist" aria-label="Group subgroups"></div>
+        </div>
+        <div id="workspace-group-chrome" class="workspace-group-chrome" role="toolbar" aria-label="Group controls">
+          <div class="workspace-group-tools" role="group" aria-label="Group edit">
+            <button type="button" id="workspace-group-rename" class="workspace-group-chrome-btn" title="Rename group" aria-label="Rename group">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>
+                <path d="M13.5 6.5l3 3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button type="button" id="workspace-group-add" class="workspace-group-chrome-btn" title="Consume groups or add assets" aria-label="Consume groups or add assets">+</button>
+            <button type="button" id="workspace-group-remove" class="workspace-group-chrome-btn" title="Remove members from group" aria-label="Remove members from group">−</button>
+            <button
+              type="button"
+              id="workspace-group-help"
+              class="workspace-group-chrome-btn workspace-group-help"
+              title="Group help"
+              aria-label="Group help"
+              aria-expanded="false"
+              aria-controls="workspace-group-help-popup"
+            >?</button>
+          </div>
+          <input
+            id="workspace-group-name-input"
+            class="workspace-group-name-input hidden"
+            type="text"
+            maxlength="64"
+            spellcheck="false"
+            autocomplete="off"
+            aria-label="Group name"
+          />
+        </div>
+      </div>
       <div id="dim-layer" class="dim-layer hidden" aria-hidden="true">
         <svg class="dim-svg" aria-hidden="true">
           <line class="dim-line" x1="0" y1="0" x2="0" y2="0"></line>
@@ -238,6 +296,7 @@
       </div>
       <div id="dim-annotations" class="dim-annotations" aria-label="Dimension labels"></div>
       <div id="note-windows" class="note-windows" aria-label="Notes"></div>
+      <div id="schematic-pin-windows" class="schematic-pin-windows" aria-label="Pinned circuit schematics"></div>
       <div id="wire-end-labels" class="wire-end-labels" aria-hidden="true">
         <div class="wire-end-label hidden" data-end="start"></div>
         <div class="wire-end-label hidden" data-end="end"></div>
@@ -254,23 +313,386 @@
       </div>
       <div id="asset-state-term-menu" class="asset-state-term-menu hidden" role="dialog" aria-label="State terminals"></div>
       <div id="asset-config-menu" class="asset-config-menu hidden" role="dialog" aria-label="Asset configuration">
-        <label id="asset-config-ground-row" class="asset-config-ground-row hidden">
-          <input type="checkbox" id="asset-config-grounding" class="asset-config-ground-toggle">
-          <span class="asset-config-ground-label">Needs <span class="grounding-pulse">GROUNDING</span>? ⏚</span>
-        </label>
+        <div class="asset-config-ground-bar">
+          <label id="asset-config-ground-row" class="asset-config-ground-row hidden">
+            <input type="checkbox" id="asset-config-grounding" class="asset-config-ground-toggle">
+            <span class="asset-config-ground-label">Needs <span class="grounding-pulse">GROUNDING</span>? ⏚</span>
+          </label>
+          <div id="asset-config-dimensional-controls" class="asset-config-dimensional-controls hidden">
+            <button type="button" id="asset-config-dimensional-btn" class="asset-config-dimensional-btn" aria-expanded="false" aria-controls="asset-config-bobbin-section" title="Dimensional configuration">
+              <span class="asset-config-dimensional-label">Dimensional Configuration</span>
+              <span class="asset-config-dimensional-chevron" aria-hidden="true">▾</span>
+            </button>
+            <div class="asset-config-dimensional-bridge-trail">
+              <label class="asset-config-dimensional-bridge" title="Link dimensional model to calculation engines">
+                <input type="checkbox" id="asset-config-dimensional-bridge" aria-checked="false" aria-label="Link dimensional model to calculation engines">
+                <span class="asset-config-dimensional-bridge-ui" aria-hidden="true"></span>
+              </label>
+              <span class="asset-config-dimensional-bridge-help" tabindex="0" aria-label="About the calculation bridge">
+                <span class="asset-config-dimensional-bridge-help-mark" aria-hidden="true">?</span>
+                <span class="asset-config-dimensional-bridge-help-tip" role="tooltip">
+                  <strong>On</strong> — electromagnetic data from this pickup’s dimensional config (geometry, materials, winds) bridges into the calculation and estimation engines, updating impedance, inductance, and related estimates.
+                  <strong>Off</strong> — geometry stays local; engines use only values you enter manually.
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
         <div id="asset-config-switch-throw-row" class="asset-config-switch-throw-row hidden">
           <span class="asset-config-switch-throw-label">Throw</span>
           <span id="asset-config-switch-throw" class="asset-config-switch-throw">ON-ON-ON</span>
         </div>
-        <div id="asset-config-switch-type-row" class="asset-config-switch-type-row hidden" role="group" aria-label="Switch type">
-          <span class="asset-config-switch-type-label" data-type="1">Type 1</span>
-          <span class="asset-config-switch-type-label" data-type="2">Type 2</span>
-          <input type="checkbox" id="asset-config-switch-type" class="asset-config-ground-toggle" aria-label="Type 1 / Type 2" title="Type 1 / Type 2">
+        <div id="asset-config-switch-type-row" class="asset-config-switch-type-row hidden">
+          <span class="asset-config-field-label">Type</span>
+          <select id="asset-config-switch-type" class="asset-config-switch-type" aria-label="Switch type preset">
+            <option value="1">1</option>
+            <option value="2">2</option>
+          </select>
         </div>
+        <div id="asset-config-pot-variant-row" class="asset-config-switch-type-row hidden">
+          <span class="asset-config-field-label">Style</span>
+          <select id="asset-config-pot-variant" class="asset-config-switch-type" aria-label="Potentiometer style">
+            <option value="standard">Standard</option>
+            <option value="push-pull">Push/Pull ON-ON</option>
+          </select>
+        </div>
+        <div id="asset-config-pot-taper-row" class="asset-config-switch-type-row hidden">
+          <span class="asset-config-field-label">Taper</span>
+          <select id="asset-config-pot-taper" class="asset-config-switch-type" aria-label="Potentiometer taper">
+            <option value="log">Logarithmic (A)</option>
+            <option value="linear">Linear (B)</option>
+          </select>
+        </div>
+        <div id="asset-config-place-label-row" class="asset-config-switch-type-row hidden">
+          <span class="asset-config-field-label">Label</span>
+          <input id="asset-config-place-label" class="asset-config-field-input" type="text" maxlength="12" autocomplete="off" spellcheck="false" aria-label="Body label on asset" placeholder="e.g. SC">
+        </div>
+        <div id="asset-config-hover-label-row" class="asset-config-switch-type-row hidden">
+          <span class="asset-config-field-label">Hover</span>
+          <input id="asset-config-hover-label" class="asset-config-field-input" type="text" maxlength="24" autocomplete="off" spellcheck="false" aria-label="State hover label above asset" placeholder="e.g. Neck">
+        </div>
+        <div id="asset-config-tube-pinout-row" class="asset-config-tube-pinout-row hidden">
+          <span class="asset-config-field-label">Pinout</span>
+          <select id="asset-config-tube-pinout" class="asset-config-tube-pinout" aria-label="Tube pinout preset"></select>
+        </div>
+        <div id="asset-config-tube-pins-row" class="asset-config-tube-pins-row hidden">
+          <span class="asset-config-field-label">Pins</span>
+          <div id="asset-config-tube-pins" class="asset-config-tube-pins" role="group" aria-label="Enable tube pins"></div>
+        </div>
+        <div id="asset-config-diode-material-row" class="asset-config-diode-material-row hidden">
+          <span class="asset-config-field-label">Material</span>
+          <select id="asset-config-diode-material" class="asset-config-diode-material" aria-label="Diode material preset"></select>
+          <div id="asset-config-diode-info" class="asset-config-diode-info" aria-live="polite"></div>
+        </div>
+        <div id="asset-config-resistor-type-row" class="asset-config-resistor-type-row hidden">
+          <span class="asset-config-field-label">Type</span>
+          <select id="asset-config-resistor-type" class="asset-config-resistor-type" aria-label="Resistor type preset"></select>
+          <div id="asset-config-resistor-info" class="asset-config-diode-info" aria-live="polite"></div>
+        </div>
+        <div id="asset-config-bobbin-section" class="asset-config-bobbin-section hidden">
+          <div class="asset-config-bobbin-preset-bar" id="asset-config-bobbin-preset-bar">
+            <span class="asset-config-field-label">Preset</span>
+            <select id="asset-config-bobbin-preset" class="asset-config-bobbin-preset" aria-label="Dimensional geometry preset"></select>
+            <button type="button" id="asset-config-bobbin-preset-save" class="asset-config-bobbin-preset-btn" title="Save preset" aria-label="Save preset">Save</button>
+            <button type="button" id="asset-config-bobbin-preset-delete" class="asset-config-bobbin-preset-btn" title="Delete preset" aria-label="Delete preset" disabled>Delete</button>
+          </div>
+          <div class="asset-config-bobbin-previews" id="asset-config-bobbin-stage" data-bobbin-focus="plan">
+            <div class="asset-config-bobbin-preview-wrap is-main" id="asset-config-bobbin-preview-wrap" data-bobbin-view="plan" title="Plan view">
+              <span class="asset-config-bobbin-preview-tag">Plan</span>
+              <svg id="asset-config-bobbin-preview" class="asset-config-bobbin-preview" viewBox="0 0 160 96" focusable="false">
+                <rect id="asset-config-bobbin-marquee" class="asset-config-bobbin-marquee hidden" x="0" y="0" width="0" height="0" aria-hidden="true"></rect>
+              </svg>
+              <div class="asset-config-bobbin-nudge" id="asset-config-bobbin-nudge" role="group" aria-label="Move selected magnets">
+                <kbd class="asset-config-bobbin-nudge-shift" aria-hidden="true" title="Hold Shift for 0.1 mm steps">shift</kbd>
+                <button type="button" class="asset-config-bobbin-nudge-btn" data-bobbin-nudge="up" aria-label="Move magnets up" title="Up">▲</button>
+                <button type="button" class="asset-config-bobbin-nudge-btn" data-bobbin-nudge="left" aria-label="Move magnets left" title="Left" disabled aria-disabled="true">◀</button>
+                <button type="button" class="asset-config-bobbin-nudge-btn asset-config-bobbin-nudge-reset" data-bobbin-nudge="reset" aria-label="Reset magnet position" title="Reset position">↺</button>
+                <button type="button" class="asset-config-bobbin-nudge-btn" data-bobbin-nudge="right" aria-label="Move magnets right" title="Right" disabled aria-disabled="true">▶</button>
+                <button type="button" class="asset-config-bobbin-nudge-btn" data-bobbin-nudge="down" aria-label="Move magnets down" title="Down">▼</button>
+              </div>
+            </div>
+            <div class="asset-config-bobbin-preview-wrap is-inset asset-config-bobbin-preview-wrap-front" id="asset-config-bobbin-front-wrap" data-bobbin-view="front" data-bobbin-elev="front" title="Front view — click to focus">
+              <span class="asset-config-bobbin-preview-tag" id="asset-config-bobbin-front-tag">Front</span>
+              <div class="asset-config-bobbin-elev-nav" role="group" aria-label="Rotate elevation">
+                <button type="button" class="asset-config-bobbin-elev-btn" data-bobbin-elev-dir="-1" aria-label="Previous view" title="Previous">◀</button>
+                <button type="button" class="asset-config-bobbin-elev-btn" data-bobbin-elev-dir="1" aria-label="Next view" title="Next">▶</button>
+              </div>
+              <svg id="asset-config-bobbin-front" class="asset-config-bobbin-preview asset-config-bobbin-front" viewBox="0 0 160 96" focusable="false" aria-label="Bobbin front view">
+                <rect id="asset-config-bobbin-front-marquee" class="asset-config-bobbin-marquee hidden" x="0" y="0" width="0" height="0" aria-hidden="true"></rect>
+              </svg>
+            </div>
+          </div>
+          <div class="asset-config-bobbin-categories" id="asset-config-bobbin-categories">
+            <div class="asset-config-bobbin-category is-open" data-bobbin-category="wire">
+              <button type="button" class="asset-config-bobbin-category-btn" aria-expanded="true" aria-controls="asset-config-bobbin-cat-wire" data-bobbin-category-toggle="wire">
+                <span class="asset-config-bobbin-category-label">Wire</span>
+                <span class="asset-config-bobbin-category-chevron" aria-hidden="true">▾</span>
+              </button>
+              <div id="asset-config-bobbin-cat-wire" class="asset-config-bobbin-category-body" role="region" aria-label="Coil wire">
+                <div class="asset-config-bobbin-fields">
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-coil-awg">
+                    <span id="asset-config-bobbin-coil-awg-label" class="asset-config-field-label">Wire gauge</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="coilWire" aria-label="Reset wire gauge to Strat default" title="Reset">↺</button>
+                    <select id="asset-config-bobbin-coil-awg" class="asset-config-bobbin-dia-select" aria-label="Copper magnet wire gauge"></select>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-coil-insul">
+                    <span id="asset-config-bobbin-coil-insul-label" class="asset-config-field-label">Insulation</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="coilInsulation" aria-label="Reset insulation to Strat default" title="Reset">↺</button>
+                    <select id="asset-config-bobbin-coil-insulation" class="asset-config-bobbin-dia-select" aria-label="Magnet wire insulation"></select>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-coil-winds-n hidden">
+                    <span class="asset-config-field-label">Coil winds (North)</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="coilTurnsN" aria-label="Reset North coil winds to estimate" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="coilTurnsN" data-dir="-1" aria-label="Decrease North coil winds">−</button>
+                      <input id="asset-config-bobbin-coil-turns-n" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="North bobbin coil wind count">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="coilTurnsN" data-dir="1" aria-label="Increase North coil winds">+</button>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-coil-winds-s hidden">
+                    <span class="asset-config-field-label">Coil winds (South)</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="coilTurnsS" aria-label="Reset South coil winds to estimate" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="coilTurnsS" data-dir="-1" aria-label="Decrease South coil winds">−</button>
+                      <input id="asset-config-bobbin-coil-turns-s" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="South bobbin coil wind count">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="coilTurnsS" data-dir="1" aria-label="Increase South coil winds">+</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="asset-config-bobbin-category" data-bobbin-category="bobbin">
+              <button type="button" class="asset-config-bobbin-category-btn" aria-expanded="false" aria-controls="asset-config-bobbin-cat-bobbin" data-bobbin-category-toggle="bobbin">
+                <span class="asset-config-bobbin-category-label">Bobbin</span>
+                <span class="asset-config-bobbin-category-chevron" aria-hidden="true">▾</span>
+              </button>
+              <div id="asset-config-bobbin-cat-bobbin" class="asset-config-bobbin-category-body hidden" role="region" aria-label="Bobbin geometry">
+                <div class="asset-config-bobbin-fields">
+                  <div class="asset-config-bobbin-field">
+                    <span class="asset-config-field-label">Length</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="length" aria-label="Reset length to Strat default" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="length" data-dir="-1" aria-label="Decrease length">−</button>
+                      <input id="asset-config-bobbin-length" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Bobbin length in millimetres">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="length" data-dir="1" aria-label="Increase length">+</button>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field">
+                    <span class="asset-config-field-label">Width</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="width" aria-label="Reset width to Strat default" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="width" data-dir="-1" aria-label="Decrease width">−</button>
+                      <input id="asset-config-bobbin-width" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Bobbin width in millimetres">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="width" data-dir="1" aria-label="Increase width">+</button>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field">
+                    <span class="asset-config-field-label">Ratio</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="ratio" aria-label="Reset ratio to Strat default" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="ratio" data-dir="-1" aria-label="Decrease ratio">−</button>
+                      <input id="asset-config-bobbin-ratio" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Bobbin length to width ratio">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="ratio" data-dir="1" aria-label="Increase ratio">+</button>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-cavity">
+                    <span class="asset-config-field-label">Bobbin height</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="cavityHeight" aria-label="Reset bobbin height to Strat default" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="cavityHeight" data-dir="-1" aria-label="Decrease bobbin height">−</button>
+                      <input id="asset-config-bobbin-cavity" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Bobbin winding height in millimetres">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="cavityHeight" data-dir="1" aria-label="Increase bobbin height">+</button>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-thickness">
+                    <span class="asset-config-field-label">Top thickness</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="thickness" aria-label="Reset top flatwork thickness to Strat default" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="thickness" data-dir="-1" aria-label="Decrease top flatwork thickness">−</button>
+                      <input id="asset-config-bobbin-thickness" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Top bobbin flatwork thickness in millimetres">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="thickness" data-dir="1" aria-label="Increase top flatwork thickness">+</button>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-bottom-thickness">
+                    <span class="asset-config-field-label">Bottom thickness</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="bottomThickness" aria-label="Reset bottom flatwork thickness to Strat default" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="bottomThickness" data-dir="-1" aria-label="Decrease bottom flatwork thickness">−</button>
+                      <input id="asset-config-bobbin-bottom-thickness" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Bottom bobbin flatwork thickness in millimetres">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="bottomThickness" data-dir="1" aria-label="Increase bottom flatwork thickness">+</button>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-magnets">
+                    <span id="asset-config-bobbin-magnets-label" class="asset-config-field-label">Magnets/slugs</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="magnets" aria-label="Reset magnet/slug count to default" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper asset-config-bobbin-stepper-narrow">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="magnets" data-dir="-1" aria-label="Decrease magnet/slug count">−</button>
+                      <input id="asset-config-bobbin-magnets" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Number of magnets or slugs per coil">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="magnets" data-dir="1" aria-label="Increase magnet/slug count">+</button>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-spacing">
+                    <span class="asset-config-field-label">String spacing</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="spacing" aria-label="Reset string spacing to Strat default" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="spacing" data-dir="-1" aria-label="Decrease string spacing">−</button>
+                      <input id="asset-config-bobbin-spacing" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="String spacing in millimetres">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="spacing" data-dir="1" aria-label="Increase string spacing">+</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="asset-config-bobbin-category" data-bobbin-category="poles">
+              <button type="button" class="asset-config-bobbin-category-btn" aria-expanded="false" aria-controls="asset-config-bobbin-cat-poles" data-bobbin-category-toggle="poles">
+                <span class="asset-config-bobbin-category-label">Poles</span>
+                <span class="asset-config-bobbin-category-chevron" aria-hidden="true">▾</span>
+              </button>
+              <div id="asset-config-bobbin-cat-poles" class="asset-config-bobbin-category-body hidden" role="region" aria-label="Pole pieces">
+                <div class="asset-config-bobbin-fields">
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-dia">
+                    <span id="asset-config-bobbin-dia-label" class="asset-config-field-label">Diameter (All)</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="diameter" aria-label="Reset magnet diameter to Strat default" title="Reset">↺</button>
+                    <select id="asset-config-bobbin-magnet-dia" class="asset-config-bobbin-dia-select" aria-label="Magnet diameter"></select>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-magnet-h">
+                    <span id="asset-config-bobbin-magnet-h-label" class="asset-config-field-label">Height</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="magnetHeight" aria-label="Reset height to default" title="Reset">↺</button>
+                    <select id="asset-config-bobbin-magnet-height" class="asset-config-bobbin-dia-select asset-config-bobbin-height-select" aria-label="Magnet height"></select>
+                    <div id="asset-config-bobbin-screw-height-wrap" class="asset-config-bobbin-stepper asset-config-bobbin-screw-height-wrap hidden">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="screwHeight" data-dir="-1" aria-label="Decrease screw seating height">−</button>
+                      <input id="asset-config-bobbin-screw-height" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Screw seating height in millimetres">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="screwHeight" data-dir="1" aria-label="Increase screw seating height">+</button>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-pole-type hidden">
+                    <span id="asset-config-bobbin-pole-type-label" class="asset-config-field-label">Pole Type</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="poleType" aria-label="Reset pole type to default" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-bevel-toggles" role="radiogroup" aria-label="Pole type Screw, Magnet, Slug/Pin">
+                      <label class="asset-config-bobbin-bevel-row" title="Screw (stainless, adjustable)">
+                        <input id="asset-config-bobbin-pole-s" class="asset-config-bobbin-bevel-input" type="radio" name="asset-config-bobbin-pole-type" value="S" data-bobbin-pole-type="S" aria-label="Screw pole">
+                        <span class="asset-config-bobbin-bevel-switch" aria-hidden="true"></span>
+                        <span class="asset-config-bobbin-bevel-key">Screw</span>
+                      </label>
+                      <label class="asset-config-bobbin-bevel-row" title="Magnet (Alnico / ceramic rod)">
+                        <input id="asset-config-bobbin-pole-m" class="asset-config-bobbin-bevel-input" type="radio" name="asset-config-bobbin-pole-type" value="M" data-bobbin-pole-type="M" aria-label="Magnet pole">
+                        <span class="asset-config-bobbin-bevel-switch" aria-hidden="true"></span>
+                        <span class="asset-config-bobbin-bevel-key">Magnet</span>
+                      </label>
+                      <label class="asset-config-bobbin-bevel-row" title="Slug / Pin (stainless)">
+                        <input id="asset-config-bobbin-pole-p" class="asset-config-bobbin-bevel-input" type="radio" name="asset-config-bobbin-pole-type" value="P" data-bobbin-pole-type="P" aria-label="Slug or pin pole">
+                        <span class="asset-config-bobbin-bevel-switch" aria-hidden="true"></span>
+                        <span class="asset-config-bobbin-bevel-key">Slug/Pin</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-bevel hidden">
+                    <span class="asset-config-field-label">Bevel</span>
+                    <div class="asset-config-bobbin-bevel-toggles" role="group" aria-label="Magnet bevel">
+                      <label class="asset-config-bobbin-bevel-row" title="Vintage bevel · 0.25 mm top chamfer">
+                        <input id="asset-config-bobbin-bevel-v" class="asset-config-bobbin-bevel-input" type="checkbox" data-bobbin-bevel="V025" aria-label="Vintage bevel 0.25 mm">
+                        <span class="asset-config-bobbin-bevel-switch" aria-hidden="true"></span>
+                        <span id="asset-config-bobbin-bevel-v-label" class="asset-config-bobbin-bevel-key">V</span>
+                      </label>
+                      <label class="asset-config-bobbin-bevel-row" title="Modern bevel · 0.5 mm top chamfer">
+                        <input id="asset-config-bobbin-bevel-m" class="asset-config-bobbin-bevel-input" type="checkbox" data-bobbin-bevel="M050" aria-label="Modern bevel 0.5 mm">
+                        <span class="asset-config-bobbin-bevel-switch" aria-hidden="true"></span>
+                        <span id="asset-config-bobbin-bevel-m-label" class="asset-config-bobbin-bevel-key">M</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-magnet-type hidden">
+                    <span class="asset-config-field-label">Material</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="magnetType" aria-label="Reset magnet material to AlNiCo 5" title="Reset">↺</button>
+                    <select id="asset-config-bobbin-magnet-type" class="asset-config-bobbin-dia-select" aria-label="Magnet material type"></select>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="asset-config-bobbin-category hidden" data-bobbin-category="bar">
+              <button type="button" class="asset-config-bobbin-category-btn" aria-expanded="false" aria-controls="asset-config-bobbin-cat-bar" data-bobbin-category-toggle="bar">
+                <span class="asset-config-bobbin-category-label">Bar magnet</span>
+                <span class="asset-config-bobbin-category-chevron" aria-hidden="true">▾</span>
+              </button>
+              <div id="asset-config-bobbin-cat-bar" class="asset-config-bobbin-category-body hidden" role="region" aria-label="Understack bar magnet">
+                <div class="asset-config-bobbin-fields">
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-bar-magnet-type">
+                    <span class="asset-config-field-label">Bar magnet</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="barMagnetType" aria-label="Reset bar magnet material to AlNiCo 5" title="Reset">↺</button>
+                    <select id="asset-config-bobbin-bar-magnet-type" class="asset-config-bobbin-dia-select" aria-label="Bar magnet material type"></select>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="asset-config-bobbin-category hidden" data-bobbin-category="baseplate">
+              <button type="button" class="asset-config-bobbin-category-btn" aria-expanded="false" aria-controls="asset-config-bobbin-cat-baseplate" data-bobbin-category-toggle="baseplate">
+                <span class="asset-config-bobbin-category-label">Baseplate</span>
+                <span class="asset-config-bobbin-category-chevron" aria-hidden="true">▾</span>
+              </button>
+              <div id="asset-config-bobbin-cat-baseplate" class="asset-config-bobbin-category-body hidden" role="region" aria-label="Baseplate">
+                <div class="asset-config-bobbin-fields">
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-baseplate-enable">
+                    <span class="asset-config-field-label">Enable</span>
+                    <label class="asset-config-bobbin-baseplate-enable-row" title="Attach a metal baseplate under the bottom flatwork">
+                      <input id="asset-config-bobbin-baseplate-enable" class="asset-config-bobbin-bevel-input" type="checkbox" aria-label="Enable baseplate">
+                      <span class="asset-config-bobbin-bevel-key">On</span>
+                    </label>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-baseplate-thickness">
+                    <span class="asset-config-field-label">Thickness</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="baseplateThickness" aria-label="Reset baseplate thickness to default" title="Reset">↺</button>
+                    <div class="asset-config-bobbin-stepper">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="baseplateThickness" data-dir="-1" aria-label="Decrease baseplate thickness">−</button>
+                      <input id="asset-config-bobbin-baseplate-thickness" class="asset-config-field-input asset-config-bobbin-input" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Baseplate thickness in millimetres">
+                      <button type="button" class="asset-config-bobbin-step" data-bobbin-step="baseplateThickness" data-dir="1" aria-label="Increase baseplate thickness">+</button>
+                    </div>
+                  </div>
+                  <div class="asset-config-bobbin-field asset-config-bobbin-field-baseplate-type">
+                    <span class="asset-config-field-label">Material</span>
+                    <button type="button" class="asset-config-bobbin-reset" data-bobbin-reset="baseplateType" aria-label="Reset baseplate material to Nickel silver" title="Reset">↺</button>
+                    <select id="asset-config-bobbin-baseplate-type" class="asset-config-bobbin-dia-select" aria-label="Baseplate material"></select>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+        <div id="asset-config-pot-dial-row" class="asset-config-pot-dial-row hidden">
+          <div
+            id="asset-config-pot-dial"
+            class="pot-dial pot-dial--config"
+            role="slider"
+            aria-label="Potentiometer shaft"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            tabindex="0"
+          >
+            <div class="pot-dial-knob">
+              <svg class="pot-dial-svg" viewBox="0 0 36 36" aria-hidden="true" focusable="false">
+                <circle class="pot-dial-ring" cx="18" cy="18" r="14" />
+                <g class="pot-dial-needle-g">
+                  <line class="pot-dial-needle" x1="18" y1="18" x2="18" y2="6" />
+                </g>
+                <circle class="pot-dial-hub" cx="18" cy="18" r="2.2" />
+              </svg>
+            </div>
+            <span class="pot-dial-pct">100%</span>
+          </div>
+        </div>
+        <button type="button" id="asset-config-formulas-btn" class="asset-config-formulas-btn hidden" aria-expanded="false" aria-controls="asset-config-formula-host" title="Formulas">
+          <span class="asset-config-formulas-label">Formulas</span>
+          <span class="asset-config-formulas-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div id="asset-config-formula-host" class="asset-config-formula-host hidden" aria-live="polite"></div>
         <div id="asset-config-value-fields" class="asset-config-value-fields"></div>
         <label id="asset-config-flash-row" class="asset-config-ground-row hidden">
           <input type="checkbox" id="asset-config-flashing" class="asset-config-ground-toggle" checked>
-          <span class="asset-config-ground-label">Flashing?</span>
+          <span class="asset-config-ground-label">Visual Flashing</span>
         </label>
       </div>
     </div>
@@ -284,6 +706,83 @@
       </svg>
     </div>
   </main>
+
+  <div class="workspace-layer-rail" role="group" aria-label="Wire layers">
+    <div class="layer-buttons" id="layer-buttons" role="tablist" aria-label="Wire layer"></div>
+    <button
+      type="button"
+      id="btn-layer-add"
+      class="workspace-layer-add"
+      title="Add layer"
+      aria-label="Add layer"
+    >+</button>
+    <div class="workspace-layer-tools">
+      <button
+        type="button"
+        id="btn-layer-visibility"
+        class="workspace-layer-visibility"
+        title="Hide layer"
+        aria-label="Hide layer"
+        aria-pressed="true"
+      >
+        <svg class="workspace-page-eye workspace-page-eye-open" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+          <circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        </svg>
+        <svg class="workspace-page-eye workspace-page-eye-closed hidden" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+          <circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <button
+        type="button"
+        id="btn-layer-help"
+        class="workspace-layer-help"
+        title="Layer help"
+        aria-label="Layer help"
+        aria-expanded="false"
+        aria-controls="layer-help-popup"
+      >?</button>
+    </div>
+    <div id="layer-help-popup" class="layer-help-popup hidden" role="dialog" aria-label="Layer help" hidden>
+      <p>
+        Open this tip anytime with
+        <span class="help-btn help-btn--q" aria-hidden="true">?</span>
+        beside the wire layers.
+      </p>
+      <p>Double-click a layer to rename or delete it.</p>
+      <p>
+        <kbd class="kbd">Mouse&nbsp;4</kbd>
+        or
+        <kbd class="kbd">↓</kbd>
+        sends the active layer back.
+        <kbd class="kbd">Mouse&nbsp;5</kbd>
+        or
+        <kbd class="kbd">↑</kbd>
+        brings it to the front.
+      </p>
+      <p>
+        <kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>
+        select the active wire layer.
+        <kbd class="kbd">Shift</kbd>+<kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>
+        select a panel layer instead.
+      </p>
+    </div>
+    <div id="layer-edit-menu" class="layer-edit-menu hidden" role="dialog" aria-label="Edit layer" hidden>
+      <label class="layer-edit-field">Title
+        <input type="text" id="layer-edit-title" class="layer-edit-title-input" maxlength="24" autocomplete="off" spellcheck="false" placeholder="Optional name">
+      </label>
+      <div class="layer-edit-delete-slot">
+        <button type="button" id="layer-edit-delete" class="layer-edit-delete">Delete layer</button>
+        <div id="layer-edit-delete-confirm" class="layer-edit-delete-confirm hidden" hidden>
+          <span class="layer-edit-delete-ask">Are you sure?</span>
+          <button type="button" id="layer-edit-delete-yes" class="layer-edit-delete-yes" title="Confirm delete" aria-label="Confirm delete">✓</button>
+          <button type="button" id="layer-edit-delete-no" class="layer-edit-delete-no" title="Cancel" aria-label="Cancel delete">✕</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div id="text-command-box" class="text-command-box hidden" aria-hidden="true">
     <input
@@ -364,24 +863,43 @@
         <input type="text" id="asset-editor-placelabel" class="asset-editor-input" maxlength="8" value="PU">
       </label>
       <label class="asset-editor-field">Category
-        <select id="asset-editor-category" class="asset-editor-select">
-          <option value="pickup">Pickups</option>
-          <option value="switch">Switches</option>
-          <option value="jack">Jacks</option>
-          <option value="power">Power</option>
-          <option value="component">Components</option>
+        <select id="asset-editor-category" class="asset-editor-select" aria-label="Asset category">
           <option value="custom">User</option>
         </select>
       </label>
-      <label id="asset-editor-subtype-field" class="asset-editor-field">Type
+      <label id="asset-editor-subtype-field" class="asset-editor-field hidden">Type
         <select id="asset-editor-subtype" class="asset-editor-select"></select>
+      </label>
+      <label id="asset-editor-preset-field" class="asset-editor-field asset-editor-field-span">Preset
+        <select id="asset-editor-electrical-preset" class="asset-editor-select" aria-label="Electrical value preset">
+          <option value="none">None</option>
+          <option value="pickup">Pickup</option>
+          <option value="potentiometer">Potentiometer</option>
+          <option value="switch">Switch</option>
+          <option value="power">Power (9V)</option>
+          <option value="dc-jack">DC Jack</option>
+          <option value="heater-supply">Heater Supply</option>
+          <option value="hv-supply">B+ / HV Supply</option>
+          <option value="dual-rail">Dual-Rail Supply</option>
+          <option value="power-transformer">Power Transformer</option>
+          <option value="capacitor">Capacitor</option>
+          <option value="resistor">Resistor</option>
+          <option value="diode">Diode</option>
+          <option value="led-indicator">LED</option>
+          <option value="inductor">Inductor / Choke</option>
+          <option value="audio-transformer">Audio Transformer</option>
+          <option value="relay">Relay</option>
+          <option value="transistor">Transistor</option>
+          <option value="opamp">Op Amp</option>
+          <option value="vacuum-tube">Vacuum Tube</option>
+        </select>
       </label>
       <label class="asset-editor-ground-option asset-editor-field-span">
         <input type="checkbox" id="asset-editor-grounding" class="asset-config-ground-toggle">
         <span class="asset-config-ground-label">Needs <span class="grounding-pulse">GROUNDING</span>? ⏚</span>
       </label>
       <div class="asset-editor-value-fields asset-editor-field-span">
-        <span class="asset-editor-value-fields-label">Schematic values</span>
+        <span class="asset-editor-value-fields-label">Electrical values</span>
         <div id="asset-editor-value-fields-list" class="asset-editor-value-fields-list"></div>
       </div>
     </div>
@@ -390,12 +908,13 @@
     <div id="asset-editor-terminals-list" class="asset-editor-terminals-list"></div>
     <div class="asset-editor-add-row" role="group" aria-label="Add parts">
       <button type="button" id="asset-editor-add-terminal" class="tool-btn asset-editor-add-btn" title="Add terminal">+ Terminal</button>
+      <button type="button" id="asset-editor-add-case-g" class="tool-btn asset-editor-add-btn" title="Add chassis / case ground (IEEE §3.9.2)">+ Case G</button>
       <button type="button" id="asset-editor-add-lead" class="tool-btn asset-editor-add-btn" title="Add lead leg">+ Lead</button>
       <button type="button" id="asset-editor-add-conductor" class="tool-btn asset-editor-add-btn" title="Add 4-conductor loom + fan">+ 4-Conductor</button>
       <button type="button" id="asset-editor-add-wire" class="tool-btn asset-editor-add-btn" title="Add generic wire">+ Wire</button>
     </div>
     <div class="asset-editor-actions">
-      <button type="button" id="asset-editor-save" class="tool-btn">Save</button>
+      <button type="button" id="asset-editor-save" class="tool-btn asset-editor-save">Save</button>
       <button type="button" id="asset-editor-cancel" class="tool-btn">Cancel</button>
     </div>
     <div id="asset-editor-resize" class="asset-editor-panel-resize" title="Resize" aria-hidden="true"></div>
@@ -465,9 +984,16 @@
             <span id="circuit-fault-warning-badge" class="circuit-fault-warning-badge">0</span>
           </div>
         </div>
-        <div id="grid-scale-indicator" class="grid-scale-indicator" aria-hidden="true">
+        <div id="grid-scale-indicator" class="grid-scale-indicator" aria-hidden="false">
           <span class="grid-scale-label grid-scale-label-v">1.00x</span>
-          <span id="grid-scale-square" class="grid-scale-square"><span class="grid-scale-corner-x">×</span></span>
+          <span
+            id="grid-scale-square"
+            class="grid-scale-square"
+            role="button"
+            tabindex="0"
+            title="Reset view to 1×"
+            aria-label="Reset view to 1×"
+          ><span class="grid-scale-corner-x" aria-hidden="true">×</span></span>
           <span class="grid-scale-label grid-scale-label-h">1.00x</span>
         </div>
         <button
@@ -493,8 +1019,8 @@
         type="button"
         id="workspace-page-panel-visibility"
         class="workspace-page-visibility"
-        title="Show/hide Panel layer"
-        aria-label="Show Panel layer"
+        title="Show/hide Panel"
+        aria-label="Show Panel"
         aria-pressed="true"
       >
         <svg class="workspace-page-eye workspace-page-eye-open" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -507,6 +1033,76 @@
           <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
         </svg>
       </button>
+      <span class="workspace-page-tools">
+        <div class="panel-layer-bar" role="group" aria-label="Panel layers">
+          <div id="panel-layer-buttons" class="panel-layer-buttons" role="tablist" aria-label="Panel layer"></div>
+          <button type="button" id="btn-panel-layer-add" class="panel-layer-add" title="Add panel layer" aria-label="Add panel layer">+</button>
+          <button
+            type="button"
+            id="btn-panel-layer-visibility"
+            class="workspace-page-visibility panel-layer-visibility"
+            title="Hide panel layer"
+            aria-label="Hide panel layer"
+            aria-pressed="true"
+          >
+            <svg class="workspace-page-eye workspace-page-eye-open" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              <circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+            </svg>
+            <svg class="workspace-page-eye workspace-page-eye-closed hidden" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+              <circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+              <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+          </button>
+          <div id="panel-layer-edit-menu" class="panel-layer-edit-menu layer-edit-menu hidden" role="dialog" aria-label="Edit panel layer" hidden>
+            <label class="layer-edit-field">Title
+              <input type="text" id="panel-layer-edit-title" class="layer-edit-title-input" maxlength="24" autocomplete="off" spellcheck="false" placeholder="Optional name">
+            </label>
+            <div class="layer-edit-delete-slot panel-layer-edit-delete-slot">
+              <button type="button" id="panel-layer-edit-delete" class="layer-edit-delete">Delete layer</button>
+              <div id="panel-layer-edit-delete-confirm" class="layer-edit-delete-confirm hidden" hidden>
+                <span class="layer-edit-delete-ask">Are you sure?</span>
+                <button type="button" id="panel-layer-edit-delete-yes" class="layer-edit-delete-yes" title="Confirm delete" aria-label="Confirm delete">✓</button>
+                <button type="button" id="panel-layer-edit-delete-no" class="layer-edit-delete-no" title="Cancel" aria-label="Cancel delete">✕</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          id="workspace-page-help"
+          class="workspace-page-help"
+          title="Panel layers help"
+          aria-label="Panel layers help"
+          aria-expanded="false"
+          aria-controls="workspace-page-help-popup"
+        >?</button>
+        <div id="workspace-page-help-popup" class="workspace-page-help-popup hidden" role="dialog" aria-label="Panel layers help" hidden>
+          <p>
+            Open this tip anytime with
+            <span class="help-btn help-btn--q" aria-hidden="true">?</span>
+            beside Panel.
+          </p>
+          <p>Panel remains active in the background while the Panel eyeball is enabled. The layer eye hides or shows the active panel layer.</p>
+          <p>Double-click a panel layer to rename or delete it.</p>
+          <p>
+            On Panel,
+            <kbd class="kbd">←</kbd>
+            <kbd class="kbd">→</kbd>
+            or
+            <kbd class="kbd">↑</kbd>
+            <kbd class="kbd">↓</kbd>
+            switch the active panel layer.
+          </p>
+          <p>
+            <kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>
+            select the active panel layer.
+            <kbd class="kbd">Shift</kbd>+<kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>
+            select a wire layer instead.
+          </p>
+        </div>
+      </span>
     </div>
     <footer class="status-bar">
       <div id="schematic-peek" class="schematic-peek" aria-label="Circuit preview">
@@ -525,7 +1121,40 @@
                   <path d="M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </button>
-              <span class="schematic-peek-title">Circuit</span>
+              <button
+                type="button"
+                id="schematic-peek-pin"
+                class="schematic-peek-pin"
+                title="Pin circuit to workspace"
+                aria-label="Pin circuit to workspace"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M12 2v8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M8.5 4.5l7 3.5-2.2 2.2L16 16l-5.8-2.7L7.9 15.6 8.5 4.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                  <path d="M12 16v6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+              </button>
+              <button
+                type="button"
+                id="schematic-peek-info"
+                class="schematic-peek-info"
+                title="Circuit information"
+                aria-label="Show circuit information"
+                aria-pressed="false"
+                aria-expanded="false"
+              >i</button>
+              <div class="schematic-peek-heading">
+                <span class="schematic-peek-title">Circuit</span>
+                <label class="schematic-circuit-select-wrap hidden" hidden>
+                  <span class="visually-hidden">Select circuit</span>
+                  <select
+                    id="schematic-peek-circuit-select"
+                    class="schematic-circuit-select"
+                    title="Select circuit"
+                    aria-label="Select circuit"
+                  ></select>
+                </label>
+              </div>
               <div class="schematic-peek-zoom" aria-label="Schematic zoom">
                 <button type="button" id="schematic-zoom-out" class="schematic-zoom-btn" title="Zoom out" aria-label="Zoom out">−</button>
                 <span id="schematic-zoom-label" class="schematic-zoom-label">100%</span>
@@ -547,23 +1176,50 @@
             </div>
             <div id="schematic-peek-body" class="schematic-peek-body" aria-hidden="true">
               <div class="schematic-peek-body-inner">
+                <div class="schematic-peek-name-bar" aria-label="Circuit name">
+                  <span id="schematic-peek-circuit-name" class="schematic-peek-circuit-name">Untitled circuit</span>
+                </div>
                 <div class="schematic-peek-canvas" id="schematic-peek-canvas">
                   <svg id="schematic-peek-svg" class="schematic-peek-svg" aria-hidden="true"></svg>
-                  <p id="schematic-peek-empty" class="schematic-peek-empty">Connect assets with wires to generate a circuit</p>
-                  <button
-                    type="button"
-                    id="schematic-pan-home"
-                    class="schematic-pan-home"
-                    title="Reset pan"
-                    aria-label="Reset pan to home"
-                  >
-                    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path d="M4 11.5L12 4l8 7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                      <path d="M7 10.5V20h10v-9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                  </button>
+                  <p id="schematic-peek-empty" class="schematic-peek-empty">Connect assets with wires to generate a circuit diagram</p>
+                  <div class="schematic-peek-controls">
+                    <button
+                      type="button"
+                      id="schematic-peek-build-fab"
+                      class="schematic-peek-build-fab"
+                      title="Build list"
+                      aria-label="Show build list"
+                      aria-pressed="false"
+                      aria-expanded="false"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M13.2 3.4l7.4 7.4-2.1 2.1-1.5-1.5-6.2 6.2-2.8-2.8 6.2-6.2-1.5-1.5 1.5-1.7z" fill="currentColor"/>
+                        <path d="M8.2 14.8l-4.6 4.6c-.4.4-.4 1 0 1.4l.8.8c.4.4 1 .4 1.4 0l4.6-4.6-2.2-2.2z" fill="currentColor"/>
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      id="schematic-peek-info-fab"
+                      class="schematic-peek-info-fab"
+                      title="Circuit information"
+                      aria-label="Show circuit information"
+                      aria-pressed="false"
+                      aria-expanded="false"
+                    >i</button>
+                    <button
+                      type="button"
+                      id="schematic-pan-home"
+                      class="schematic-pan-home"
+                      title="Reset pan"
+                      aria-label="Reset pan to home"
+                    >
+                      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                        <path d="M4 11.5L12 4l8 7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M7 10.5V20h10v-9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                      </svg>
+                    </button>
+                  </div>
                 </div>
-                <div id="schematic-wire-stats" class="schematic-wire-stats hidden" aria-label="Wire totals" hidden></div>
               </div>
             </div>
           </div>
@@ -609,8 +1265,70 @@
     </footer>
   </div>
 
-  <script src="cad.js?v=221"></script>
-  <script src="assets.js?v=221"></script>
-  <script src="app.js?v=221"></script>
+  <div id="workspace-group-help-popup" class="workspace-group-help-popup hidden" role="dialog" aria-modal="true" aria-labelledby="workspace-group-help-title" hidden>
+    <div class="workspace-group-help-head">
+      <span id="workspace-group-help-title" class="workspace-group-help-title">Groups</span>
+      <button type="button" id="workspace-group-help-close" class="workspace-group-help-close" title="Close" aria-label="Close group help">×</button>
+    </div>
+    <div class="workspace-group-help-body">
+      <p>
+        Groups let one project hold <strong>multiple circuit diagrams</strong>. Pick a group as the source via
+        <span class="help-btn help-btn--src" aria-hidden="true">Src</span>
+        on a pinned Circuit — schematic, build list, and analysis then use that group’s assets and wires (circuit engine, materials bridges unchanged).
+      </p>
+      <p>
+        Letter tabs are <strong>subgroups</strong> (a, b, c…) for organisation and iterations. Click to select (Shift-click to add).
+        <strong>Double-click</strong> a letter to enable/disable that subgroup — disabled parts stay in the project but are dimmed and left out of circuit Src.
+        Absorbing another group via
+        <span class="help-btn help-btn--group" aria-hidden="true">+</span>
+        keeps that group’s <strong>name and colour</strong> as a subgroup; removing those members restores the original group.
+      </p>
+      <p>
+        Drawn <strong>wires</strong> can be grouped for workspace organisation (select / move / subgroups). Circuit
+        <span class="help-btn help-btn--src" aria-hidden="true">Src</span>
+        schematic and analysis follow asset connectivity and enabled subgroups — not wire membership tags.
+      </p>
+      <p>
+        <span class="help-btn help-btn--group" aria-hidden="true">
+          <svg viewBox="0 0 24 24" focusable="false">
+            <path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+            <path d="M13.5 6.5l3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </span>
+        Rename the group. Each top-level group gets its own selection-frame colour (yellow, pink, orange, green…). Auto names stay <strong>Group 1</strong>, <strong>Group 2</strong>… by order; consolidating prunes emptied numbers and redirects circuit
+        <span class="help-btn help-btn--src" aria-hidden="true">Src</span>
+        to the receiving group.
+      </p>
+      <p>
+        <span class="help-btn help-btn--group" aria-hidden="true">+</span>
+        Enter <strong>add</strong> mode (selection clears). Click another group to select it for consume (Shift-click to add more groups), or pick loose assets and wires. Press
+        <kbd class="kbd">Enter</kbd>
+        or
+        <span class="help-btn help-btn--group" aria-hidden="true">+</span>
+        again — consumed groups become lettered subgroups and keep their name and colour.
+        <kbd class="kbd">Esc</kbd>
+        cancels.
+      </p>
+      <p>
+        <span class="help-btn help-btn--group" aria-hidden="true">−</span>
+        Enter <strong>remove</strong> mode (selection clears). Select members or wires inside the group — or click a subgroup tab to select that whole subgroup — with normal selection visuals. Press
+        <kbd class="kbd">Enter</kbd>
+        or
+        <span class="help-btn help-btn--group" aria-hidden="true">−</span>
+        again to peel them out.
+        <kbd class="kbd">Esc</kbd>
+        cancels.
+      </p>
+      <p>
+        Tip: a normal click on a grouped asset selects the whole group (assets + grouped wires); double-click or marquee deep-selects individuals without moving the whole group.
+      </p>
+    </div>
+  </div>
+
+  <script src="cad.js?v=518"></script>
+  <script src="assets.js?v=518"></script>
+  <script src="engines.js?v=518"></script>
+  <script src="materials.js?v=518"></script>
+  <script src="app.js?v=518"></script>
 </body>
 </html>

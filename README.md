@@ -50,6 +50,29 @@ Your friend double-clicks the setup file, installs, then launches **Guitar Wirin
 
 Custom assets are saved in the browser on that computer (`localStorage`).
 
+## macOS download
+
+Share **`GuitarWiring.dmg`** — your friend opens it and drags **Guitar Wiring.app** to Applications.
+
+### Build on Mac
+
+From the project folder:
+
+```bash
+chmod +x build/build-mac.sh
+./build/build-mac.sh
+```
+
+Output:
+- **`dist/Guitar Wiring.app`** — double-click to run (opens in your browser)
+- **`dist/GuitarWiring.dmg`** — easy to share
+
+**Without building:** double-click **`GuitarWiring.command`** (needs Python 3).
+
+**First launch:** if macOS blocks the app (unsigned), right-click → **Open** → **Open** once.
+
+**GitHub Actions:** run **Build macOS app** from the Actions tab, or push a `v*` tag, then download **GuitarWiring-mac**.
+
 ## Controls
 
 | Action | Control |

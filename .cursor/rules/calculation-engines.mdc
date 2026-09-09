@@ -1,0 +1,85 @@
+---
+description: Circuit / electromagnet / materials calculation-layer ownership
+alwaysApply: true
+---
+
+# Calculation engines
+
+This project splits physics / calculation domains into named **engines**. Reference `CalcEngines` in `engines.js` when adding math, formulas, or persisted component fields. Material physics live in `CalcMaterials` (`materials.js`).
+
+Engines are **product-agnostic** (guitar, pedal, amp, …). Context-specific presets, cable/load models, and UI copy live in the app layer; keep core APIs generic so domains can be reused.
+
+## Coherence (bridges)
+
+```
+materials ──μ, ρ, Br/Hc, eddy──► electromagnet ──derived Z/L──► circuit
+    │                                    │
+    └──────────ρ, eddy, σ────────────────┘
+```
+
+Declared in `CalcEngines.ENGINE_BRIDGES`. Use `bridgesFor(id)`, `ownerOfDatasetKey(key)`, and `getMaterialsCatalog()` when wiring formulas.
+
+| Bridge | From → To | Via |
+|--------|-----------|-----|
+| `materials-to-electromagnet` | materials → EM | μ, Br/Hc, eddy, `OBJECT_MATERIALS` |
+| `materials-to-circuit` | materials → circuit | ρ, σ, eddy |
+| `electromagnet-to-circuit` | EM → circuit | `impedance`, `inductance` (+ `bobbinCircuitDerived` / `Manual` flags) |
+
+**Shared refs** (`CalcEngines.SHARED_REF_KEYS`): `bobbinMagnetType` (materials meaning, stored with EM), `objectMaterials` (materials serialize snapshot). Prefer `CalcEngines.collectMaterialsSerializeFields` / `pickMaterialsFieldsFromRecord` for those.
+
+## Circuit engine (`CalcEngines.CIRCUIT`)
+
+Owns electrical network values, schematic formulas, and circuit work:
+
+- `ELECTRICAL_VALUE_DEFS`, `ELECTRICAL_FORMULAS` (assets.js)
+- Component electrical dataset keys (`impedance`, `inductance`, `resistance`, …)
+- **Analysis:** `computeCircuitAnalysis`, schematic pin metrics
+- **Rendering:** schematic SVG / peek / wire totals (subsection near end of `app.js`)
+- Shared helpers: `summarizeCircuitWireEdges`, `buildConductorResistanceEqHtml`, `collectCircuitFlatFields`
+- **Consumes:** materials (ρ for wire), optional EM-derived Z/L
+
+Do **not** store bobbin or magnet geometry under these keys. Symbol **L** means inductance (or wire length in conductor formulas), **V** means voltage. For ρ / eddy of conductors and pole stock, look up `CalcMaterials` — do not hardcode resistivity tables in circuit code.
+
+## Electromagnet engine (`CalcEngines.ELECTROMAGNET`)
+
+Owns coil-form and pole-piece geometry:
+
+- Bobbin length/width/ratio, magnet count, body diameters, bevels (`V025` / `M050`), string spacing
+- Dual-coil: two bobbins + `bobbinCoilGapMm`; poles per coil × 2 rows (screw / slug)
+- Per-pole `bobbinPoleTypes` — S Screw / M Magnet / P Pin (slug)
+- Per-magnet XY offsets (`bobbinMagnetOffsetsMm`); derived bottom distances (center → bobbin bottom)
+- Per-magnet heights (`bobbinMagnetHeightsMm`); Strat ’56 stagger defaults Low E→High E (HB flat); screws use lip-top seating height (mm) with fixed overall screw length
+- Dual-coil understack: fixed bar magnet (common ~2.5″×½″×⅛″) + maple end spacers flush under bobbin; `bobbinBarMagnetType` for bar grade
+- Bobbin cavity height (`bobbinCavityHeightMm`): gap between flatworks; top thickness (`bobbinThicknessMm`, ≤3 mm); bottom thickness (`bobbinBottomThicknessMm`, Strat SC ≈2.3 mm)
+- SC baseplate (opt-in): `bobbinBaseplateEnabled`, `bobbinBaseplateThicknessMm`, `bobbinBaseplateType` (NiAg/brass via CalcMaterials); length matches bottom bobbin
+- Coil magnet wire AWG (`bobbinCoilWireAwg` / per-coil `bobbinCoilWireAwgs`) + insulation (`bobbinCoilInsulation` / per-coil `bobbinCoilInsulations`) with build-up / pack factor
+- Coil wind counts (`bobbinCoilTurns` per coil, `bobbinCoilTurnsManual`); dual N/S editable; total winds field above circuit Z/L
+- Dual-coil: selecting North/South bobbins scopes wire gauge + insulation (none selected → both); selected bobbins show AWG + insulation labels above North / below South
+- Magnet grade ref (`bobbinMagnetType`) → resolves via **CalcMaterials**
+- Prefixed dataset keys `bobbin*`
+- Bobbin preview UI and derived top diameters (body − 2×chamfer)
+- Serialize via `collectElectromagnetSerializeFields` (geometry) + materials refs; restore via `pickElectromagnetFieldsFromRecord`
+- App-layer bridge: dimensional config may auto-fill circuit `impedance` (DCR) + `inductance` via `computeBobbinPickupElectricalEstimate`; flags `bobbinCircuitDerived` / `bobbinCircuitManual`
+- Opt-in per asset: `bobbinCalcBridge` (off by default) — when off, geometry stays local and does not write circuit Z/L; dimensional panel is dimmed
+- **Consumes:** materials only — no duplicate Br/μ/ρ tables in bobbin code
+
+UI labels may say Length / Bevel V — storage and engines stay namespaced (`bobbinLengthMm`, bevel `V025`).
+
+## Materials catalog (`CalcEngines.MATERIALS` / `CalcMaterials`)
+
+Owns intrinsic material data and object-type bindings (not geometry, not network Z/L):
+
+- `CalcMaterials.MATERIALS` — Br, Hc, BHmax, μr, strengthRel, eddyRel, resistivityOhmM, …
+- `OBJECT_MATERIALS` — e.g. `screw` → `stainlessSteel`, `pin` → `stainlessSteel`, `magnet` → dataset `bobbinMagnetType`, `baseplate` → dataset `bobbinBaseplateType` (default `nickelSilver`; also `brass`), `magnetWire` → `copper`
+- Helpers: `getMaterial`, `materialForObjectType`, `materialForPoleKind`, `collectObjectMaterialRefs`, `propsForEngine`, `propsForObjectType`, `resistivityOhmM`
+- Both circuit and electromagnet formulas should resolve materials through this catalog
+
+Do **not** duplicate Br/μr/ρ tables inside circuit or bobbin geometry code; reference `CalcMaterials`.
+
+**R = ρL/A:** use `CalcMaterials.ohmPerMeterForDiameterMm` / `resistanceOhmsRhoLA` for both hookup wire and coil DCR (materials→circuit). Do not keep a second copper-ρ constant in app code.
+
+**Serialize:** EM collector = geometry + bridge flags; materials collector = `objectMaterials` (+ grade meaning). Merge at project save — do not bury `objectMaterials` inside the EM collector.
+
+## Future engines
+
+When adding another domain (acoustics, thermal, etc.), register it in `engines.js` with an id, `owns` / `consumes` / `provides`, dataset key policy, and any new `ENGINE_BRIDGES` entries before mixing it into circuit or electromagnet code. Product-specific naming (e.g. guitar resonance heuristics) belongs in adapters or presets, not in the engine registry id.

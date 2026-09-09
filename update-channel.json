@@ -2,7 +2,7 @@
   "build": 568,
   "product": "Endo Audio Schematic Editor",
   "branch": "cursor/audio-schematic-editor",
-  "gitUrl": "",
+  "gitUrl": "https://github.com/bobsledteam/audio-schematic-editor.git",
   "archiveUrl": "",
-  "notes": "Set gitUrl (https://…/repo.git) or archiveUrl (zip of the branch) after the first push so Check update can reach the remote. Product name: EndoASD / Audio Schematic Editor."
+  "notes": "Set gitUrl (https://\u2026/repo.git) or archiveUrl (zip of the branch) after the first push so Check update can reach the remote. Product name: EndoASD / Audio Schematic Editor."
 }

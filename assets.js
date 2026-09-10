@@ -73,6 +73,13 @@
   const CATEGORY_TYPES = {
     switch: [
       {
+        id: '1way',
+        label: '1-Way Toggle',
+        match: (t) => t?.typeGroup === '1way'
+          || t?.subtype === 'spst-on-off'
+          || t?.switchThrow === 'on-off',
+      },
+      {
         id: '2way',
         label: '2-Way Toggle',
         match: (t) => t?.typeGroup === '2way'
@@ -122,6 +129,7 @@
       { id: '4conductor', label: '4 Conductor HB' },
     ],
     switch: [
+      { id: 'spst-on-off', label: 'ON-OFF' },
       { id: 'dpdt-on-on', label: 'ON-ON' },
       { id: 'dpdt', label: 'ON-ON-ON' },
       { id: 'dpdt-on-off-on', label: 'ON-OFF-ON' },
@@ -132,7 +140,7 @@
       { id: 'stereooutput', label: 'Stereo Output' },
     ],
     power: [
-      { id: 'ninevolt', label: '9-Volt Battery' },
+      { id: 'ninevolt', label: 'Power Supply' },
       { id: 'dc-jack', label: 'DC Jack' },
       { id: 'heater-supply', label: 'Heater Supply' },
       { id: 'hv-supply', label: 'B+ / HV Supply' },
@@ -773,6 +781,7 @@
       || subtype === 'dpdt'
       || subtype === 'dpdt-on-on'
       || subtype === 'dpdt-on-off-on'
+      || subtype === 'spst-on-off'
       || subtype === 'footswitch') {
       return true;
     }
@@ -1156,7 +1165,7 @@
     ];
   }
 
-  function nineVoltTerminals(bx, by, bw, bodyH) {
+  function powerSupplyTerminals(bx, by, bw, bodyH) {
     const { w: tw, h: th } = getTermSize('square');
     const gap = TERM_GAP;
     const rowW = tw * 2 + gap;
@@ -1191,6 +1200,9 @@
       },
     ];
   }
+
+  /** @deprecated alias — prefer powerSupplyTerminals */
+  const nineVoltTerminals = powerSupplyTerminals;
 
   /** DC barrel jack — tip (+) and sleeve (G). */
   function dcJackTerminals(bx, by, bw, bodyH) {
@@ -3175,6 +3187,40 @@
       terminals: switchTerminalsWithCaseGround(6),
     },
     {
+      id: 'spst-on-off',
+      name: 'ON-OFF',
+      category: 'switch',
+      subtype: 'spst-on-off',
+      typeGroup: '1way',
+      switchThrow: 'on-off',
+      builtin: true,
+      needsGrounding: true,
+      placeLabel: '1WAY',
+      bodyW: 40,
+      bodyH: 48,
+      cssClass: 'dpdt spst-on-off',
+      layout: 'grid-1x2',
+      /*
+       * SPST: T1–T2 close when On; T3 = chassis / case ground.
+       * Two states only (no middle).
+       */
+      states: [
+        {
+          id: 1,
+          label: 'On (1)',
+          terminalActive: [true, true, false],
+          bridges: [[0, 1]],
+        },
+        {
+          id: 2,
+          label: 'Off (2)',
+          terminalActive: [false, false, false],
+          bridges: [],
+        },
+      ],
+      terminals: switchTerminalsWithCaseGround(2),
+    },
+    {
       id: 'dpdt-on-on',
       name: 'ON-ON',
       category: 'switch',
@@ -3252,24 +3298,25 @@
     },
     {
       id: 'ninevolt',
-      name: '9-Volt Battery',
+      name: 'Power Supply',
       category: 'power',
       subtype: 'ninevolt',
       builtin: true,
       needsGrounding: false,
       valueFields: ['voltage'],
-      placeLabel: '9V',
+      placeLabel: 'PSU',
       bodyX: 0,
       bodyY: 0,
       bodyW: 56,
       bodyH: 72,
-      cssClass: 'ninevolt',
+      cssClass: 'ninevolt power-supply',
       layout: 'absolute',
       hideStateLabel: true,
+      defaultValues: { voltage: '9V' },
       states: [
         { id: 0, terminalActive: [true, true] },
       ],
-      terminals: nineVoltTerminals(0, 0, 56, 72),
+      terminals: powerSupplyTerminals(0, 0, 56, 72),
     },
     {
       id: 'potentiometer',
@@ -3989,7 +4036,7 @@
     const labelEl = document.getElementById('asset-editor-placelabel');
     const groundEl = document.getElementById('asset-editor-grounding');
     if (nameEl) editorDraft.name = nameEl.value;
-    if (labelEl) editorDraft.placeLabel = labelEl.value.slice(0, 8);
+    if (labelEl) editorDraft.placeLabel = labelEl.value.slice(0, 24);
     if (groundEl) editorDraft.needsGrounding = !!groundEl.checked;
   }
 
@@ -4163,7 +4210,7 @@
       return stereoOutputTerminals(bx, by, bw, draft.bodyH);
     }
     if (category === 'power' && subtype === 'ninevolt') {
-      return nineVoltTerminals(bx, by, bw, draft.bodyH);
+      return powerSupplyTerminals(bx, by, bw, draft.bodyH);
     }
     if (category === 'power' && subtype === 'dc-jack') {
       return dcJackTerminals(bx, by, bw, draft.bodyH);
@@ -4344,6 +4391,17 @@
       || subtype === 'tube-12ax7' || subtype === 'tube-6v6')) {
       return genericTubeParts(bx, by).terminals;
     }
+    if (category === 'switch' && subtype === 'spst-on-off') {
+      const { w: tw, h: th } = getTermSize(shape);
+      const gap = TERM_GAP;
+      const startX = bx + snapEditor((bw - tw) / 2);
+      const startY = by + draft.bodyH + TERM_BELOW_BODY;
+      return [
+        { ...switchTerminalSpec(0), x: startX, y: startY },
+        { ...switchTerminalSpec(1), x: startX, y: startY + th + gap },
+        { ...switchCaseGroundSpec(), x: startX, y: startY + 2 * (th + gap) },
+      ];
+    }
     if (category === 'switch' && (subtype === 'dpdt' || subtype === 'dpdt-on-off-on' || subtype === 'dpdt-on-on')) {
       const { w: tw, h: th } = getTermSize(shape);
       const gap = TERM_GAP;
@@ -4372,9 +4430,10 @@
     if (category === 'switch' && subtype === 'dpdt') return { bodyW: 48, bodyH: 56, placeLabel: '3WAY' };
     if (category === 'switch' && subtype === 'dpdt-on-off-on') return { bodyW: 48, bodyH: 56, placeLabel: 'OFO' };
     if (category === 'switch' && subtype === 'dpdt-on-on') return { bodyW: 48, bodyH: 56, placeLabel: '2WAY' };
+    if (category === 'switch' && subtype === 'spst-on-off') return { bodyW: 40, bodyH: 48, placeLabel: '1WAY' };
     if (category === 'jack' && subtype === 'monooutput') return { bodyW: 70, bodyH: 40, placeLabel: 'OUT' };
     if (category === 'jack' && subtype === 'stereooutput') return { bodyW: 90, bodyH: 40, placeLabel: 'STR' };
-    if (category === 'power' && subtype === 'ninevolt') return { bodyW: 56, bodyH: 72, placeLabel: '9V' };
+    if (category === 'power' && subtype === 'ninevolt') return { bodyW: 56, bodyH: 72, placeLabel: 'PSU' };
     if (category === 'power' && subtype === 'dc-jack') return { bodyW: 56, bodyH: 40, placeLabel: 'DC' };
     if (category === 'power' && subtype === 'heater-supply') return { bodyW: 70, bodyH: 40, placeLabel: 'HTR' };
     if (category === 'power' && subtype === 'hv-supply') return { bodyW: 64, bodyH: 44, placeLabel: 'B+' };
@@ -4663,7 +4722,7 @@
     if (!editorDraft) return;
     editorDraft.terminalShape = editorDraft.terminalShape === 'rect' ? 'square' : 'rect';
     if (
-      (editorDraft.category === 'switch' && (editorDraft.subtype === 'dpdt' || editorDraft.subtype === 'dpdt-on-off-on' || editorDraft.subtype === 'dpdt-on-on'))
+      (editorDraft.category === 'switch' && (editorDraft.subtype === 'dpdt' || editorDraft.subtype === 'dpdt-on-off-on' || editorDraft.subtype === 'dpdt-on-on' || editorDraft.subtype === 'spst-on-off'))
       || (editorDraft.category === 'pickup' && editorDraft.subtype === 'singlecoil')
       || (editorDraft.category === 'pickup' && editorDraft.subtype === 'dualcoil')
       || (editorDraft.category === 'pickup' && editorDraft.subtype === '4conductor')
@@ -4825,7 +4884,46 @@
     if (!states[stateIndex].terminalActive) {
       states[stateIndex].terminalActive = (template.terminals || []).map(() => false);
     }
-    states[stateIndex].terminalActive[termIndex] = !!active;
+    const termEls = el.querySelectorAll('.terminal');
+    const termEl = termEls[termIndex];
+    const isSwitchPole = !!termEl?.classList?.contains('switch-term');
+    const bridges = states[stateIndex].bridges;
+    // Throw-matrix switches: poles follow bridges — toggling a pole edits the bridge set
+    if (isSwitchPole && Array.isArray(bridges) && (bridges.length > 0 || template.switchThrow)) {
+      if (!states[stateIndex].bridges) states[stateIndex].bridges = [];
+      if (!active) {
+        states[stateIndex].bridges = states[stateIndex].bridges.filter(
+          (pair) => !Array.isArray(pair) || (pair[0] !== termIndex && pair[1] !== termIndex)
+        );
+      } else if (!states[stateIndex].bridges.some((pair) => pair[0] === termIndex || pair[1] === termIndex)) {
+        const switchIndices = [];
+        termEls.forEach((t, i) => {
+          if (t?.classList?.contains('switch-term')) switchIndices.push(i);
+        });
+        let pairWith = null;
+        // SPST / few-pole: close to the other pole (never case-ground commons)
+        if (template.switchThrow === 'on-off' || switchIndices.length <= 2) {
+          pairWith = switchIndices.find((i) => i !== termIndex);
+        } else {
+          // DPDT grid: pair with nearest common (T3/T4 = idx 2/3)
+          const commons = [2, 3].filter((c) => c !== termIndex && c < (states[stateIndex].terminalActive?.length || 0));
+          pairWith = commons.find((c) => Math.abs(c - termIndex) <= 2) ?? commons[0];
+        }
+        if (pairWith != null) {
+          states[stateIndex].bridges.push([Math.min(termIndex, pairWith), Math.max(termIndex, pairWith)]);
+        }
+      }
+      // Re-derive all switch-pole actives from bridges for this state
+      const n = states[stateIndex].terminalActive.length;
+      for (let i = 0; i < n; i++) {
+        const t = el.querySelectorAll('.terminal')[i];
+        if (t?.classList?.contains('switch-term')) {
+          states[stateIndex].terminalActive[i] = terminalActiveForState(states[stateIndex], i, t);
+        }
+      }
+    } else {
+      states[stateIndex].terminalActive[termIndex] = !!active;
+    }
     if (getComponentStateIndex(el) === stateIndex) {
       applyComponentStateVisuals(el, template, stateIndex);
     }
@@ -4837,7 +4935,7 @@
     if (!template) return false;
     const states = ensureInstanceStates(el);
     if (!states[stateIndex]) return false;
-    const next = String(secondaryLabel || '').trim().slice(0, 24);
+    const next = String(secondaryLabel || '').trim().slice(0, 48);
     states[stateIndex].secondaryLabel = next;
     if (getComponentStateIndex(el) === stateIndex) {
       updateComponentStateLabel(el);
@@ -4852,7 +4950,7 @@
     const s = states[stateIndex];
     const fromTemplate = template?.states?.[stateIndex]?.label;
     if (fromTemplate != null && String(fromTemplate).trim() !== '') {
-      return String(fromTemplate).trim().slice(0, 24);
+      return String(fromTemplate).trim().slice(0, 48);
     }
     return `State ${s?.id ?? stateIndex + 1}`;
   }
@@ -4867,11 +4965,14 @@
     if (!template) return false;
     const states = ensureInstanceStates(el);
     if (!states[stateIndex]) return false;
-    const next = String(label || '').trim().slice(0, 24);
-    if (template.hideStateLabel) {
-      states[stateIndex].label = next;
+    const next = String(label ?? '').trim().slice(0, 48);
+    if (!next && !template.hideStateLabel) {
+      const fromTemplate = template?.states?.[stateIndex]?.label;
+      states[stateIndex].label = (fromTemplate != null && String(fromTemplate).trim() !== '')
+        ? String(fromTemplate).trim().slice(0, 48)
+        : undefined;
     } else {
-      states[stateIndex].label = next || getTemplateStateLabel(el, stateIndex);
+      states[stateIndex].label = next;
     }
     if (getComponentStateIndex(el) === stateIndex) {
       updateComponentStateLabel(el);
@@ -5007,10 +5108,11 @@
 
   function sortSwitchThrowAssets(assets) {
     const throwRank = (t) => (
-      t.switchThrow === 'on-on' || t.subtype === 'dpdt-on-on' ? 0
-        : t.switchThrow === 'on-on-on' || t.subtype === 'dpdt' ? 1
-          : t.switchThrow === 'on-off-on' ? 2
-            : 3
+      t.switchThrow === 'on-off' || t.subtype === 'spst-on-off' ? 0
+        : t.switchThrow === 'on-on' || t.subtype === 'dpdt-on-on' ? 1
+          : t.switchThrow === 'on-on-on' || t.subtype === 'dpdt' ? 2
+            : t.switchThrow === 'on-off-on' ? 3
+              : 4
     );
     return [...assets].sort((a, b) => throwRank(a) - throwRank(b) || String(a.name).localeCompare(String(b.name)));
   }
@@ -5757,12 +5859,12 @@
       labelInput.type = 'text';
       labelInput.className = 'asset-editor-input';
       labelInput.value = term.tipLabel || term.label || '';
-      labelInput.maxLength = 4;
+      labelInput.maxLength = 24;
       labelInput.readOnly = !editable;
       labelInput.disabled = !editable;
       if (editable) {
         labelInput.addEventListener('input', () => {
-          const next = labelInput.value.slice(0, 4) || '?';
+          const next = labelInput.value.slice(0, 24) || '?';
           term.label = next;
           term.tipLabel = next;
           renderEditorPreview();
@@ -6408,7 +6510,7 @@
       id: editingId || `custom-${Date.now()}`,
       name,
       category: 'custom',
-      placeLabel: (editorDraft.placeLabel || '').trim().slice(0, 8) || 'CU',
+      placeLabel: (editorDraft.placeLabel || '').trim().slice(0, 24) || 'CU',
       needsGrounding,
       layout: 'absolute',
       cssClass: [...cssParts].join(' '),
@@ -6674,7 +6776,7 @@
     document.getElementById('asset-editor-subtype')?.addEventListener('change', (e) => {
       editorDraft.subtype = e.target.value;
       editorDraft.needsGrounding = defaultNeedsGrounding(editorDraft.category, editorDraft.subtype);
-      if (editorDraft.category === 'switch' && (editorDraft.subtype === 'dpdt' || editorDraft.subtype === 'dpdt-on-off-on' || editorDraft.subtype === 'dpdt-on-on')) {
+      if (editorDraft.category === 'switch' && (editorDraft.subtype === 'dpdt' || editorDraft.subtype === 'dpdt-on-off-on' || editorDraft.subtype === 'dpdt-on-on' || editorDraft.subtype === 'spst-on-off')) {
         editorDraft.terminalShape = 'rect';
       }
       applyPresetLayout(editorDraft);
@@ -6695,7 +6797,7 @@
 
     document.getElementById('asset-editor-placelabel')?.addEventListener('input', (e) => {
       if (!editorDraft) return;
-      editorDraft.placeLabel = e.target.value.slice(0, 8);
+      editorDraft.placeLabel = e.target.value.slice(0, 24);
       const stage = document.querySelector('#asset-editor-preview .asset-editor-stage');
       const bodyEl = stage?.querySelector('.asset-editor-body');
       if (bodyEl) {
@@ -6866,11 +6968,15 @@
   /** For switch states with bridges: switch poles follow closed contacts; other lugs keep stored actives. */
   function terminalActiveForState(state, idx, termEl) {
     const bridges = state?.bridges;
-    if (bridges?.length) {
-      const onBridge = bridges.some((pair) => pair[0] === idx || pair[1] === idx);
-      if (onBridge) return true;
+    if (Array.isArray(bridges)) {
+      if (bridges.length) {
+        const onBridge = bridges.some((pair) => pair[0] === idx || pair[1] === idx);
+        if (onBridge) return true;
+        if (termEl?.classList?.contains('switch-term')) return false;
+        return !!state?.terminalActive?.[idx];
+      }
+      // Empty bridges = open / OFF throw — switch poles are inactive
       if (termEl?.classList?.contains('switch-term')) return false;
-      return !!state?.terminalActive?.[idx];
     }
     return !!state?.terminalActive?.[idx];
   }
@@ -6880,11 +6986,13 @@
     const state = states[stateIndex];
     if (!state || !template) return;
     const termEls = el.querySelectorAll('.terminal');
-    // Keep stored terminalActive in sync with bridges for switch poles only
-    if (state.bridges?.length && state.terminalActive) {
+    // Keep stored terminalActive in sync with bridges for switch poles
+    if (Array.isArray(state.bridges) && state.terminalActive) {
       for (let i = 0; i < state.terminalActive.length; i++) {
         const term = termEls[i];
-        if (term?.classList?.contains('switch-term') || !template.pushPull) {
+        if (term?.classList?.contains('switch-term') || (template.switchThrow && !template.pushPull)) {
+          state.terminalActive[i] = terminalActiveForState(state, i, term);
+        } else if (template.pushPull && term?.classList?.contains('switch-term')) {
           state.terminalActive[i] = terminalActiveForState(state, i, term);
         }
       }
@@ -6972,7 +7080,11 @@
     // when the user set an explicit Hover name (via label).
     let primary = explicit;
     if (!primary && !template.hideStateLabel) {
-      primary = `State ${state?.id ?? ''}`;
+      const idx = getComponentStateIndex(el);
+      const fromTemplate = template?.states?.[idx]?.label;
+      primary = (fromTemplate != null && String(fromTemplate).trim() !== '')
+        ? String(fromTemplate).trim()
+        : `State ${state?.id ?? ''}`;
     }
     // Legacy: Hover was briefly stored in secondaryLabel on hideStateLabel assets
     const legacyHover = String(state?.secondaryLabel || '').trim();
@@ -7363,6 +7475,8 @@
     if (template.layout === 'grid-3x2') {
       // T-grid + chassis/case ground parked under the poles
       termH = 74;
+    } else if (template.layout === 'grid-1x2' || template.switchThrow === 'on-off') {
+      termH = 56;
     }
     return { offsetX: w / 2, offsetY: h / 2 + termH / 2 };
   }

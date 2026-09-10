@@ -156,17 +156,57 @@
             </svg>
           </button>
         </div>
-        <div class="wire-route-group" role="group" aria-label="Wire route style">
-          <button type="button" id="btn-route-free" class="tool-btn style-btn route-btn active" data-route="free" title="Freeform wire (smooth bends)" aria-label="Freeform wire" aria-pressed="true">
-            <svg class="route-btn-icon" viewBox="0 0 24 14" aria-hidden="true" focusable="false">
-              <path d="M2 11 C7 11 8 3 12 3 S17 11 22 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            </svg>
-          </button>
-          <button type="button" id="btn-route-manhattan" class="tool-btn style-btn route-btn" data-route="manhattan" title="Manhattan wire (orthogonal + soft fillets)" aria-label="Manhattan wire" aria-pressed="false">
-            <svg class="route-btn-icon" viewBox="0 0 24 14" aria-hidden="true" focusable="false">
-              <path d="M2 11 H10 Q12 11 12 9 V5 Q12 3 14 3 H22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
+        <div class="wire-route-row">
+          <div class="wire-route-group" role="group" aria-label="Wire route style">
+            <button type="button" id="btn-route-free" class="tool-btn style-btn route-btn active" data-route="free" title="Freeform wire (smooth bends)" aria-label="Freeform wire" aria-pressed="true">
+              <svg class="route-btn-icon" viewBox="0 0 24 14" aria-hidden="true" focusable="false">
+                <path d="M2 11 C7 11 8 3 12 3 S17 11 22 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button type="button" id="btn-route-manhattan" class="tool-btn style-btn route-btn" data-route="manhattan" title="Manhattan wire (orthogonal + soft fillets)" aria-label="Manhattan wire" aria-pressed="false">
+              <svg class="route-btn-icon" viewBox="0 0 24 14" aria-hidden="true" focusable="false">
+                <path d="M2 11 H10 Q12 11 12 9 V5 Q12 3 14 3 H22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          <div class="wire-settings" id="wire-settings">
+            <button
+              type="button"
+              id="btn-wire-settings"
+              class="tool-btn wire-settings-cog"
+              title="Wire settings"
+              aria-label="Wire settings"
+              aria-expanded="false"
+              aria-controls="wire-settings-panel"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M12 8.6a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8z" fill="none" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M19.4 13a7.6 7.6 0 0 0 .1-1l2-1.5-2-3.4-2.4 1a7.7 7.7 0 0 0-1.7-1l-.4-2.5h-4l-.4 2.5a7.7 7.7 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.5a7.6 7.6 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7.7 7.7 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.7 7.7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <div id="wire-settings-panel" class="wire-settings-panel hidden" role="dialog" aria-label="Wire settings" hidden>
+              <button
+                type="button"
+                id="wire-setting-auto-delete"
+                class="wire-settings-toggle"
+                aria-pressed="false"
+                title="When on, deleting an asset also deletes wires attached to it"
+              >
+                <span class="wire-settings-toggle-label">Wire auto-delete</span>
+                <span class="wire-settings-toggle-state" id="wire-setting-auto-delete-state">Off</span>
+              </button>
+              <button
+                type="button"
+                id="wire-setting-persist"
+                class="wire-settings-toggle"
+                aria-pressed="false"
+                title="When on, wires can start and finish on empty canvas (no terminal required)"
+              >
+                <span class="wire-settings-toggle-label">Wire persist</span>
+                <span class="wire-settings-toggle-state" id="wire-setting-persist-state">Off</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="wire-colors" role="group" aria-label="Wire colour">
@@ -537,11 +577,11 @@
         </div>
         <div id="asset-config-place-label-row" class="asset-config-switch-type-row hidden">
           <span class="asset-config-field-label">Label</span>
-          <input id="asset-config-place-label" class="asset-config-field-input" type="text" maxlength="12" autocomplete="off" spellcheck="false" aria-label="Body label on asset" placeholder="e.g. SC">
+          <input id="asset-config-place-label" class="asset-config-field-input" type="text" maxlength="24" autocomplete="off" spellcheck="false" aria-label="Body label on asset" placeholder="e.g. SC">
         </div>
         <div id="asset-config-hover-label-row" class="asset-config-switch-type-row hidden">
           <span class="asset-config-field-label">Hover</span>
-          <input id="asset-config-hover-label" class="asset-config-field-input" type="text" maxlength="24" autocomplete="off" spellcheck="false" aria-label="State hover label above asset" placeholder="e.g. Neck">
+          <input id="asset-config-hover-label" class="asset-config-field-input" type="text" maxlength="48" autocomplete="off" spellcheck="false" aria-label="State hover label above asset" placeholder="e.g. Neck / Phase Rev">
         </div>
         <div id="asset-config-tube-pinout-row" class="asset-config-tube-pinout-row hidden">
           <span class="asset-config-field-label">Pinout</span>
@@ -1085,7 +1125,7 @@
         <input type="text" id="asset-editor-name" class="asset-editor-input" maxlength="32">
       </label>
       <label class="asset-editor-field">Label
-        <input type="text" id="asset-editor-placelabel" class="asset-editor-input" maxlength="8" value="PU">
+        <input type="text" id="asset-editor-placelabel" class="asset-editor-input" maxlength="24" value="PU">
       </label>
       <label class="asset-editor-field">Category
         <select id="asset-editor-category" class="asset-editor-select" aria-label="Asset category">
@@ -1101,7 +1141,7 @@
           <option value="pickup">Pickup</option>
           <option value="potentiometer">Potentiometer</option>
           <option value="switch">Switch</option>
-          <option value="power">Power (9V)</option>
+          <option value="power">Power (supply)</option>
           <option value="dc-jack">DC Jack</option>
           <option value="heater-supply">Heater Supply</option>
           <option value="hv-supply">B+ / HV Supply</option>
@@ -1330,11 +1370,14 @@
       </span>
     </div>
     <footer class="status-bar">
-      <div id="align-bar" class="align-bar hidden" aria-label="Align selection">
-        <button type="button" id="btn-align-column" class="tool-btn align-btn" title="Align to same Y">Align column</button>
-        <button type="button" id="btn-align-row" class="tool-btn align-btn" title="Align to same X">Align row</button>
-        <button type="button" id="btn-rotate-ccw" class="tool-btn align-btn" title="Rotate −7.5°">↺</button>
-        <button type="button" id="btn-rotate-cw" class="tool-btn align-btn" title="Rotate +7.5°">↻</button>
+      <div id="align-bar" class="align-bar" aria-label="Align selection">
+        <div class="align-bar-actions">
+          <button type="button" id="btn-align-column" class="tool-btn align-btn" title="Align to same Y">Align column</button>
+          <button type="button" id="btn-align-row" class="tool-btn align-btn" title="Align to same X">Align row</button>
+          <button type="button" id="btn-rotate-ccw" class="tool-btn align-btn" title="Rotate −7.5°">↺</button>
+          <button type="button" id="btn-rotate-cw" class="tool-btn align-btn" title="Rotate +7.5°">↻</button>
+        </div>
+        <span id="selected-tool-hover" class="selected-tool-hover" aria-live="polite">Select</span>
       </div>
       <div id="schematic-peek" class="schematic-peek" aria-label="Circuit preview">
         <div class="schematic-peek-shell">

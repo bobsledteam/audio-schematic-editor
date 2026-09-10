@@ -9,7 +9,7 @@
   const SNAP_DELAY_MS = 2000;
   /** Pointer movement past this (px) after snap clears magnet immediately. */
   const SNAP_MOVE_CANCEL_PX = 3;
-  const ASSET_CONFIG_BTN_SIZE = 26;
+  const ASSET_CONFIG_BTN_SIZE = 12.6;
   /** Optical nudge matching .asset-config-btn transform. */
   const ASSET_CONFIG_BTN_NUDGE_X = -1;
   const LAYER_COUNT_MIN = 1;
@@ -207,6 +207,10 @@
   let wireStyle = 'solid';
   /** 'free' = smooth bends · 'manhattan' = orthogonal + soft fillets */
   let wireRouteMode = 'free';
+  /** When true, deleting an asset also deletes wires that were attached to it. Default off. */
+  let wireAutoDelete = false;
+  /** When true, wires may start/finish on empty canvas (no terminal). Default off. */
+  let wirePersist = false;
   let wireColor = 'white';
   /** Default new-wire gauge (mm). 1 grid unit = 1 mm → stroke_px = mm × WORKSPACE_GRID. */
   const DEFAULT_WIRE_GAUGE_MM = 0.64;
@@ -673,6 +677,7 @@
   function setSpacePanHeld(on) {
     spacePanHeld = !!on;
     updateSpacePanBodyClass();
+    updateSelectedToolHover();
   }
 
   function startSpacePanDrag(clientX, clientY) {
@@ -680,6 +685,7 @@
     spacePanLastX = clientX;
     spacePanLastY = clientY;
     updateSpacePanBodyClass();
+    updateSelectedToolHover();
   }
 
   function moveSpacePanDrag(clientX, clientY) {
@@ -705,6 +711,7 @@
     updateSpacePanBodyClass();
     document.body.classList.remove('is-viewport-interacting');
     flushViewportHeavyUpdate();
+    updateSelectedToolHover();
   }
 
   function canEngageSpacePan(e) {
@@ -739,9 +746,11 @@
 
   /**
    * Lightning mode: glow wires on conducting nets that carry signal.
-   * Seeds = signal injectors only (pickup / jack tip H with terminalActive).
+   * Seeds = signal injectors only (pickup coil ends / jack tip H with terminalActive).
    * Switch poles and pot lugs join via buildWireNets() expansion — seeding them
    * also lit the ground bus whenever an active pole sat on a grounded net.
+   * Nets that reach chassis / circuit ground are excluded so phase-reverse (or any
+   * hot↔ground short) does not light the entire return bus.
    */
   function isLightningSeedTerminal(term) {
     if (!term) return false;
@@ -752,7 +761,10 @@
     const faultRole = getFaultAnalysisRole(term);
     if (faultRole === 'G' || faultRole === 'SUP-' || faultRole === 'HEAT') return false;
     const role = getTerminalRole(term);
-    if (role === 'G') return false;
+    if (role === 'G') {
+      // Pickup coil "G" is a conductor end (phase reverse uses it as hot) — not chassis
+      return isPickupComponent(host);
+    }
     return true;
   }
 
@@ -761,13 +773,16 @@
     if (!term || !comp || !isLightningSeedTerminal(term)) return false;
     const role = getTerminalRole(term);
     const label = (term.dataset.terminalLabel || '').trim().toUpperCase();
+    if (isPickupComponent(comp)) {
+      // Either coil end can inject depending on external phase / series wiring
+      return true;
+    }
     if (role === 'H' || label === 'H') return true;
     // Dual-coil / loom tips: non-ground active conductors inject signal
     if (
-      (isPickupComponent(comp) || term.classList.contains('hb-tip') || term.classList.contains('wire-term'))
+      (term.classList.contains('hb-tip') || term.classList.contains('wire-term'))
       && role !== 'G'
       && !term.classList.contains('is-ground')
-      && (term.classList.contains('hb-tip') || term.classList.contains('wire-term'))
     ) {
       return true;
     }
@@ -799,6 +814,7 @@
       });
       if (!seedTerms.size) return;
 
+      const { groundTerms } = collectGroundNetMembership();
       const liveTerms = new Set();
       buildWireNets().forEach((net) => {
         let seeded = false;
@@ -809,6 +825,12 @@
           }
         }
         if (!seeded) return;
+        // Skip chassis / return bus — e.g. mid-phase reverse parks a coil end on ground
+        if (groundTerms?.size) {
+          for (const t of net) {
+            if (groundTerms.has(t)) return;
+          }
+        }
         net.forEach((t) => liveTerms.add(t));
       });
       if (!liveTerms.size) return;
@@ -2329,7 +2351,7 @@
       const v = parseVoltageVolts(getComponentElectricalValue(comp, key));
       if (Number.isFinite(v) && v > 0) return v;
     }
-    // 9V battery default
+    // Generic power supply default (legacy ninevolt id)
     const template = GuitarAssets.getTemplate(comp.dataset.assetId);
     if (template?.subtype === 'ninevolt' || template?.id === 'ninevolt') return 9;
     return NaN;
@@ -2342,25 +2364,25 @@
    */
   function analyzeLedPowerState(comp, neighbors, shortTerminals) {
     if (!isLedIndicatorComponent(comp)) {
-      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN };
+      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN, intensity: 0 };
     }
     const terms = [...comp.querySelectorAll('.terminal')];
     const anode = terms.find((t) => getTerminalRole(t) === 'A') || terms[0];
     const cathode = terms.find((t) => getTerminalRole(t) === 'K') || terms[1];
     if (!anode || !cathode) {
-      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN };
+      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN, intensity: 0 };
     }
 
     const toPos = dcPowerReach(anode, 'toward-positive', neighbors);
     const toRet = dcPowerReach(cathode, 'toward-return', neighbors);
     if (!toPos.reached || !toRet.reached) {
-      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN };
+      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN, intensity: 0 };
     }
 
     // Invalid if anode/cathode sit on a hard-shorted supply net
     if (shortTerminals?.has(anode) || shortTerminals?.has(cathode)
       || shortTerminals?.has(toPos.supplyTerm) || shortTerminals?.has(toRet.supplyTerm)) {
-      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN };
+      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN, intensity: 0 };
     }
 
     const vf = parseVoltageVolts(getComponentElectricalValue(comp, 'forwardVoltage'));
@@ -2376,9 +2398,23 @@
       vf,
       ifA,
       ballastR,
+      intensity: computeLedGlowIntensity({ powered: true, vs, vf, ifA }),
       supplyComp: toPos.supplyComp,
       returnComp: toRet.supplyComp,
     };
+  }
+
+  /** Relative glow 0–1 from supply headroom vs Vf (design If when ballast matched). */
+  function computeLedGlowIntensity({ powered, vs, vf, ifA }) {
+    if (!powered) return 0;
+    if (Number.isFinite(vs) && Number.isFinite(vf) && vs > 0) {
+      if (vs <= vf) return 0.12;
+      const headroom = (vs - vf) / vs;
+      // Map excess fraction into a visible 20–100% bar
+      return Math.min(1, Math.max(0.2, 0.28 + headroom * 1.05));
+    }
+    if (Number.isFinite(ifA) && ifA > 0) return 0.65;
+    return 0.5;
   }
 
   function refreshLedPowerGlow() {
@@ -2388,6 +2424,7 @@
       else {
         comp.classList.remove('is-led-powered');
         comp.style.removeProperty('--led-glow-color');
+        comp.style.removeProperty('--led-glow-intensity');
       }
     });
     if (!hasLed) return;
@@ -2403,10 +2440,13 @@
       if (!isLedIndicatorComponent(comp)) return;
       const state = analyzeLedPowerState(comp, neighbors, shortTerms);
       const color = normalizeGlowColor(getComponentElectricalValue(comp, 'glowColor'), '#ff3b30');
+      const intensity = Number.isFinite(state.intensity) ? state.intensity : 0;
       if (state.powered) {
         comp.classList.add('is-led-powered');
         comp.style.setProperty('--led-glow-color', color);
+        comp.style.setProperty('--led-glow-intensity', String(Math.round(intensity * 1000) / 1000));
         comp.dataset.ledPowered = 'true';
+        comp.dataset.ledGlowIntensity = String(Math.round(intensity * 100));
         if (Number.isFinite(state.ballastR)) {
           comp.dataset.ledBallastOhms = String(Math.round(state.ballastR * 1000) / 1000);
         } else {
@@ -2417,7 +2457,9 @@
       } else {
         comp.classList.remove('is-led-powered');
         comp.style.removeProperty('--led-glow-color');
+        comp.style.removeProperty('--led-glow-intensity');
         delete comp.dataset.ledPowered;
+        delete comp.dataset.ledGlowIntensity;
         delete comp.dataset.ledBallastOhms;
         delete comp.dataset.ledSupplyVolts;
       }
@@ -2638,6 +2680,14 @@
       aliases: ['MOVE', 'M'],
       description: 'Move selection base→dest (snaps to object mid/centers)',
       run: () => startMoveTool(),
+    },
+    {
+      id: 'wire',
+      name: 'Wire',
+      short: 'WIRE',
+      aliases: ['WIRE', 'W'],
+      description: 'Enter wire draw mode',
+      run: () => setWireMode(true),
     },
     {
       id: 'note',
@@ -7494,12 +7544,14 @@
     hideDimensionToolVisual(false);
     dimLayer?.classList.add('hidden');
     setStatus('DIM — click first point (snap: center / mid / terminals / grid · Shift=free)');
+    updateSelectedToolHover();
   }
 
   function cancelDimensionTool() {
     if (!dimTool) return false;
     hideDimensionToolVisual(true);
     setStatus('Ready');
+    updateSelectedToolHover();
     return true;
   }
 
@@ -7523,6 +7575,7 @@
       current: null,
     };
     setStatus('MOVE — click base point (snap: center / mid) · Shift=free · Esc cancel');
+    updateSelectedToolHover();
   }
 
   function cancelMoveTool() {
@@ -7530,6 +7583,7 @@
     moveTool = null;
     if (!snappedTerminal && !placementMode) snapIndicator.classList.add('hidden');
     setStatus('Ready');
+    updateSelectedToolHover();
     return true;
   }
 
@@ -7664,6 +7718,7 @@
     moveTool = null;
     if (!snappedTerminal && !placementMode) snapIndicator.classList.add('hidden');
     setStatus(`Moved · Δ ${formatDimensionValue(Math.hypot(dx, dy))}`);
+    updateSelectedToolHover();
     return true;
   }
 
@@ -7826,6 +7881,7 @@
     hideDimensionToolVisual(true);
     markProjectDirty();
     setStatus(`DIM ${text} — label placed`);
+    updateSelectedToolHover();
     return true;
   }
 
@@ -8613,10 +8669,33 @@
   function updateAlignBar() {
     if (!alignBar) return;
     const n = selectedComponents.size;
-    const show = n >= 1;
-    alignBar.classList.toggle('hidden', !show);
+    const showActions = n >= 1;
+    alignBar.classList.toggle('hidden', false);
+    alignBar.classList.toggle('has-selection', showActions);
     if (btnAlignColumn) btnAlignColumn.disabled = n < 2;
     if (btnAlignRow) btnAlignRow.disabled = n < 2;
+    updateSelectedToolHover();
+  }
+
+  function getSelectedToolHoverLabel() {
+    if (spacePanDragging || spacePanHeld) return 'Pan';
+    if (eraseMode) return 'Erase';
+    if (wireMode) return 'Wire';
+    if (moveTool) return 'Move';
+    if (dimTool && dimTool.phase !== 'done') return 'Dimension';
+    if (placementMode) {
+      const name = GuitarAssets.getTemplate(placementMode)?.name;
+      return name ? `Place · ${name}` : 'Place';
+    }
+    if (panelSnapMode) return 'Snap';
+    return 'Select';
+  }
+
+  function updateSelectedToolHover() {
+    const el = document.getElementById('selected-tool-hover');
+    if (!el) return;
+    const label = getSelectedToolHoverLabel();
+    if (el.textContent !== label) el.textContent = label;
   }
 
   function alignSelectedColumn() {
@@ -9399,7 +9478,7 @@
       if (isManhattanWire(wire)) {
         const startPt = getAttachPoint(wire, 'start');
         const prev = idx === 0 ? startPt : wire.anchors[idx - 1];
-        const snapped = manhattanAxisSnap(prev, world.x, world.y, free);
+        const snapped = manhattanAxisSnap(prev, world.x, world.y);
         wire.anchors[idx] = snapped;
         x = snapped.x;
         y = snapped.y;
@@ -10393,6 +10472,7 @@
       powerBtn.classList.toggle('panel-snap-active', panelSnapMode);
       powerBtn.classList.remove('active');
     }
+    updateSelectedToolHover();
   }
 
   function togglePanelSnapMode() {
@@ -10653,6 +10733,8 @@
         accentThemeIndex,
         headerDitherEnabled,
         schematicWireColourEnabled,
+        wireAutoDelete,
+        wirePersist,
       }));
     } catch (_) { /* ignore */ }
   }
@@ -10673,6 +10755,8 @@
       if (typeof raw.schematicWireColourEnabled === 'boolean') {
         schematicWireColourEnabled = raw.schematicWireColourEnabled;
       }
+      if (typeof raw.wireAutoDelete === 'boolean') wireAutoDelete = raw.wireAutoDelete;
+      if (typeof raw.wirePersist === 'boolean') wirePersist = raw.wirePersist;
     } catch (_) { /* ignore */ }
   }
 
@@ -10813,7 +10897,7 @@
     const secondaryInput = document.createElement('input');
     secondaryInput.type = 'text';
     secondaryInput.className = 'asset-state-secondary-input';
-    secondaryInput.maxLength = 24;
+    secondaryInput.maxLength = 48;
     secondaryInput.placeholder = 'Optional line above…';
     secondaryInput.value = String(state.secondaryLabel || '');
     secondaryInput.spellcheck = false;
@@ -10970,22 +11054,24 @@
 
   function isToggleSwitchComponent(comp) {
     const id = comp?.dataset?.assetId;
-    if (id === 'dpdt' || id === 'dpdt-on-off-on' || id === 'dpdt-on-on') return true;
+    if (id === 'dpdt' || id === 'dpdt-on-off-on' || id === 'dpdt-on-on' || id === 'spst-on-off') return true;
     if (id === 'push-pot-on-on') return true;
     const template = GuitarAssets.getTemplate(id);
-    return !!template?.pushPull;
+    return !!(template?.pushPull || template?.switchThrow);
   }
 
   function getToggleSwitchThrow(comp) {
     const template = GuitarAssets.getTemplate(comp?.dataset?.assetId);
     if (template?.switchThrow) return template.switchThrow;
     const id = comp?.dataset?.assetId;
+    if (id === 'spst-on-off') return 'on-off';
     if (id === 'dpdt-on-off-on') return 'on-off-on';
     if (id === 'dpdt-on-on') return 'on-on';
     return 'on-on-on';
   }
 
   function getToggleSwitchThrowLabel(throwKind) {
+    if (throwKind === 'on-off') return 'ON-OFF';
     if (throwKind === 'on-off-on') return 'ON-OFF-ON';
     if (throwKind === 'on-on') return 'ON-ON';
     return 'ON-ON-ON';
@@ -11001,6 +11087,10 @@
 
   function isOnOnToggle(comp) {
     return isToggleSwitchComponent(comp) && getToggleSwitchThrow(comp) === 'on-on';
+  }
+
+  function isOnOffToggle(comp) {
+    return isToggleSwitchComponent(comp) && getToggleSwitchThrow(comp) === 'on-off';
   }
 
   /** ON-ON-ON middle: A closes all six poles via commons; B is Type-2 mirror.
@@ -11124,6 +11214,13 @@
 
   function setToggleSwitchType(el, type) {
     if (!el || !isToggleSwitchComponent(el)) return;
+    if (isOnOffToggle(el)) {
+      // SPST has no Type 1/2 polarity swap — keep stock On/Off bridges
+      el.dataset.switchType = '1';
+      refreshToggleSwitchVisuals(el);
+      notifySchematicCircuitChanged();
+      return;
+    }
     const next = type === 2 ? 2 : 1;
     el.dataset.switchType = String(next);
     applyToggleSwitchTypeWiring(el, next);
@@ -17883,7 +17980,7 @@
 
   function setAssetPlaceLabel(el, text) {
     if (!el) return;
-    const next = String(text ?? '').trim().slice(0, 12);
+    const next = String(text ?? '').trim().slice(0, 24);
     if (next) el.dataset.placeLabel = next;
     else delete el.dataset.placeLabel;
     updateAssetLabelBox(el);
@@ -17918,7 +18015,7 @@
       delete el.dataset.hoverLabel;
       const idx = GuitarAssets.getComponentStateIndex(el);
       if (legacy && states[idx] && !String(states[idx].label || '').trim()) {
-        states[idx].label = legacy.slice(0, 24);
+        states[idx].label = legacy.slice(0, 48);
       }
     }
     if (template?.hideStateLabel) {
@@ -17926,7 +18023,7 @@
         const sec = String(s.secondaryLabel || '').trim();
         const lab = s.label != null ? String(s.label).trim() : '';
         if (sec && !lab) {
-          s.label = sec.slice(0, 24);
+          s.label = sec.slice(0, 48);
           s.secondaryLabel = '';
         }
       });
@@ -17944,7 +18041,7 @@
 
   function setAssetHoverLabel(el, text) {
     if (!el) return;
-    const next = String(text ?? '').trim().slice(0, 24);
+    const next = String(text ?? '').trim().slice(0, 48);
     if (!assetHasStates(el)) {
       const template = GuitarAssets.getTemplate(el.dataset.assetId);
       if (!template) return;
@@ -18661,6 +18758,9 @@
       ? state.ifA
       : parseCurrentAmps(getComponentElectricalValue(comp, 'forwardCurrent'));
     const vs = Number.isFinite(state.vs) ? state.vs : NaN;
+    const intensity = Number.isFinite(state.intensity)
+      ? state.intensity
+      : computeLedGlowIntensity({ powered: state.powered, vs, vf, ifA });
     const out = new Map();
     if (Number.isFinite(state.ballastR)) {
       out.set('led-ballast', `R ≈ ${formatOhmsCompact(state.ballastR)} (Vs=${vs} V)`);
@@ -18677,7 +18777,59 @@
       const ifText = ifA >= 0.001 ? `${(ifA * 1000).toFixed(1)} mA` : `${ifA} A`;
       out.set('kirchhoff-current', `Series chain shares If ≈ ${ifText}`);
     }
+    const pct = Math.round(Math.max(0, Math.min(1, intensity)) * 100);
+    out.set('led-glow-intensity', state.powered
+      ? `Glow ≈ ${pct}%${Number.isFinite(vs) && Number.isFinite(vf) ? ` · headroom ${(vs - vf).toFixed(2)} V` : ''}`
+      : 'Glow off — no closed DC path');
     return out;
+  }
+
+  function buildLedGlowIntensityGuide(comp) {
+    const wrap = document.createElement('div');
+    wrap.className = 'led-glow-intensity-guide';
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-label', 'LED glow intensity');
+
+    const neighbors = buildDcConductiveNeighborMap();
+    const state = analyzeLedPowerState(comp, neighbors, null);
+    const intensity = Number.isFinite(state.intensity) ? state.intensity : 0;
+    const pct = Math.round(Math.max(0, Math.min(1, intensity)) * 100);
+
+    const title = document.createElement('div');
+    title.className = 'led-glow-intensity-title';
+    title.textContent = 'Glow intensity';
+
+    const track = document.createElement('div');
+    track.className = 'led-glow-intensity-track';
+    track.setAttribute('aria-hidden', 'true');
+    const fill = document.createElement('div');
+    fill.className = 'led-glow-intensity-fill';
+    fill.style.width = `${pct}%`;
+    const color = normalizeGlowColor(getComponentElectricalValue(comp, 'glowColor'), '#ff3b30');
+    fill.style.background = `linear-gradient(90deg, color-mix(in srgb, ${color} 35%, #222), ${color})`;
+    track.appendChild(fill);
+    for (let i = 1; i <= 4; i++) {
+      const tick = document.createElement('span');
+      tick.className = 'led-glow-intensity-tick';
+      tick.style.left = `${i * 20}%`;
+      track.appendChild(tick);
+    }
+
+    const read = document.createElement('div');
+    read.className = 'led-glow-intensity-readout';
+    read.textContent = state.powered ? `${pct}%` : 'Off';
+
+    const hint = document.createElement('div');
+    hint.className = 'led-glow-intensity-hint';
+    hint.textContent = state.powered
+      ? 'Relative brightness from Vs vs Vf headroom'
+      : 'Needs anode→P+ and cathode→return';
+
+    wrap.appendChild(title);
+    wrap.appendChild(track);
+    wrap.appendChild(read);
+    wrap.appendChild(hint);
+    return wrap;
   }
 
   /** Which cog-menu formulas the user has expanded (per selected asset). */
@@ -18778,7 +18930,14 @@
       }
       host.appendChild(el);
     });
-    syncAssetConfigFormulasToggle(formulas.length > 0);
+    if (isLedIndicatorComponent(comp)) {
+      try {
+        host.appendChild(buildLedGlowIntensityGuide(comp));
+      } catch (err) {
+        console.warn('LED intensity guide skipped', err);
+      }
+    }
+    syncAssetConfigFormulasToggle(formulas.length > 0 || isLedIndicatorComponent(comp));
   }
 
   function applyDiodeMaterial(el, {
@@ -20942,6 +21101,22 @@
     });
   }
 
+  /**
+   * World-space loom/fan (`.hb-world-leads`) and tip→lug lead wires do not move with
+   * the dual-coil DOM node. Refresh them whenever the body is translated so the
+   * 4-conductor loom stays attached during drag.
+   */
+  function refreshDualCoilLeadsForMovedComponents(compList) {
+    if (!compList?.length) return;
+    let any = false;
+    compList.forEach((comp) => {
+      if (!isDualCoilComponent(comp)) return;
+      any = true;
+      syncDualCoilTipAttachments(comp);
+    });
+    if (any) moveAllHbWorldLeads();
+  }
+
   function eachHbTipAttachmentPair(fn) {
     components.forEach((comp) => {
       if (!isDualCoilComponent(comp)) return;
@@ -21427,7 +21602,7 @@
 
     if (groundRow) groundRow.classList.toggle('hidden', isOutput || !comp);
     if (switchThrowRow) switchThrowRow.classList.toggle('hidden', !isToggle || !comp);
-    if (switchTypeRow) switchTypeRow.classList.toggle('hidden', !isToggle || !comp);
+    if (switchTypeRow) switchTypeRow.classList.toggle('hidden', !isToggle || !comp || isOnOffToggle(comp));
     if (potVariantRow) potVariantRow.classList.toggle('hidden', !showPotVariant || !comp);
     if (potTaperRow) potTaperRow.classList.toggle('hidden', !isPot || !comp);
     if (potDialRow) potDialRow.classList.toggle('hidden', !isPot || !comp);
@@ -21609,25 +21784,16 @@
     return [...selectedComponents][0];
   }
 
-  /** Counter-scale for workspace-mounted chrome so text stays sharp at any zoom. */
-  function workspaceUiCounterScale() {
-    const s = viewportScale();
-    return s > 1e-6 ? (1 / s) : 1;
-  }
-
   function ensureWorkspaceUiHost(el) {
     if (!el || !workspace) return;
     if (el.parentElement !== workspace) workspace.appendChild(el);
   }
 
   /**
-   * Pin cog menus in workspace coords next to the asset (like before), with
-   * scale(1/zoom) so they cancel the workspace CSS transform and stay sharp.
+   * Pin cog menus in workspace coords next to the asset (scale with the board).
    */
   function positionAssetConfigFloatingUi() {
     if (!assetConfigBtn || assetConfigBtn.classList.contains('hidden')) return;
-    const inv = workspaceUiCounterScale();
-    const scale = viewportScale();
     const btnLeft = parseFloat(assetConfigBtn.style.left) || 0;
     const btnTop = parseFloat(assetConfigBtn.style.top) || 0;
     const btnSize = ASSET_CONFIG_BTN_SIZE;
@@ -21636,30 +21802,13 @@
     if (assetConfigMenu && !assetConfigMenu.classList.contains('hidden')) {
       ensureWorkspaceUiHost(assetConfigMenu);
       assetConfigMenu.style.position = 'absolute';
-      assetConfigMenu.style.zIndex = '45';
+      assetConfigMenu.style.zIndex = '41';
       assetConfigMenu.style.right = '';
       assetConfigMenu.style.bottom = '';
-      assetConfigMenu.style.transformOrigin = 'top left';
-      assetConfigMenu.style.transform = `scale(${inv})`;
-
-      let left = btnLeft + btnSize + gap;
-      let top = btnTop;
-      assetConfigMenu.style.left = `${left}px`;
-      assetConfigMenu.style.top = `${top}px`;
-
-      const view = canvas?.getBoundingClientRect() || {
-        left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight,
-      };
-      let mr = assetConfigMenu.getBoundingClientRect();
-      if (mr.right > view.right - 8) {
-        left = btnLeft - gap - (mr.width / scale);
-        assetConfigMenu.style.left = `${left}px`;
-        mr = assetConfigMenu.getBoundingClientRect();
-      }
-      if (mr.bottom > view.bottom - 8) {
-        top = btnTop - Math.max(0, (mr.bottom - (view.bottom - 8)) / scale);
-        assetConfigMenu.style.top = `${Math.max(0, top)}px`;
-      }
+      assetConfigMenu.style.transform = '';
+      assetConfigMenu.style.transformOrigin = '';
+      assetConfigMenu.style.left = `${btnLeft + btnSize + gap}px`;
+      assetConfigMenu.style.top = `${Math.max(0, btnTop)}px`;
     }
 
     if (assetStateTermMenu && !assetStateTermMenu.classList.contains('hidden')) {
@@ -21670,8 +21819,6 @@
   function positionAssetStateTermMenuInWorkspace(anchorEl) {
     if (!assetStateTermMenu || assetStateTermMenu.classList.contains('hidden')) return;
     ensureWorkspaceUiHost(assetStateTermMenu);
-    const inv = workspaceUiCounterScale();
-    const scale = viewportScale();
     const btnLeft = parseFloat(assetConfigBtn?.style.left) || 0;
     const btnTop = parseFloat(assetConfigBtn?.style.top) || 0;
     const btnSize = ASSET_CONFIG_BTN_SIZE;
@@ -21686,29 +21833,13 @@
     }
 
     assetStateTermMenu.style.position = 'absolute';
-    assetStateTermMenu.style.zIndex = '46';
+    assetStateTermMenu.style.zIndex = '42';
     assetStateTermMenu.style.right = '';
     assetStateTermMenu.style.bottom = '';
-    assetStateTermMenu.style.transformOrigin = 'top left';
-    assetStateTermMenu.style.transform = `scale(${inv})`;
-
-    let left = btnLeft + btnSize + gap;
-    assetStateTermMenu.style.left = `${left}px`;
-    assetStateTermMenu.style.top = `${top}px`;
-
-    const view = canvas?.getBoundingClientRect() || {
-      left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight,
-    };
-    let mr = assetStateTermMenu.getBoundingClientRect();
-    if (mr.right > view.right - 8) {
-      left = btnLeft - gap - (mr.width / scale);
-      assetStateTermMenu.style.left = `${left}px`;
-      mr = assetStateTermMenu.getBoundingClientRect();
-    }
-    if (mr.bottom > view.bottom - 8) {
-      top -= Math.max(0, (mr.bottom - (view.bottom - 8)) / scale);
-      assetStateTermMenu.style.top = `${Math.max(0, top)}px`;
-    }
+    assetStateTermMenu.style.transform = '';
+    assetStateTermMenu.style.transformOrigin = '';
+    assetStateTermMenu.style.left = `${btnLeft + btnSize + gap}px`;
+    assetStateTermMenu.style.top = `${Math.max(0, top)}px`;
   }
 
   function restoreAssetConfigMenuHost() {
@@ -22932,6 +23063,7 @@
             : `Click start point for wire (Layer ${activeLayer})`
           : 'Ready'
     );
+    updateSelectedToolHover();
   }
 
   function setPlacementMode(mode) {
@@ -22976,6 +23108,7 @@
             }, then end terminal`
         : 'Ready'
     );
+    updateSelectedToolHover();
   }
 
   function setEraseMode(active) {
@@ -22997,6 +23130,7 @@
     } else if (!wireMode) {
       setStatus('Ready');
     }
+    updateSelectedToolHover();
   }
 
   function eraseHitAtClient(clientX, clientY) {
@@ -23274,13 +23408,12 @@
 
   function updatePreviewLine(clientX, clientY) {
     if (!wireDraftStart) return;
-    const free = false;
     let end = clientToWorld(clientX, clientY);
     if (wireRouteMode === 'manhattan') {
       const prev = wireDraftAnchors.length
         ? wireDraftAnchors[wireDraftAnchors.length - 1]
         : { x: wireDraftStart.x, y: wireDraftStart.y };
-      end = manhattanAxisSnap(prev, end.x, end.y, free);
+      end = manhattanAxisSnap(prev, end.x, end.y);
     }
     let pts = [
       { x: wireDraftStart.x, y: wireDraftStart.y },
@@ -23504,17 +23637,17 @@
     return true;
   }
 
-  /** Snap a draft/bend point to horizontal or vertical from `prev`. */
-  function manhattanAxisSnap(prev, x, y, free) {
+  /** Snap a draft/bend point to horizontal or vertical from `prev` (cursor XY, no grid lock). */
+  function manhattanAxisSnap(prev, x, y) {
     if (!prev || !Number.isFinite(prev.x) || !Number.isFinite(prev.y)) {
-      return { x: snapWorkspace(x, free), y: snapWorkspace(y, free) };
+      return { x, y };
     }
     const dx = Math.abs(x - prev.x);
     const dy = Math.abs(y - prev.y);
     if (dx >= dy) {
-      return { x: snapWorkspace(x, free), y: prev.y };
+      return { x, y: prev.y };
     }
-    return { x: prev.x, y: snapWorkspace(y, free) };
+    return { x: prev.x, y };
   }
 
   /**
@@ -24541,25 +24674,63 @@
     reportGroundingStatus(n === 1 ? 'Deleted' : `Deleted ${n} items`);
   }
 
+  function detachWireEndpoint(wire, which) {
+    const ep = which === 'start' ? wire.start : wire.end;
+    if (!ep?.terminal) return false;
+    const pt = getAttachPoint(wire, which);
+    unregisterTerminalWire(ep.terminal, wire.id);
+    ep.terminal = null;
+    ep.x = pt.x;
+    ep.y = pt.y;
+    return true;
+  }
+
+  function countWireTerminalConnections(wire) {
+    let n = 0;
+    if (wire?.start?.terminal && document.body.contains(wire.start.terminal)) n += 1;
+    if (wire?.end?.terminal && document.body.contains(wire.end.terminal)) n += 1;
+    return n;
+  }
+
   function removeWiresForComponent(compEl) {
-    const terminals = compEl.querySelectorAll('.terminal');
-    const toRemove = [];
-    wires.forEach((wire, id) => {
-      for (const t of terminals) {
-        if (wire.start.terminal === t || wire.end.terminal === t) {
-          toRemove.push(id);
-          break;
-        }
+    const terminals = new Set([...compEl.querySelectorAll('.terminal')]);
+    const touched = [];
+    wires.forEach((wire) => {
+      const hitStart = terminals.has(wire.start?.terminal);
+      const hitEnd = terminals.has(wire.end?.terminal);
+      if (!hitStart && !hitEnd) return;
+      touched.push({ wire, hitStart, hitEnd });
+    });
+
+    if (wireAutoDelete) {
+      touched.forEach(({ wire }) => discardWire(wire));
+      return;
+    }
+
+    touched.forEach(({ wire, hitStart, hitEnd }) => {
+      if (hitStart) detachWireEndpoint(wire, 'start');
+      if (hitEnd) detachWireEndpoint(wire, 'end');
+      const n = countWireTerminalConnections(wire);
+      // Keep when ≥1 terminal remains; orphan free wires only if wire persist is on
+      if (n === 0 && !wirePersist) {
+        discardWire(wire);
+      } else {
+        updateWirePosition(wire);
       }
     });
-    toRemove.forEach((id) => {
-      const wire = wires.get(id);
-      unregisterTerminalWire(wire.start.terminal, id);
-      unregisterTerminalWire(wire.end.terminal, id);
-      if (selectedWireGroups.has(wire.group)) selectedWireGroups.delete(wire.group);
-      wire.group.remove();
-      wires.delete(id);
-    });
+  }
+
+  function finishWireDraftAt(endpoint) {
+    if (!wireDraftStart || !endpoint) return false;
+    let finishAnchors = wireDraftAnchors;
+    if (wireRouteMode === 'manhattan') {
+      finishAnchors = finalizeManhattanDraftAnchors(wireDraftStart, endpoint, wireDraftAnchors);
+    }
+    createWire(wireDraftStart, endpoint, finishAnchors);
+    cancelWireDraft();
+    clearSnapState();
+    reportGroundingStatus(`Wire on Layer ${activeLayer} — click for next wire`);
+    return true;
   }
 
   function handleWireCanvasClick(e) {
@@ -24568,6 +24739,10 @@
     const endpoint = resolveEndpoint(getEndpointFromEvent(e));
 
     if (!wireDraftStart) {
+      if (!endpoint.terminal && !wirePersist) {
+        setStatus('Wire persist off — click a terminal to start (or enable Wire persist)');
+        return true;
+      }
       wireDraftStart = endpoint;
       wireDraftAnchors = [];
       clearSnapState();
@@ -24578,21 +24753,28 @@
             ? 'Click canvas for orthogonal corners, or a terminal to finish'
             : 'Click canvas for curve anchors, or a terminal to finish')
           : (wireRouteMode === 'manhattan'
-            ? 'Click orthogonal corners, then a terminal to finish'
-            : 'Click anchors to route, then a terminal to finish')
+            ? 'Click orthogonal corners — double-click or Enter to finish free end'
+            : 'Click anchors — double-click or Enter to finish free end')
       );
       return true;
     }
 
     if (endpoint.terminal) {
-      let finishAnchors = wireDraftAnchors;
+      finishWireDraftAt(endpoint);
+      return true;
+    }
+
+    // Wire persist: double-click empty canvas finishes a free end
+    if (wirePersist && e.detail >= 2) {
+      let endPt = endpoint;
       if (wireRouteMode === 'manhattan') {
-        finishAnchors = finalizeManhattanDraftAnchors(wireDraftStart, endpoint, wireDraftAnchors);
+        const prev = wireDraftAnchors.length
+          ? wireDraftAnchors[wireDraftAnchors.length - 1]
+          : { x: wireDraftStart.x, y: wireDraftStart.y };
+        const snapped = manhattanAxisSnap(prev, endpoint.x, endpoint.y);
+        endPt = { x: snapped.x, y: snapped.y, terminal: null };
       }
-      createWire(wireDraftStart, endpoint, finishAnchors);
-      cancelWireDraft();
-      clearSnapState();
-      reportGroundingStatus(`Wire on Layer ${activeLayer} — click for next wire`);
+      finishWireDraftAt(endPt);
       return true;
     }
 
@@ -24603,7 +24785,7 @@
     let ax;
     let ay;
     if (wireRouteMode === 'manhattan') {
-      const snapped = manhattanAxisSnap(prev, endpoint.x, endpoint.y, free);
+      const snapped = manhattanAxisSnap(prev, endpoint.x, endpoint.y);
       ax = snapped.x;
       ay = snapped.y;
     } else {
@@ -24620,8 +24802,12 @@
     updatePreviewLine(e.clientX, e.clientY);
     setStatus(
       wireRouteMode === 'manhattan'
-        ? `Corner ${wireDraftAnchors.length} set — click more corners, or a terminal to finish (Esc cancels)`
-        : `Anchor ${wireDraftAnchors.length} set — click more anchors, or a terminal to finish (Esc cancels)`
+        ? `Corner ${wireDraftAnchors.length} set — click more corners, or a terminal to finish${
+            wirePersist ? ' · double-click / Enter for free end' : ''
+          } (Esc cancels)`
+        : `Anchor ${wireDraftAnchors.length} set — click more anchors, or a terminal to finish${
+            wirePersist ? ' · double-click / Enter for free end' : ''
+          } (Esc cancels)`
     );
     return true;
   }
@@ -24658,14 +24844,7 @@
             : 'Click canvas for curve anchors, or a terminal to finish'
         );
       } else {
-        let finishAnchors = wireDraftAnchors;
-        if (wireRouteMode === 'manhattan') {
-          finishAnchors = finalizeManhattanDraftAnchors(wireDraftStart, endpoint, wireDraftAnchors);
-        }
-        createWire(wireDraftStart, endpoint, finishAnchors);
-        cancelWireDraft();
-        clearSnapState();
-        reportGroundingStatus(`Wire on Layer ${activeLayer} — click for next wire`);
+        finishWireDraftAt(endpoint);
       }
     });
   }
@@ -25442,6 +25621,9 @@
         // Selected wires translate rigidly with assets (ends + bend midpoints)
         if (wireSnapshot) applyWireTranslateSnapshots(wireSnapshot, dx, dy);
 
+        // Dual-coil 4-conductor loom lives in world SVG — keep it glued while the body moves
+        refreshDualCoilLeadsForMovedComponents(dragTargets);
+
         // Coalesce expensive wire/chrome work — full flush on pointer up.
         scheduleViewportHeavyUpdate();
       }
@@ -25477,6 +25659,7 @@
         if (isDragging) {
           dragTargets.forEach((c) => c.classList.remove('dragging'));
           if (wiresDetached && wireSnapshot) restoreWireTerminalsAfterTranslate(wireSnapshot);
+          refreshDualCoilLeadsForMovedComponents(dragTargets);
           flushViewportHeavyUpdate();
           markProjectDirty();
           refreshLightningWireGlow();
@@ -25970,6 +26153,80 @@
   btnDashed.addEventListener('click', () => setWireStyle('dashed'));
   btnRouteFree?.addEventListener('click', () => setWireRouteMode('free'));
   btnRouteManhattan?.addEventListener('click', () => setWireRouteMode('manhattan'));
+
+  (function bindWireSettingsMenu() {
+    const btn = document.getElementById('btn-wire-settings');
+    const panel = document.getElementById('wire-settings-panel');
+    const autoBtn = document.getElementById('wire-setting-auto-delete');
+    const persistBtn = document.getElementById('wire-setting-persist');
+    const autoState = document.getElementById('wire-setting-auto-delete-state');
+    const persistState = document.getElementById('wire-setting-persist-state');
+    if (!btn || !panel) return;
+
+    function syncWireSettingsUi() {
+      if (autoBtn) {
+        autoBtn.setAttribute('aria-pressed', wireAutoDelete ? 'true' : 'false');
+        if (autoState) autoState.textContent = wireAutoDelete ? 'On' : 'Off';
+      }
+      if (persistBtn) {
+        persistBtn.setAttribute('aria-pressed', wirePersist ? 'true' : 'false');
+        if (persistState) persistState.textContent = wirePersist ? 'On' : 'Off';
+      }
+    }
+
+    function setWireSettingsOpen(open) {
+      panel.classList.toggle('hidden', !open);
+      panel.hidden = !open;
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    window.syncWireSettingsUi = syncWireSettingsUi;
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setWireSettingsOpen(panel.hidden);
+    });
+    panel.addEventListener('mousedown', (e) => e.stopPropagation());
+    panel.addEventListener('click', (e) => e.stopPropagation());
+
+    autoBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      wireAutoDelete = !wireAutoDelete;
+      syncWireSettingsUi();
+      saveUiPrefs();
+      setStatus(
+        wireAutoDelete
+          ? 'Wire auto-delete ON — deleting an asset removes its attached wires'
+          : 'Wire auto-delete OFF — wires stay if ≥1 terminal remains'
+      );
+    });
+    persistBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      wirePersist = !wirePersist;
+      syncWireSettingsUi();
+      saveUiPrefs();
+      setStatus(
+        wirePersist
+          ? 'Wire persist ON — start/finish wires on empty canvas (double-click or Enter)'
+          : 'Wire persist OFF — wires must start and finish on terminals'
+      );
+    });
+
+    document.addEventListener('mousedown', (e) => {
+      if (panel.hidden) return;
+      if (panel.contains(e.target) || btn.contains(e.target)) return;
+      setWireSettingsOpen(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || panel.hidden) return;
+      setWireSettingsOpen(false);
+    });
+
+    syncWireSettingsUi();
+  })();
 
   btnLayerVisibility.addEventListener('click', toggleLayerVisibility);
   btnLayerFront.addEventListener('click', () => setLayerAbove(activeLayer, true));
@@ -27391,7 +27648,23 @@
     GuitarAssets.showContextMenu(e.clientX, e.clientY, comp);
   });
 
+  // Block middle-click autoscroll / auxclick side effects so MMB can pan
+  canvas.addEventListener('auxclick', (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
+
   canvas.addEventListener('mousedown', (e) => {
+    // Middle mouse = pan (Electronics + Panel share #canvas)
+    if (e.button === 1) {
+      e.preventDefault();
+      e.stopPropagation();
+      startSpacePanDrag(e.clientX, e.clientY);
+      canvas.focus();
+      return;
+    }
     if (spacePanHeld && e.button === 0) {
       e.preventDefault();
       e.stopPropagation();
@@ -27647,6 +27920,19 @@
         return;
       }
       if (isTypingTarget() || isEditorOpen()) return;
+      if (wireMode && wireDraftStart && wirePersist) {
+        e.preventDefault();
+        let endPt = resolveEndpoint({ type: 'point', clientX: lastPointerX, clientY: lastPointerY });
+        if (wireRouteMode === 'manhattan') {
+          const prev = wireDraftAnchors.length
+            ? wireDraftAnchors[wireDraftAnchors.length - 1]
+            : { x: wireDraftStart.x, y: wireDraftStart.y };
+          const snapped = manhattanAxisSnap(prev, endPt.x, endPt.y);
+          endPt = { x: snapped.x, y: snapped.y, terminal: null };
+        }
+        finishWireDraftAt(endPt);
+        return;
+      }
       if (dimTool && dimTool.phase !== 'done') return;
       if (moveTool) return;
       // Group +/- edit: Enter confirms the current selection
@@ -28324,10 +28610,10 @@
         applyPotCaseGroundFromRecord(el, compData);
         applySwitchCaseGroundFromRecord(el, compData);
         if (compData.placeLabel != null && String(compData.placeLabel).trim() !== '') {
-          el.dataset.placeLabel = String(compData.placeLabel).trim().slice(0, 12);
+          el.dataset.placeLabel = String(compData.placeLabel).trim().slice(0, 24);
         }
         if (compData.hoverLabel != null && String(compData.hoverLabel).trim() !== '') {
-          el.dataset.hoverLabel = String(compData.hoverLabel).trim().slice(0, 24);
+          el.dataset.hoverLabel = String(compData.hoverLabel).trim().slice(0, 48);
         }
         applyBobbinGeometryFromRecord(el, compData);
         applyHbLeadData(el, compData);
@@ -28842,10 +29128,10 @@
       applyPotCaseGroundFromRecord(el, compData);
       applySwitchCaseGroundFromRecord(el, compData);
       if (compData.placeLabel != null && String(compData.placeLabel).trim() !== '') {
-        el.dataset.placeLabel = String(compData.placeLabel).trim().slice(0, 12);
+        el.dataset.placeLabel = String(compData.placeLabel).trim().slice(0, 24);
       }
       if (compData.hoverLabel != null && String(compData.hoverLabel).trim() !== '') {
-        el.dataset.hoverLabel = String(compData.hoverLabel).trim().slice(0, 24);
+        el.dataset.hoverLabel = String(compData.hoverLabel).trim().slice(0, 48);
       }
       applyBobbinGeometryFromRecord(el, compData);
       applyHbLeadData(el, compData);
@@ -29833,7 +30119,7 @@
       if (id === 'tube-6v6' || subtype === 'tube-6v6') return 'tube-power';
       return 'tube-dual';
     }
-    if (subtype === 'ninevolt' || id === 'ninevolt') return 'battery';
+    if (subtype === 'ninevolt' || id === 'ninevolt') return 'supply';
     if (subtype === 'dc-jack' || id === 'dc-jack') return 'dc-jack';
     if (subtype === 'heater-supply' || id === 'heater-supply') return 'heater-supply';
     if (subtype === 'hv-supply' || id === 'hv-supply') return 'hv-supply';
@@ -29847,7 +30133,8 @@
     if (subtype === 'monooutput' || id === 'mono-output') return 'jack';
     if (subtype === 'stereooutput' || id === 'stereo-output') return 'jack-stereo';
     if (subtype === 'dpdt' || subtype === 'dpdt-on-off-on' || subtype === 'dpdt-on-on'
-      || id === 'dpdt' || id === 'dpdt-on-off-on' || id === 'dpdt-on-on') {
+      || subtype === 'spst-on-off'
+      || id === 'dpdt' || id === 'dpdt-on-off-on' || id === 'dpdt-on-on' || id === 'spst-on-off') {
       return 'switch';
     }
     return 'generic';
@@ -33823,6 +34110,7 @@
         { name: '[[Q]] / [[E]]', description: 'Cycle asset state' },
         { name: '[[Delete]] / [[Backspace]]', description: 'Delete selection' },
         { name: '[[Space]] + drag', description: 'Pan' },
+        { name: 'Middle mouse drag', description: 'Pan' },
         { name: '[[+]] / [[−]]', description: 'Rotate or wire slack' },
         { name: '[[1]] – [[9]]', description: 'Wire layer' },
         { name: '[[Enter]]', description: 'Text command' },
@@ -33880,6 +34168,7 @@
   initLayerUI();
   initPanelLayerUI();
   loadUiPrefs();
+  if (typeof window.syncWireSettingsUi === 'function') window.syncWireSettingsUi();
   applyAccentTheme(accentThemeIndex);
   applyUiScalePrefs();
   applyColorblindMode(colorblindMode);
@@ -33965,6 +34254,7 @@
   resizeWireStacks();
   applyViewport();
   refreshCircuitFaultWarning();
+  updateAlignBar();
   canvas.focus();
 
   function terminalByRole(comp, role) {

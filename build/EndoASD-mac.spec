@@ -66,8 +66,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleDisplayName': 'Endo Audio Schematic Editor',
         'CFBundleName': 'EndoASD',
-        'CFBundleShortVersionString': '1.0.568',
-        'CFBundleVersion': '568',
+        'CFBundleShortVersionString': '1.0.569',
+        'CFBundleVersion': '569',
         'NSHighResolutionCapable': True,
         'LSUIElement': False,
     },

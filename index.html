@@ -7,8 +7,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Endo Audio Schematic Editor</title>
   <link rel="icon" type="image/png" href="assets/app-icon.png">
-  <link rel="stylesheet" id="app-gate-style" href="gate.css?v=568">
-  <link rel="stylesheet" href="styles.css?v=568">
+  <link rel="stylesheet" id="app-gate-style" href="gate.css?v=569">
+  <link rel="stylesheet" href="styles.css?v=569">
 </head>
 <body>
   <div
@@ -37,7 +37,7 @@
         aria-label="Click to record bugs"
       >
         <span class="bugtest-badge__title" data-bugtest-title>Bugtest Ver.</span>
-        <span class="bugtest-badge__build" data-bugtest-build>568</span>
+        <span class="bugtest-badge__build" data-bugtest-build>569</span>
       </button>
       <button
         type="button"
@@ -126,6 +126,7 @@
     </div>
     <header class="toolbar">
       <div class="toolbar-actions">
+      <div id="electronics-toolbar" class="electronics-toolbar" role="group" aria-label="Electronics tools">
       <div class="wire-tool-stack">
         <button type="button" id="btn-wire" class="tool-btn tool-btn-wire" title="Wire" aria-label="Wire">
           <svg class="draw-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -156,17 +157,57 @@
             </svg>
           </button>
         </div>
-        <div class="wire-route-group" role="group" aria-label="Wire route style">
-          <button type="button" id="btn-route-free" class="tool-btn style-btn route-btn active" data-route="free" title="Freeform wire (smooth bends)" aria-label="Freeform wire" aria-pressed="true">
-            <svg class="route-btn-icon" viewBox="0 0 24 14" aria-hidden="true" focusable="false">
-              <path d="M2 11 C7 11 8 3 12 3 S17 11 22 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            </svg>
-          </button>
-          <button type="button" id="btn-route-manhattan" class="tool-btn style-btn route-btn" data-route="manhattan" title="Manhattan wire (orthogonal + soft fillets)" aria-label="Manhattan wire" aria-pressed="false">
-            <svg class="route-btn-icon" viewBox="0 0 24 14" aria-hidden="true" focusable="false">
-              <path d="M2 11 H10 Q12 11 12 9 V5 Q12 3 14 3 H22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-          </button>
+        <div class="wire-route-row">
+          <div class="wire-route-group" role="group" aria-label="Wire route style">
+            <button type="button" id="btn-route-free" class="tool-btn style-btn route-btn active" data-route="free" title="Freeform wire (smooth bends)" aria-label="Freeform wire" aria-pressed="true">
+              <svg class="route-btn-icon" viewBox="0 0 24 14" aria-hidden="true" focusable="false">
+                <path d="M2 11 C7 11 8 3 12 3 S17 11 22 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <button type="button" id="btn-route-manhattan" class="tool-btn style-btn route-btn" data-route="manhattan" title="Manhattan wire (orthogonal + soft fillets)" aria-label="Manhattan wire" aria-pressed="false">
+              <svg class="route-btn-icon" viewBox="0 0 24 14" aria-hidden="true" focusable="false">
+                <path d="M2 11 H10 Q12 11 12 9 V5 Q12 3 14 3 H22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+          <div class="wire-settings" id="wire-settings">
+            <button
+              type="button"
+              id="btn-wire-settings"
+              class="tool-btn wire-settings-cog"
+              title="Wire settings"
+              aria-label="Wire settings"
+              aria-expanded="false"
+              aria-controls="wire-settings-panel"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M12 8.6a3.4 3.4 0 1 0 0 6.8 3.4 3.4 0 0 0 0-6.8z" fill="none" stroke="currentColor" stroke-width="1.7"/>
+                <path d="M19.4 13a7.6 7.6 0 0 0 .1-1l2-1.5-2-3.4-2.4 1a7.7 7.7 0 0 0-1.7-1l-.4-2.5h-4l-.4 2.5a7.7 7.7 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.5a7.6 7.6 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7.7 7.7 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7.7 7.7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <div id="wire-settings-panel" class="wire-settings-panel hidden" role="dialog" aria-label="Wire settings" hidden>
+              <button
+                type="button"
+                id="wire-setting-auto-delete"
+                class="wire-settings-toggle"
+                aria-pressed="false"
+                title="When on, deleting an asset also deletes wires attached to it"
+              >
+                <span class="wire-settings-toggle-label">Wire auto-delete</span>
+                <span class="wire-settings-toggle-state" id="wire-setting-auto-delete-state">Off</span>
+              </button>
+              <button
+                type="button"
+                id="wire-setting-persist"
+                class="wire-settings-toggle"
+                aria-pressed="false"
+                title="When on, wires can start and finish on empty canvas (no terminal required)"
+              >
+                <span class="wire-settings-toggle-label">Wire persist</span>
+                <span class="wire-settings-toggle-state" id="wire-setting-persist-state">Off</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="wire-colors" role="group" aria-label="Wire colour">
@@ -178,6 +219,36 @@
         <button type="button" class="color-swatch" data-color="red" title="Red" aria-label="Red"></button>
         <button type="button" class="color-swatch" data-color="blue" title="Blue" aria-label="Blue"></button>
       </div>
+      </div>
+      <div id="panel-curve-tools" class="panel-curve-tools" role="group" aria-label="Panel CAD tools" hidden>
+        <button type="button" id="btn-panel-line" class="tool-btn panel-curve-btn" data-panel-curve="line" title="Line — continuous until Esc" aria-pressed="false" aria-label="Line">
+          <svg class="panel-curve-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <line x1="4" y1="18" x2="20" y2="6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button type="button" id="btn-panel-pline" class="tool-btn panel-curve-btn" data-panel-curve="polyline" title="Polyline — Enter to place, Esc to cancel" aria-pressed="false" aria-label="Polyline">
+          <svg class="panel-curve-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <polyline points="4,18 10,8 16,14 20,6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <button type="button" id="btn-panel-arc" class="tool-btn panel-curve-btn" data-panel-curve="arc" title="Arc — 3 points, continuous" aria-pressed="false" aria-label="Arc">
+          <svg class="panel-curve-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M5 17 A 10 10 0 0 1 19 8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button type="button" id="btn-panel-spline" class="tool-btn panel-curve-btn" data-panel-curve="spline" title="Spline / NURBS — Enter to place" aria-pressed="false" aria-label="Spline">
+          <svg class="panel-curve-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M4 16 C8 16 8 6 12 6 S16 16 20 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button type="button" id="btn-panel-ortho" class="tool-btn panel-curve-btn panel-ortho-btn" data-panel-ortho="1" title="Ortho — lock to 90°" aria-pressed="false" aria-label="Ortho">
+          <svg class="panel-curve-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M5 19 V5 M5 19 H19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <path d="M5 12 H12 V5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.55"/>
+          </svg>
+        </button>
+      </div>
+
       </div>
     </header>
     <div class="app-settings" id="app-settings">
@@ -216,6 +287,16 @@
             >
               <span class="app-settings-toggle-label">Header dither</span>
               <span class="app-settings-toggle-state" id="settings-header-dither-state">Off</span>
+            </button>
+            <button
+              type="button"
+              id="settings-light-grid"
+              class="app-settings-toggle-btn"
+              aria-pressed="false"
+              title="Rhino-style light grid"
+            >
+              <span class="app-settings-toggle-label">Light grid</span>
+              <span class="app-settings-toggle-state" id="settings-light-grid-state">Off</span>
             </button>
           </div>
         </details>
@@ -419,6 +500,12 @@
       </div>
     </div>
     <div id="workspace" class="workspace">
+      <svg id="workspace-grid-rulers" class="workspace-grid-rulers" aria-hidden="true" overflow="visible">
+        <g id="workspace-ruler-h" class="workspace-ruler-world workspace-ruler-world-h"></g>
+        <g id="workspace-ruler-v" class="workspace-ruler-world workspace-ruler-world-v"></g>
+        <rect id="ruler-corner" class="workspace-ruler-world-corner" x="0" y="0" width="14" height="14" title="Toggle rulers"/>
+      </svg>
+      <svg id="panel-curves" class="panel-curves-stack" aria-hidden="true" overflow="visible"></svg>
       <svg id="wires-below" class="wire-stack below" aria-hidden="true"></svg>
       <svg id="wires-above" class="wire-stack above" aria-hidden="true"></svg>
       <div id="marquee-box" class="marquee-box hidden" aria-hidden="true"></div>
@@ -491,7 +578,7 @@
             <span class="asset-config-ground-label">Needs <span class="grounding-pulse">GROUNDING</span>?</span>
           </label>
           <div id="asset-config-dimensional-controls" class="asset-config-dimensional-controls hidden">
-            <button type="button" id="asset-config-dimensional-btn" class="asset-config-dimensional-btn" aria-expanded="false" aria-controls="asset-config-bobbin-section" title="Dimensional configuration">
+            <button type="button" id="asset-config-dimensional-btn" class="asset-config-dimensional-btn" aria-expanded="false" aria-controls="dimensional-config-menu" title="Dimensional configuration">
               <span class="asset-config-dimensional-label">Dimensional Configuration</span>
               <span class="asset-config-dimensional-chevron" aria-hidden="true">▾</span>
             </button>
@@ -537,11 +624,11 @@
         </div>
         <div id="asset-config-place-label-row" class="asset-config-switch-type-row hidden">
           <span class="asset-config-field-label">Label</span>
-          <input id="asset-config-place-label" class="asset-config-field-input" type="text" maxlength="12" autocomplete="off" spellcheck="false" aria-label="Body label on asset" placeholder="e.g. SC">
+          <input id="asset-config-place-label" class="asset-config-field-input" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-label="Body label on asset" placeholder="e.g. SC">
         </div>
         <div id="asset-config-hover-label-row" class="asset-config-switch-type-row hidden">
           <span class="asset-config-field-label">Hover</span>
-          <input id="asset-config-hover-label" class="asset-config-field-input" type="text" maxlength="24" autocomplete="off" spellcheck="false" aria-label="State hover label above asset" placeholder="e.g. Neck">
+          <input id="asset-config-hover-label" class="asset-config-field-input" type="text" maxlength="96" autocomplete="off" spellcheck="false" aria-label="State hover label above asset" placeholder="e.g. Neck / Phase Rev">
         </div>
         <div id="asset-config-tube-pinout-row" class="asset-config-tube-pinout-row hidden">
           <span class="asset-config-field-label">Pinout</span>
@@ -561,6 +648,250 @@
           <select id="asset-config-resistor-type" class="asset-config-resistor-type" aria-label="Resistor type preset"></select>
           <div id="asset-config-resistor-info" class="asset-config-diode-info" aria-live="polite"></div>
         </div>
+        <div id="asset-config-pot-dial-row" class="asset-config-pot-dial-row hidden">
+          <div
+            id="asset-config-pot-dial"
+            class="pot-dial pot-dial--config"
+            role="slider"
+            aria-label="Potentiometer shaft"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            tabindex="0"
+          >
+            <div class="pot-dial-knob">
+              <svg class="pot-dial-svg" viewBox="0 0 36 36" aria-hidden="true" focusable="false">
+                <circle class="pot-dial-ring" cx="18" cy="18" r="14" />
+                <g class="pot-dial-needle-g">
+                  <line class="pot-dial-needle" x1="18" y1="18" x2="18" y2="6" />
+                </g>
+                <circle class="pot-dial-hub" cx="18" cy="18" r="2.2" />
+              </svg>
+            </div>
+            <span class="pot-dial-pct">100%</span>
+          </div>
+        </div>
+        <button type="button" id="asset-config-formulas-btn" class="asset-config-formulas-btn hidden" aria-expanded="false" aria-controls="asset-config-formula-host" title="Formulas">
+          <span class="asset-config-formulas-label">Formulas</span>
+          <span class="asset-config-formulas-chevron" aria-hidden="true">▾</span>
+        </button>
+        <div id="asset-config-formula-host" class="asset-config-formula-host hidden" aria-live="polite"></div>
+        <div id="asset-config-value-fields" class="asset-config-value-fields"></div>
+        <label id="asset-config-flash-row" class="asset-config-ground-row hidden">
+          <input type="checkbox" id="asset-config-flashing" class="asset-config-ground-toggle" checked>
+          <span class="asset-config-ground-label">Visual Flashing</span>
+        </label>
+        <div id="asset-config-hb-wiring-row" class="asset-config-switch-type-row hidden">
+          <span class="asset-config-field-label">HB wiring</span>
+          <select id="asset-config-hb-wiring" class="asset-config-switch-type" aria-label="Humbucker wiring mode" title="Stock series bonds N↔R and S+G like a factory 4-conductor humbucker. Independent leads keeps all five tips free for coil-split / parallel.">
+            <option value="series">Stock series (N↔R, S+G)</option>
+            <option value="leads">Independent leads</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div id="snap-indicator" class="snap-indicator hidden" aria-hidden="true">
+      <svg class="snap-indicator-cross" viewBox="-12 -12 24 24" aria-hidden="true" focusable="false">
+        <!-- Origin-centered plus: outline then core (symmetric about 0,0) -->
+        <line class="snap-indicator-cross-outline" x1="0" y1="-11" x2="0" y2="11" />
+        <line class="snap-indicator-cross-outline" x1="-11" y1="0" x2="11" y2="0" />
+        <line class="snap-indicator-cross-core" x1="0" y1="-11" x2="0" y2="11" />
+        <line class="snap-indicator-cross-core" x1="-11" y1="0" x2="11" y2="0" />
+      </svg>
+    </div>
+  </main>
+
+  <div class="workspace-layer-rail" role="group" aria-label="Wire layers">
+    <div class="workspace-layer-stack" role="group" aria-label="Layer stack">
+      <button type="button" id="btn-layer-front" class="workspace-layer-stack-btn" title="Active layer above components" aria-label="Front">
+        <span class="workspace-layer-stack-mark" aria-hidden="true">↑</span>
+        <span class="workspace-layer-stack-label">Front</span>
+      </button>
+      <button type="button" id="btn-layer-back" class="workspace-layer-stack-btn" title="Active layer behind components" aria-label="Back">
+        <span class="workspace-layer-stack-mark" aria-hidden="true">↓</span>
+        <span class="workspace-layer-stack-label">Back</span>
+      </button>
+    </div>
+    <div class="layer-buttons" id="layer-buttons" role="tablist" aria-label="Wire layer"></div>
+    <button
+      type="button"
+      id="btn-layer-add"
+      class="workspace-layer-add"
+      title="Add layer"
+      aria-label="Add layer"
+    >+</button>
+    <div class="workspace-layer-tools">
+      <button
+        type="button"
+        id="btn-layer-visibility"
+        class="workspace-layer-visibility"
+        title="Hide layer"
+        aria-label="Hide layer"
+        aria-pressed="true"
+      >
+        <svg class="workspace-page-eye workspace-page-eye-open" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+          <circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+        </svg>
+        <svg class="workspace-page-eye workspace-page-eye-closed hidden" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+          <circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
+          <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <button
+        type="button"
+        id="btn-layer-help"
+        class="workspace-layer-help"
+        title="Layer help"
+        aria-label="Layer help"
+        aria-expanded="false"
+        aria-controls="layer-help-popup"
+      >?</button>
+    </div>
+    <div id="layer-help-popup" class="layer-help-popup hidden" role="dialog" aria-label="Layer help" hidden>
+      <p>
+        Open this tip anytime with
+        <span class="help-btn help-btn--q" aria-hidden="true">?</span>
+        beside the wire layers.
+      </p>
+      <p>Double-click a layer to rename or delete it.</p>
+      <p>
+        <kbd class="kbd">Mouse&nbsp;4</kbd>
+        or
+        <kbd class="kbd">↓</kbd>
+        sends the active layer back.
+        <kbd class="kbd">Mouse&nbsp;5</kbd>
+        or
+        <kbd class="kbd">↑</kbd>
+        brings it to the front.
+      </p>
+      <p>
+        <kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>
+        select the active wire layer.
+        <kbd class="kbd">Shift</kbd>+<kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>
+        select a panel layer instead.
+      </p>
+    </div>
+    <div id="layer-edit-menu" class="layer-edit-menu hidden" role="dialog" aria-label="Edit layer" hidden>
+      <label class="layer-edit-field">Title
+        <input type="text" id="layer-edit-title" class="layer-edit-title-input" maxlength="24" autocomplete="off" spellcheck="false" placeholder="Optional name">
+      </label>
+      <div class="layer-edit-delete-slot">
+        <button type="button" id="layer-edit-delete" class="layer-edit-delete">Delete layer</button>
+        <div id="layer-edit-delete-confirm" class="layer-edit-delete-confirm hidden" hidden>
+          <span class="layer-edit-delete-ask">Are you sure?</span>
+          <button type="button" id="layer-edit-delete-yes" class="layer-edit-delete-yes" title="Confirm delete" aria-label="Confirm delete">✓</button>
+          <button type="button" id="layer-edit-delete-no" class="layer-edit-delete-no" title="Cancel" aria-label="Cancel delete">✕</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="text-command-box" class="text-command-box hidden" aria-hidden="true">
+    <input
+      id="text-command-input"
+      class="text-command-input"
+      type="text"
+      autocomplete="off"
+      spellcheck="false"
+      aria-label="Command"
+      aria-autocomplete="list"
+    >
+    <span id="text-command-hint" class="text-command-hint" aria-hidden="true"></span>
+  </div>
+
+  <div id="wire-place-cursor-mark" class="wire-place-cursor-mark hidden" aria-hidden="true"></div>
+
+  <div id="asset-context-menu" class="context-menu hidden" role="menu" aria-label="Place asset">
+    <div class="context-menu-power-row" role="group" aria-label="Focus modes">
+      <span class="context-menu-focus-modes-label">Focus modes</span>
+      <div class="context-menu-focus-modes-btns">
+        <button type="button" id="context-menu-power" class="context-menu-power-btn" title="Focus: Active — highlight wires on active signal path" aria-pressed="false" aria-label="Focus: Active signal path">
+          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M13 2L4 14h7l-1 8 10-14h-7l1-6z" fill="currentColor"/>
+          </svg>
+        </button>
+        <button type="button" id="context-menu-ground" class="context-menu-power-btn" title="Focus: Ground — ungrounded YESGROUND; with Wire focus, chase the grounding net into ISGROUND" aria-pressed="false" aria-label="Focus: Ground check">
+          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M12 3v8M5 11h14M7.5 14.5h9M9.5 18h5M11 21h2" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button type="button" id="context-menu-wire-focus" class="context-menu-power-btn" title="Focus: Wire — grey &amp; lock assets, wires in front" aria-pressed="false" aria-label="Focus: Wire edit">
+          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <line x1="5" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <button type="button" id="context-menu-short-check" class="context-menu-power-btn" title="Focus: Short — detect hard shorts (H↔G, tip–sleeve, battery)" aria-pressed="false" aria-label="Focus: Short check">
+          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="10.5" cy="10.5" r="6.25" fill="none" stroke="currentColor" stroke-width="2.1"/>
+            <line x1="15.2" y1="15.2" x2="20" y2="20" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <ul id="context-menu-items" class="context-menu-list"></ul>
+    <button type="button" id="context-menu-add" class="context-menu-add">+ Custom Asset</button>
+  </div>
+
+  <div id="asset-wheel" class="asset-wheel hidden" aria-hidden="true" role="dialog" aria-label="Recent assets">
+    <div class="asset-wheel-backdrop"></div>
+    <div class="asset-wheel-hub">
+      <div id="asset-wheel-items" class="asset-wheel-items"></div>
+      <div class="asset-wheel-center" aria-hidden="true">
+        <svg class="asset-wheel-cursor" viewBox="0 0 24 24" focusable="false">
+          <path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </div>
+    <p class="asset-wheel-hint">Scroll or point · release Q to select</p>
+  </div>
+
+  <div id="asset-delete-confirm" class="confirm-dialog hidden" role="alertdialog" aria-modal="true" aria-labelledby="asset-delete-confirm-title">
+    <div class="confirm-dialog-panel">
+      <p id="asset-delete-confirm-title" class="confirm-dialog-title">Delete custom asset?</p>
+      <p id="asset-delete-confirm-message" class="confirm-dialog-message"></p>
+      <div class="confirm-dialog-actions">
+        <button type="button" id="asset-delete-confirm-cancel" class="tool-btn">Cancel</button>
+        <button type="button" id="asset-delete-confirm-ok" class="tool-btn confirm-dialog-danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div
+    id="remake-workplace-confirm"
+    class="confirm-dialog remake-workplace-confirm hidden"
+    role="alertdialog"
+    aria-modal="true"
+    aria-labelledby="remake-workplace-confirm-title"
+    aria-describedby="remake-workplace-confirm-message"
+    hidden
+  >
+    <div class="confirm-dialog-panel remake-workplace-confirm-panel">
+      <p id="remake-workplace-confirm-title" class="confirm-dialog-title remake-workplace-confirm-title">Remake workplace circuit?</p>
+      <div id="remake-workplace-confirm-message" class="confirm-dialog-message remake-workplace-confirm-message">
+        <p>This rearranges the workplace parts and wires to match the schematic layout.</p>
+        <ul>
+          <li>Parts move into schematic columns (pickups → controls → output).</li>
+          <li>Wires are re-routed as horizontal/vertical runs with slight corner fillets.</li>
+          <li>Connections and wire gauge stay the same.</li>
+          <li>Wire path lengths update to the new geometry.</li>
+        </ul>
+        <p>You can still undo with the project history if needed.</p>
+      </div>
+      <div class="confirm-dialog-actions">
+        <button type="button" id="remake-workplace-confirm-cancel" class="tool-btn">Cancel</button>
+        <button type="button" id="remake-workplace-confirm-ok" class="tool-btn remake-workplace-confirm-ok">Remake</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="dimensional-config-menu" class="ui-float-menu hidden" role="dialog" aria-label="Dimensional configuration" hidden>
+    <div class="ui-float-menu-bar" id="dimensional-config-menu-bar">
+      <button type="button" class="ui-float-menu-min" id="dimensional-config-minimize" title="Minimize" aria-label="Minimize" aria-expanded="true">▾</button>
+      <span class="ui-float-menu-title" id="dimensional-config-menu-title">Dimensional</span>
+      <button type="button" class="ui-float-menu-close" id="dimensional-config-close" title="Close" aria-label="Close">×</button>
+    </div>
+    <div class="ui-float-menu-body" id="dimensional-config-menu-body">
         <div id="asset-config-bobbin-section" class="asset-config-bobbin-section hidden">
           <div class="asset-config-bobbin-preset-bar" id="asset-config-bobbin-preset-bar">
             <span class="asset-config-field-label">Preset</span>
@@ -834,261 +1165,32 @@
 
           </div>
         </div>
-        <div id="asset-config-pot-dial-row" class="asset-config-pot-dial-row hidden">
-          <div
-            id="asset-config-pot-dial"
-            class="pot-dial pot-dial--config"
-            role="slider"
-            aria-label="Potentiometer shaft"
-            aria-valuemin="0"
-            aria-valuemax="100"
-            tabindex="0"
-          >
-            <div class="pot-dial-knob">
-              <svg class="pot-dial-svg" viewBox="0 0 36 36" aria-hidden="true" focusable="false">
-                <circle class="pot-dial-ring" cx="18" cy="18" r="14" />
-                <g class="pot-dial-needle-g">
-                  <line class="pot-dial-needle" x1="18" y1="18" x2="18" y2="6" />
-                </g>
-                <circle class="pot-dial-hub" cx="18" cy="18" r="2.2" />
-              </svg>
-            </div>
-            <span class="pot-dial-pct">100%</span>
-          </div>
-        </div>
-        <button type="button" id="asset-config-formulas-btn" class="asset-config-formulas-btn hidden" aria-expanded="false" aria-controls="asset-config-formula-host" title="Formulas">
-          <span class="asset-config-formulas-label">Formulas</span>
-          <span class="asset-config-formulas-chevron" aria-hidden="true">▾</span>
-        </button>
-        <div id="asset-config-formula-host" class="asset-config-formula-host hidden" aria-live="polite"></div>
-        <div id="asset-config-value-fields" class="asset-config-value-fields"></div>
-        <label id="asset-config-flash-row" class="asset-config-ground-row hidden">
-          <input type="checkbox" id="asset-config-flashing" class="asset-config-ground-toggle" checked>
-          <span class="asset-config-ground-label">Visual Flashing</span>
-        </label>
-        <div id="asset-config-hb-wiring-row" class="asset-config-switch-type-row hidden">
-          <span class="asset-config-field-label">HB wiring</span>
-          <select id="asset-config-hb-wiring" class="asset-config-switch-type" aria-label="Humbucker wiring mode" title="Stock series bonds N↔R and S+G like a factory 4-conductor humbucker. Independent leads keeps all five tips free for coil-split / parallel.">
-            <option value="series">Stock series (N↔R, S+G)</option>
-            <option value="leads">Independent leads</option>
-          </select>
-        </div>
-      </div>
-    </div>
-    <div id="snap-indicator" class="snap-indicator hidden" aria-hidden="true">
-      <svg class="snap-indicator-cross" viewBox="-12 -12 24 24" aria-hidden="true" focusable="false">
-        <!-- Origin-centered plus: outline then core (symmetric about 0,0) -->
-        <line class="snap-indicator-cross-outline" x1="0" y1="-11" x2="0" y2="11" />
-        <line class="snap-indicator-cross-outline" x1="-11" y1="0" x2="11" y2="0" />
-        <line class="snap-indicator-cross-core" x1="0" y1="-11" x2="0" y2="11" />
-        <line class="snap-indicator-cross-core" x1="-11" y1="0" x2="11" y2="0" />
-      </svg>
-    </div>
-  </main>
-
-  <div class="workspace-layer-rail" role="group" aria-label="Wire layers">
-    <div class="workspace-layer-stack" role="group" aria-label="Layer stack">
-      <button type="button" id="btn-layer-front" class="workspace-layer-stack-btn" title="Active layer above components" aria-label="Front">
-        <span class="workspace-layer-stack-mark" aria-hidden="true">↑</span>
-        <span class="workspace-layer-stack-label">Front</span>
-      </button>
-      <button type="button" id="btn-layer-back" class="workspace-layer-stack-btn" title="Active layer behind components" aria-label="Back">
-        <span class="workspace-layer-stack-mark" aria-hidden="true">↓</span>
-        <span class="workspace-layer-stack-label">Back</span>
-      </button>
-    </div>
-    <div class="layer-buttons" id="layer-buttons" role="tablist" aria-label="Wire layer"></div>
-    <button
-      type="button"
-      id="btn-layer-add"
-      class="workspace-layer-add"
-      title="Add layer"
-      aria-label="Add layer"
-    >+</button>
-    <div class="workspace-layer-tools">
-      <button
-        type="button"
-        id="btn-layer-visibility"
-        class="workspace-layer-visibility"
-        title="Hide layer"
-        aria-label="Hide layer"
-        aria-pressed="true"
-      >
-        <svg class="workspace-page-eye workspace-page-eye-open" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-          <circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
-        </svg>
-        <svg class="workspace-page-eye workspace-page-eye-closed hidden" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-          <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
-          <circle cx="12" cy="12" r="2.4" fill="none" stroke="currentColor" stroke-width="1.7"/>
-          <path d="M4 4l16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
-        </svg>
-      </button>
-      <button
-        type="button"
-        id="btn-layer-help"
-        class="workspace-layer-help"
-        title="Layer help"
-        aria-label="Layer help"
-        aria-expanded="false"
-        aria-controls="layer-help-popup"
-      >?</button>
-    </div>
-    <div id="layer-help-popup" class="layer-help-popup hidden" role="dialog" aria-label="Layer help" hidden>
-      <p>
-        Open this tip anytime with
-        <span class="help-btn help-btn--q" aria-hidden="true">?</span>
-        beside the wire layers.
-      </p>
-      <p>Double-click a layer to rename or delete it.</p>
-      <p>
-        <kbd class="kbd">Mouse&nbsp;4</kbd>
-        or
-        <kbd class="kbd">↓</kbd>
-        sends the active layer back.
-        <kbd class="kbd">Mouse&nbsp;5</kbd>
-        or
-        <kbd class="kbd">↑</kbd>
-        brings it to the front.
-      </p>
-      <p>
-        <kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>
-        select the active wire layer.
-        <kbd class="kbd">Shift</kbd>+<kbd class="kbd">1</kbd>–<kbd class="kbd">9</kbd>
-        select a panel layer instead.
-      </p>
-    </div>
-    <div id="layer-edit-menu" class="layer-edit-menu hidden" role="dialog" aria-label="Edit layer" hidden>
-      <label class="layer-edit-field">Title
-        <input type="text" id="layer-edit-title" class="layer-edit-title-input" maxlength="24" autocomplete="off" spellcheck="false" placeholder="Optional name">
-      </label>
-      <div class="layer-edit-delete-slot">
-        <button type="button" id="layer-edit-delete" class="layer-edit-delete">Delete layer</button>
-        <div id="layer-edit-delete-confirm" class="layer-edit-delete-confirm hidden" hidden>
-          <span class="layer-edit-delete-ask">Are you sure?</span>
-          <button type="button" id="layer-edit-delete-yes" class="layer-edit-delete-yes" title="Confirm delete" aria-label="Confirm delete">✓</button>
-          <button type="button" id="layer-edit-delete-no" class="layer-edit-delete-no" title="Cancel" aria-label="Cancel delete">✕</button>
-        </div>
-      </div>
     </div>
   </div>
 
-  <div id="text-command-box" class="text-command-box hidden" aria-hidden="true">
-    <input
-      id="text-command-input"
-      class="text-command-input"
-      type="text"
-      autocomplete="off"
-      spellcheck="false"
-      aria-label="Command"
-      aria-autocomplete="list"
-    >
-    <span id="text-command-hint" class="text-command-hint" aria-hidden="true"></span>
-  </div>
-
-  <div id="wire-place-cursor-mark" class="wire-place-cursor-mark hidden" aria-hidden="true"></div>
-
-  <div id="asset-context-menu" class="context-menu hidden" role="menu" aria-label="Place asset">
-    <div class="context-menu-power-row" role="group" aria-label="Focus modes">
-      <span class="context-menu-focus-modes-label">Focus modes</span>
-      <div class="context-menu-focus-modes-btns">
-        <button type="button" id="context-menu-power" class="context-menu-power-btn" title="Focus: Active — highlight wires on active signal path" aria-pressed="false" aria-label="Focus: Active signal path">
-          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M13 2L4 14h7l-1 8 10-14h-7l1-6z" fill="currentColor"/>
-          </svg>
-        </button>
-        <button type="button" id="context-menu-ground" class="context-menu-power-btn" title="Focus: Ground — ungrounded YESGROUND; with Wire focus, chase the grounding net into ISGROUND" aria-pressed="false" aria-label="Focus: Ground check">
-          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M12 3v8M5 11h14M7.5 14.5h9M9.5 18h5M11 21h2" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
-          </svg>
-        </button>
-        <button type="button" id="context-menu-wire-focus" class="context-menu-power-btn" title="Focus: Wire — grey &amp; lock assets, wires in front" aria-pressed="false" aria-label="Focus: Wire edit">
-          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <line x1="5" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"/>
-          </svg>
-        </button>
-        <button type="button" id="context-menu-short-check" class="context-menu-power-btn" title="Focus: Short — detect hard shorts (H↔G, tip–sleeve, battery)" aria-pressed="false" aria-label="Focus: Short check">
-          <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <circle cx="10.5" cy="10.5" r="6.25" fill="none" stroke="currentColor" stroke-width="2.1"/>
-            <line x1="15.2" y1="15.2" x2="20" y2="20" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"/>
-          </svg>
-        </button>
-      </div>
+  <div id="asset-editor" class="ui-float-menu asset-editor hidden" role="dialog" aria-label="Custom asset">
+    <div class="ui-float-menu-bar" id="asset-editor-header">
+      <button type="button" class="ui-float-menu-min" id="asset-editor-minimize" title="Minimize" aria-label="Minimize" aria-expanded="true">▾</button>
+      <span class="ui-float-menu-title" id="asset-editor-title">Custom Asset</span>
+      <button type="button" class="ui-float-menu-close" id="asset-editor-close" title="Close" aria-label="Close">×</button>
     </div>
-    <ul id="context-menu-items" class="context-menu-list"></ul>
-    <button type="button" id="context-menu-add" class="context-menu-add">+ Custom Asset</button>
-  </div>
-
-  <div id="asset-wheel" class="asset-wheel hidden" aria-hidden="true" role="dialog" aria-label="Recent assets">
-    <div class="asset-wheel-backdrop"></div>
-    <div class="asset-wheel-hub">
-      <div id="asset-wheel-items" class="asset-wheel-items"></div>
-      <div class="asset-wheel-center" aria-hidden="true">
-        <svg class="asset-wheel-cursor" viewBox="0 0 24 24" focusable="false">
-          <path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </div>
-    </div>
-    <p class="asset-wheel-hint">Scroll or point · release Q to select</p>
-  </div>
-
-  <div id="asset-delete-confirm" class="confirm-dialog hidden" role="alertdialog" aria-modal="true" aria-labelledby="asset-delete-confirm-title">
-    <div class="confirm-dialog-panel">
-      <p id="asset-delete-confirm-title" class="confirm-dialog-title">Delete custom asset?</p>
-      <p id="asset-delete-confirm-message" class="confirm-dialog-message"></p>
-      <div class="confirm-dialog-actions">
-        <button type="button" id="asset-delete-confirm-cancel" class="tool-btn">Cancel</button>
-        <button type="button" id="asset-delete-confirm-ok" class="tool-btn confirm-dialog-danger">Delete</button>
-      </div>
-    </div>
-  </div>
-
-  <div
-    id="remake-workplace-confirm"
-    class="confirm-dialog remake-workplace-confirm hidden"
-    role="alertdialog"
-    aria-modal="true"
-    aria-labelledby="remake-workplace-confirm-title"
-    aria-describedby="remake-workplace-confirm-message"
-    hidden
-  >
-    <div class="confirm-dialog-panel remake-workplace-confirm-panel">
-      <p id="remake-workplace-confirm-title" class="confirm-dialog-title remake-workplace-confirm-title">Remake workplace circuit?</p>
-      <div id="remake-workplace-confirm-message" class="confirm-dialog-message remake-workplace-confirm-message">
-        <p>This rearranges the workplace parts and wires to match the schematic layout.</p>
-        <ul>
-          <li>Parts move into schematic columns (pickups → controls → output).</li>
-          <li>Wires are re-routed as horizontal/vertical runs with slight corner fillets.</li>
-          <li>Connections and wire gauge stay the same.</li>
-          <li>Wire path lengths update to the new geometry.</li>
-        </ul>
-        <p>You can still undo with the project history if needed.</p>
-      </div>
-      <div class="confirm-dialog-actions">
-        <button type="button" id="remake-workplace-confirm-cancel" class="tool-btn">Cancel</button>
-        <button type="button" id="remake-workplace-confirm-ok" class="tool-btn remake-workplace-confirm-ok">Remake</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="asset-editor" class="asset-editor hidden" role="dialog" aria-label="Custom asset editor">
+    <div class="ui-float-menu-body asset-editor-body" id="asset-editor-body">
     <div class="asset-editor-top">
       <div id="asset-editor-states" class="asset-editor-states" role="group" aria-label="Asset states">
         <div id="asset-editor-state-tabs" class="asset-editor-state-tabs"></div>
         <button type="button" id="asset-editor-add-state" class="asset-editor-state-btn" title="Add state">+</button>
         <button type="button" id="asset-editor-delete-state" class="asset-editor-state-btn asset-editor-state-delete" title="Delete state">−</button>
       </div>
-      <div id="asset-editor-header" class="asset-editor-header">Custom Asset</div>
     </div>
     <div class="asset-editor-body-fields">
       <label class="asset-editor-field">Name
-        <input type="text" id="asset-editor-name" class="asset-editor-input" maxlength="32">
+        <input type="text" id="asset-editor-name" class="asset-editor-input" maxlength="32" placeholder="My pickup">
       </label>
       <label class="asset-editor-field">Label
-        <input type="text" id="asset-editor-placelabel" class="asset-editor-input" maxlength="8" value="PU">
+        <input type="text" id="asset-editor-placelabel" class="asset-editor-input" maxlength="24" value="CU" placeholder="CU">
       </label>
-      <label class="asset-editor-field">Category
-        <select id="asset-editor-category" class="asset-editor-select" aria-label="Asset category">
+      <label class="asset-editor-field hidden" hidden>
+        <select id="asset-editor-category" class="asset-editor-select" aria-label="Asset category" tabindex="-1">
           <option value="custom">User</option>
         </select>
       </label>
@@ -1101,7 +1203,7 @@
           <option value="pickup">Pickup</option>
           <option value="potentiometer">Potentiometer</option>
           <option value="switch">Switch</option>
-          <option value="power">Power (9V)</option>
+          <option value="power">Power (supply)</option>
           <option value="dc-jack">DC Jack</option>
           <option value="heater-supply">Heater Supply</option>
           <option value="hv-supply">B+ / HV Supply</option>
@@ -1142,6 +1244,7 @@
       <button type="button" id="asset-editor-save" class="tool-btn asset-editor-save">Save</button>
       <button type="button" id="asset-editor-cancel" class="tool-btn">Cancel</button>
     </div>
+    </div>
     <div id="asset-editor-resize" class="asset-editor-panel-resize" title="Resize" aria-hidden="true"></div>
   </div>
 
@@ -1153,7 +1256,7 @@
       </div>
       <div id="cad-import-drop" class="cad-import-drop" tabindex="0">
         <p class="cad-import-drop-label">Drag a file here</p>
-        <p class="cad-import-drop-hint">DXF / DWG · 2D geometry only · 1 unit = 1 mm · pasted as one group</p>
+        <p class="cad-import-drop-hint">ASCII DXF preferred (LINE/ARC/LWPOLYLINE/SPLINE) · 1 unit = 1 mm · binary DWG needs Export→DXF first</p>
         <button type="button" id="cad-import-browse" class="cad-import-browse">Browse…</button>
         <input type="file" id="cad-import-input" class="cad-import-input" accept=".dxf,.dwg,image/vnd.dxf,application/dxf,application/acad,application/x-acad,application/autocad_dwg" hidden>
       </div>
@@ -1163,6 +1266,7 @@
 
   <div id="moodle-issue-float" class="moodle-issue-float hidden" aria-hidden="true"></div>
   <div id="overlap-cycle-float" class="overlap-cycle-float hidden" aria-hidden="true"></div>
+  <div id="panel-sel-filter" class="panel-sel-filter hidden" hidden aria-hidden="true" role="menu" aria-label="Object selection"></div>
 
   <div class="workspace-dock">
     <div class="workspace-page-bar" role="tablist" aria-label="Workspace pages">
@@ -1330,11 +1434,14 @@
       </span>
     </div>
     <footer class="status-bar">
-      <div id="align-bar" class="align-bar hidden" aria-label="Align selection">
-        <button type="button" id="btn-align-column" class="tool-btn align-btn" title="Align to same Y">Align column</button>
-        <button type="button" id="btn-align-row" class="tool-btn align-btn" title="Align to same X">Align row</button>
-        <button type="button" id="btn-rotate-ccw" class="tool-btn align-btn" title="Rotate −7.5°">↺</button>
-        <button type="button" id="btn-rotate-cw" class="tool-btn align-btn" title="Rotate +7.5°">↻</button>
+      <div id="align-bar" class="align-bar" aria-label="Align selection">
+        <div class="align-bar-actions">
+          <button type="button" id="btn-align-column" class="tool-btn align-btn" title="Align to same Y">Align column</button>
+          <button type="button" id="btn-align-row" class="tool-btn align-btn" title="Align to same X">Align row</button>
+          <button type="button" id="btn-rotate-ccw" class="tool-btn align-btn" title="Rotate −7.5°">↺</button>
+          <button type="button" id="btn-rotate-cw" class="tool-btn align-btn" title="Rotate +7.5°">↻</button>
+        </div>
+        <span id="selected-tool-hover" class="selected-tool-hover" aria-live="polite">Select</span>
       </div>
       <div id="schematic-peek" class="schematic-peek" aria-label="Circuit preview">
         <div class="schematic-peek-shell">
@@ -1471,17 +1578,31 @@
       <span id="status-text">Ready</span>
       <span id="snap-info"></span>
       <div class="bugtest-dock" id="bugtest-dock">
-        <button
-          type="button"
-          id="bugtest-badge"
-          class="bugtest-badge"
-          data-bugtest-badge
-          title="Bugtest — click to record (silent)"
-          aria-label="Bugtest — click to record (silent)"
-        >
-          <span class="bugtest-badge__title" data-bugtest-title>Bugtest Ver.</span>
-          <span class="bugtest-badge__build" data-bugtest-build>568</span>
-        </button>
+        <div id="workspace-idle-chrome" class="workspace-idle-chrome" aria-live="polite">
+          <div id="pan-help-label" class="pan-help-label" hidden></div>
+        </div>
+        <div class="bugtest-dock-row">
+          <div id="osnap-bar" class="osnap-bar" role="toolbar" aria-label="Object snap">
+            <span class="osnap-bar-title">Osnap</span>
+            <button type="button" class="osnap-btn is-on" data-osnap="end" title="End / point" aria-pressed="true">End</button>
+            <button type="button" class="osnap-btn is-on" data-osnap="mid" title="Midpoint" aria-pressed="true">Mid</button>
+            <button type="button" class="osnap-btn is-on" data-osnap="center" title="Center" aria-pressed="true">Cen</button>
+            <button type="button" class="osnap-btn" data-osnap="corner" title="Corner" aria-pressed="false">Cor</button>
+            <button type="button" class="osnap-btn" data-osnap="project" title="Perpendicular / project" aria-pressed="false">Perp</button>
+            <button type="button" class="osnap-btn" data-osnap="grid" title="Grid" aria-pressed="false" id="osnap-grid-btn">Grid</button>
+          </div>
+          <button
+            type="button"
+            id="bugtest-badge"
+            class="bugtest-badge"
+            data-bugtest-badge
+            title="Bugtest — click to record (silent)"
+            aria-label="Bugtest — click to record (silent)"
+          >
+            <span class="bugtest-badge__title" data-bugtest-title>Bugtest Ver.</span>
+            <span class="bugtest-badge__build" data-bugtest-build>569</span>
+          </button>
+        </div>
         <div
           id="bugtest-term"
           class="bugtest-term hidden"
@@ -1498,13 +1619,13 @@
           <div class="bugtest-term__scroll" data-bugtest-term-log></div>
         </div>
       </div>
-      <div id="commands-panel" class="commands-panel" aria-label="Commands">
+      <div id="commands-panel" class="commands-panel" aria-label="Text commands">
         <div class="commands-sheet">
           <div class="commands-panel-surface">
             <div id="commands-body" class="commands-body" aria-hidden="true">
               <div class="commands-body-inner">
                 <div class="commands-title-row">
-                  <span class="commands-title">Commands</span>
+                  <span class="commands-title">Text commands</span>
                 </div>
                 <div id="commands-list" class="commands-list" role="list"></div>
               </div>
@@ -1514,10 +1635,10 @@
                 type="button"
                 id="commands-chevron"
                 class="commands-chevron"
-                title="Commands"
+                title="Text commands"
                 aria-expanded="false"
                 aria-controls="commands-body"
-                aria-label="Expand commands"
+                aria-label="Expand text commands"
               >
                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                   <path d="M6 15l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1590,12 +1711,13 @@
     </div>
   </div>
 
-  <script src="gate.js?v=568"></script>
-  <script src="cad.js?v=568"></script>
-  <script src="assets.js?v=568"></script>
-  <script src="engines.js?v=568"></script>
-  <script src="errorreporting.js?v=568"></script>
-  <script src="materials.js?v=568"></script>
-  <script src="app.js?v=568"></script>
+  <script src="gate.js?v=569"></script>
+  <script src="curves.js?v=569"></script>
+  <script src="cad.js?v=569"></script>
+  <script src="assets.js?v=569"></script>
+  <script src="engines.js?v=569"></script>
+  <script src="errorreporting.js?v=569"></script>
+  <script src="materials.js?v=569"></script>
+  <script src="app.js?v=569"></script>
 </body>
 </html>

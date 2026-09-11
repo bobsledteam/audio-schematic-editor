@@ -9,7 +9,7 @@
   const SNAP_DELAY_MS = 2000;
   /** Pointer movement past this (px) after snap clears magnet immediately. */
   const SNAP_MOVE_CANCEL_PX = 3;
-  const ASSET_CONFIG_BTN_SIZE = 26;
+  const ASSET_CONFIG_BTN_SIZE = 12.6;
   /** Optical nudge matching .asset-config-btn transform. */
   const ASSET_CONFIG_BTN_NUDGE_X = -1;
   const LAYER_COUNT_MIN = 1;
@@ -145,6 +145,8 @@
   const settingsUiElementVal = document.getElementById('settings-ui-element-val');
   const settingsHeaderDither = document.getElementById('settings-header-dither');
   const settingsHeaderDitherState = document.getElementById('settings-header-dither-state');
+  const settingsLightGrid = document.getElementById('settings-light-grid');
+  const settingsLightGridState = document.getElementById('settings-light-grid-state');
   const UI_PREFS_KEY = 'endo-asd-ui-prefs';
   const UI_PREFS_KEY_LEGACY = 'gwv-ui-prefs';
   let eraseMode = false;
@@ -155,6 +157,7 @@
   let uiTextScalePct = 100;
   let uiElementScalePct = 100;
   let headerDitherEnabled = false;
+  let lightGridEnabled = false;
   /** Schematic wire strokes: monochrome by default; colour toggle re-enables WIRE_COLORS. */
   let schematicWireColourEnabled = false;
   const HEADER_DITHER_LAYER_COUNT = 7;
@@ -207,6 +210,10 @@
   let wireStyle = 'solid';
   /** 'free' = smooth bends · 'manhattan' = orthogonal + soft fillets */
   let wireRouteMode = 'free';
+  /** When true, deleting an asset also deletes wires that were attached to it. Default off. */
+  let wireAutoDelete = false;
+  /** When true, wires may start/finish on empty canvas (no terminal). Default off. */
+  let wirePersist = false;
   let wireColor = 'white';
   /** Default new-wire gauge (mm). 1 grid unit = 1 mm → stroke_px = mm × WORKSPACE_GRID. */
   const DEFAULT_WIRE_GAUGE_MM = 0.64;
@@ -254,11 +261,35 @@
   const workspacePagePanel = document.getElementById('workspace-page-panel');
   const panelSnapPoints = new Map();
   let panelSnapMode = false;
+  /** Panel curve draw tool: null | 'line' | 'polyline' | 'arc' | 'spline' */
+  let panelCurveTool = null;
+  let panelCurveIdCounter = 0;
+  const panelCurves = new Map();
+  const selectedPanelCurveIds = new Set();
+  /** @type {{ type: string, points: {x:number,y:number}[], previewEl?: Element } | null} */
+  let panelCurveDraft = null;
+  let panelSelFilterItems = [];
+  let panelSelFilterIndex = 0;
+  /** Ortho: lock draw/preview to 90° from last point (Rhino-like). */
+  let panelOrthoMode = false;
+  /** @type {{ curveId: string, pointIndex: number, kind: string } | null} */
+  let panelCurveGripDrag = null;
+
   let panelSnapIdCounter = 0;
   let selectedPanelSnapIds = new Set();
   let panelLayerVisible = true;
   /** Panel CAD: Tab toggles cursor grid snap (object mid/center snaps still apply). */
-  let panelCursorGridSnap = true;
+  let panelCursorGridSnap = false;
+  /** Rhino-style object snap toggles (End/Mid/Cen/Cor/Perp/Grid). */
+  const osnapEnabled = {
+    end: true,
+    mid: true,
+    center: true,
+    corner: false,
+    project: false,
+    grid: false,
+  };
+  let workspaceRulersVisible = true;
   const workspacePagePanelVisibility = document.getElementById('workspace-page-panel-visibility');
   const btnPanelLayerVisibility = document.getElementById('btn-panel-layer-visibility');
   const selectedComponents = new Set();
@@ -464,7 +495,24 @@
 
   function applyViewport() {
     stabilizeWorkspaceScroll();
-    workspace.style.transform = `translate(${panX}px, ${panY}px) scale(${viewportScale()})`;
+    // Align pan to device pixels so CAD grid lines and geometry stay sharp while zoomed
+    const dpr = window.devicePixelRatio || 1;
+    const sc = viewportScale();
+    const gridPx = getWorkspaceGrid() * sc;
+    let px = panX;
+    let py = panY;
+    if (gridPx > 0.5) {
+      // Keep a grid intersection on a device-pixel boundary
+      const originModX = ((px % gridPx) + gridPx) % gridPx;
+      const originModY = ((py % gridPx) + gridPx) % gridPx;
+      const snapX = Math.round(originModX * dpr) / dpr;
+      const snapY = Math.round(originModY * dpr) / dpr;
+      px = px - originModX + snapX;
+      py = py - originModY + snapY;
+    }
+    px = Math.round(px * dpr) / dpr;
+    py = Math.round(py * dpr) / dpr;
+    workspace.style.transform = `translate(${px}px, ${py}px) scale(${sc})`;
     updateGridScaleIndicator(zoom);
     if (document.body.classList.contains('is-viewport-interacting')) {
       scheduleViewportHeavyUpdate();
@@ -673,6 +721,7 @@
   function setSpacePanHeld(on) {
     spacePanHeld = !!on;
     updateSpacePanBodyClass();
+    updateSelectedToolHover();
   }
 
   function startSpacePanDrag(clientX, clientY) {
@@ -680,6 +729,7 @@
     spacePanLastX = clientX;
     spacePanLastY = clientY;
     updateSpacePanBodyClass();
+    updateSelectedToolHover();
   }
 
   function moveSpacePanDrag(clientX, clientY) {
@@ -705,6 +755,7 @@
     updateSpacePanBodyClass();
     document.body.classList.remove('is-viewport-interacting');
     flushViewportHeavyUpdate();
+    updateSelectedToolHover();
   }
 
   function canEngageSpacePan(e) {
@@ -739,9 +790,11 @@
 
   /**
    * Lightning mode: glow wires on conducting nets that carry signal.
-   * Seeds = signal injectors only (pickup / jack tip H with terminalActive).
+   * Seeds = signal injectors only (pickup coil ends / jack tip H with terminalActive).
    * Switch poles and pot lugs join via buildWireNets() expansion — seeding them
    * also lit the ground bus whenever an active pole sat on a grounded net.
+   * Nets that reach chassis / circuit ground are excluded so phase-reverse (or any
+   * hot↔ground short) does not light the entire return bus.
    */
   function isLightningSeedTerminal(term) {
     if (!term) return false;
@@ -752,7 +805,10 @@
     const faultRole = getFaultAnalysisRole(term);
     if (faultRole === 'G' || faultRole === 'SUP-' || faultRole === 'HEAT') return false;
     const role = getTerminalRole(term);
-    if (role === 'G') return false;
+    if (role === 'G') {
+      // Pickup coil "G" is a conductor end (phase reverse uses it as hot) — not chassis
+      return isPickupComponent(host);
+    }
     return true;
   }
 
@@ -761,13 +817,16 @@
     if (!term || !comp || !isLightningSeedTerminal(term)) return false;
     const role = getTerminalRole(term);
     const label = (term.dataset.terminalLabel || '').trim().toUpperCase();
+    if (isPickupComponent(comp)) {
+      // Either coil end can inject depending on external phase / series wiring
+      return true;
+    }
     if (role === 'H' || label === 'H') return true;
     // Dual-coil / loom tips: non-ground active conductors inject signal
     if (
-      (isPickupComponent(comp) || term.classList.contains('hb-tip') || term.classList.contains('wire-term'))
+      (term.classList.contains('hb-tip') || term.classList.contains('wire-term'))
       && role !== 'G'
       && !term.classList.contains('is-ground')
-      && (term.classList.contains('hb-tip') || term.classList.contains('wire-term'))
     ) {
       return true;
     }
@@ -799,6 +858,7 @@
       });
       if (!seedTerms.size) return;
 
+      const { groundTerms } = collectGroundNetMembership();
       const liveTerms = new Set();
       buildWireNets().forEach((net) => {
         let seeded = false;
@@ -809,6 +869,12 @@
           }
         }
         if (!seeded) return;
+        // Skip chassis / return bus — e.g. mid-phase reverse parks a coil end on ground
+        if (groundTerms?.size) {
+          for (const t of net) {
+            if (groundTerms.has(t)) return;
+          }
+        }
         net.forEach((t) => liveTerms.add(t));
       });
       if (!liveTerms.size) return;
@@ -982,10 +1048,11 @@
     let reverse = false;
     const p0 = measurePath.getPointAtLength(0);
     const p1 = measurePath.getPointAtLength(len);
-    // Prefer ending at the ground-ward terminal so the chase runs into ISGROUND
+    // Orient so the path ends at the ground-ward terminal (chase INTO ISGROUND)
     if (toW) {
       const d0 = Math.hypot(p0.x - toW.x, p0.y - toW.y);
       const d1 = Math.hypot(p1.x - toW.x, p1.y - toW.y);
+      // If path start is closer to ground than path end, reverse so we finish at ground
       reverse = d0 < d1;
     } else if (fromW) {
       const d0 = Math.hypot(p0.x - fromW.x, p0.y - fromW.y);
@@ -993,6 +1060,14 @@
       reverse = d1 < d0;
     } else if (fromTerm && wire.start?.terminal === toTerm) {
       reverse = true;
+    }
+    // Hard verify: last sample must be nearer toW than first
+    if (toW) {
+      const first = reverse ? p1 : p0;
+      const last = reverse ? p0 : p1;
+      const dFirst = Math.hypot(first.x - toW.x, first.y - toW.y);
+      const dLast = Math.hypot(last.x - toW.x, last.y - toW.y);
+      if (dFirst + 0.5 < dLast) reverse = !reverse;
     }
 
     const steps = Math.max(14, Math.min(96, Math.ceil(len / 3)));
@@ -2329,7 +2404,7 @@
       const v = parseVoltageVolts(getComponentElectricalValue(comp, key));
       if (Number.isFinite(v) && v > 0) return v;
     }
-    // 9V battery default
+    // Generic power supply default (legacy ninevolt id)
     const template = GuitarAssets.getTemplate(comp.dataset.assetId);
     if (template?.subtype === 'ninevolt' || template?.id === 'ninevolt') return 9;
     return NaN;
@@ -2342,25 +2417,25 @@
    */
   function analyzeLedPowerState(comp, neighbors, shortTerminals) {
     if (!isLedIndicatorComponent(comp)) {
-      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN };
+      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN, intensity: 0 };
     }
     const terms = [...comp.querySelectorAll('.terminal')];
     const anode = terms.find((t) => getTerminalRole(t) === 'A') || terms[0];
     const cathode = terms.find((t) => getTerminalRole(t) === 'K') || terms[1];
     if (!anode || !cathode) {
-      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN };
+      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN, intensity: 0 };
     }
 
     const toPos = dcPowerReach(anode, 'toward-positive', neighbors);
     const toRet = dcPowerReach(cathode, 'toward-return', neighbors);
     if (!toPos.reached || !toRet.reached) {
-      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN };
+      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN, intensity: 0 };
     }
 
     // Invalid if anode/cathode sit on a hard-shorted supply net
     if (shortTerminals?.has(anode) || shortTerminals?.has(cathode)
       || shortTerminals?.has(toPos.supplyTerm) || shortTerminals?.has(toRet.supplyTerm)) {
-      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN };
+      return { powered: false, vs: NaN, vf: NaN, ifA: NaN, ballastR: NaN, intensity: 0 };
     }
 
     const vf = parseVoltageVolts(getComponentElectricalValue(comp, 'forwardVoltage'));
@@ -2376,9 +2451,23 @@
       vf,
       ifA,
       ballastR,
+      intensity: computeLedGlowIntensity({ powered: true, vs, vf, ifA }),
       supplyComp: toPos.supplyComp,
       returnComp: toRet.supplyComp,
     };
+  }
+
+  /** Relative glow 0–1 from supply headroom vs Vf (design If when ballast matched). */
+  function computeLedGlowIntensity({ powered, vs, vf, ifA }) {
+    if (!powered) return 0;
+    if (Number.isFinite(vs) && Number.isFinite(vf) && vs > 0) {
+      if (vs <= vf) return 0.12;
+      const headroom = (vs - vf) / vs;
+      // Map excess fraction into a visible 20–100% bar
+      return Math.min(1, Math.max(0.2, 0.28 + headroom * 1.05));
+    }
+    if (Number.isFinite(ifA) && ifA > 0) return 0.65;
+    return 0.5;
   }
 
   function refreshLedPowerGlow() {
@@ -2388,6 +2477,7 @@
       else {
         comp.classList.remove('is-led-powered');
         comp.style.removeProperty('--led-glow-color');
+        comp.style.removeProperty('--led-glow-intensity');
       }
     });
     if (!hasLed) return;
@@ -2403,10 +2493,13 @@
       if (!isLedIndicatorComponent(comp)) return;
       const state = analyzeLedPowerState(comp, neighbors, shortTerms);
       const color = normalizeGlowColor(getComponentElectricalValue(comp, 'glowColor'), '#ff3b30');
+      const intensity = Number.isFinite(state.intensity) ? state.intensity : 0;
       if (state.powered) {
         comp.classList.add('is-led-powered');
         comp.style.setProperty('--led-glow-color', color);
+        comp.style.setProperty('--led-glow-intensity', String(Math.round(intensity * 1000) / 1000));
         comp.dataset.ledPowered = 'true';
+        comp.dataset.ledGlowIntensity = String(Math.round(intensity * 100));
         if (Number.isFinite(state.ballastR)) {
           comp.dataset.ledBallastOhms = String(Math.round(state.ballastR * 1000) / 1000);
         } else {
@@ -2417,7 +2510,9 @@
       } else {
         comp.classList.remove('is-led-powered');
         comp.style.removeProperty('--led-glow-color');
+        comp.style.removeProperty('--led-glow-intensity');
         delete comp.dataset.ledPowered;
+        delete comp.dataset.ledGlowIntensity;
         delete comp.dataset.ledBallastOhms;
         delete comp.dataset.ledSupplyVolts;
       }
@@ -2611,18 +2706,47 @@
     return false;
   }
 
-  /** Q/E state cycle — allowed from canvas or asset chrome (not free text fields). */
+  /** Q/E state cycle — never steal keys from text fields (labels, hover, state menu). */
   function canUseAssetStateHotkeys() {
     if (textCommandOpen || isEditorOpen()) return false;
-    const el = document.activeElement;
-    if (el?.closest?.('#asset-config-menu, #asset-state-chrome, #asset-state-term-menu, #asset-config-btn')) {
-      return true;
-    }
-    return !isTypingTarget();
+    if (isTypingTarget()) return false;
+    return true;
   }
 
   /** Registry of Enter-box text commands (extend here). */
   const textCommands = [
+    {
+      id: 'line',
+      name: 'Line',
+      short: 'LINE',
+      aliases: ['LINE', 'L'],
+      description: 'Draw a line on the Panel page (Rhino-like)',
+      run: () => setPanelCurveTool('line'),
+    },
+    {
+      id: 'polyline',
+      name: 'Polyline',
+      short: 'PLINE',
+      aliases: ['PLINE', 'PL', 'POLYLINE'],
+      description: 'Draw a polyline on the Panel page',
+      run: () => setPanelCurveTool('polyline'),
+    },
+    {
+      id: 'arc',
+      name: 'Arc',
+      short: 'ARC',
+      aliases: ['ARC', 'A'],
+      description: 'Draw a 3-point arc on the Panel page',
+      run: () => setPanelCurveTool('arc'),
+    },
+    {
+      id: 'spline',
+      name: 'Spline',
+      short: 'SPLINE',
+      aliases: ['SPLINE', 'S'],
+      description: 'Draw a NURBS spline on the Panel page',
+      run: () => setPanelCurveTool('spline'),
+    },
     {
       id: 'dimension',
       name: 'Dimension',
@@ -2638,6 +2762,14 @@
       aliases: ['MOVE', 'M'],
       description: 'Move selection base→dest (snaps to object mid/centers)',
       run: () => startMoveTool(),
+    },
+    {
+      id: 'wire',
+      name: 'Wire',
+      short: 'WIRE',
+      aliases: ['WIRE', 'W'],
+      description: 'Enter wire draw mode',
+      run: () => setWireMode(true),
     },
     {
       id: 'note',
@@ -7334,13 +7466,16 @@
     const pts = [];
     const push = (x, y, kind) => {
       if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      if (kind === 'end' && !osnapEnabled.end) return;
+      if (kind === 'mid' && !osnapEnabled.mid) return;
+      if (kind === 'center' && !osnapEnabled.center) return;
+      if (kind === 'corner' && !osnapEnabled.corner) return;
+      if (kind === 'project' && !osnapEnabled.project) return;
+      if (kind === 'snap' && !osnapEnabled.end) return;
       pts.push({ x, y, kind });
     };
     components.forEach((comp) => {
       if (comp.classList.contains('workspace-page-hidden')) return;
-      if (!componentOnActivePage(comp) && getComponentWorkspacePage(comp) !== 'panel') {
-        // allow panel underlay snaps when on electronics only for panel snaps below
-      }
       if (activeWorkspacePage === 'electronics' && getComponentWorkspacePage(comp) === 'panel') return;
       if (activeWorkspacePage === 'panel' && getComponentWorkspacePage(comp) !== 'panel') return;
       const b = getComponentChromeBounds(comp);
@@ -7351,24 +7486,58 @@
       push(cx, b.bottom, 'mid');
       push(b.left, cy, 'mid');
       push(b.right, cy, 'mid');
-      // CAD groups: also corners
-      if (comp.dataset.cadImport === 'true') {
-        push(b.left, b.top, 'corner');
-        push(b.right, b.top, 'corner');
-        push(b.left, b.bottom, 'corner');
-        push(b.right, b.bottom, 'corner');
+      push(b.left, b.top, 'corner');
+      push(b.right, b.top, 'corner');
+      push(b.left, b.bottom, 'corner');
+      push(b.right, b.bottom, 'corner');
+      // Perp/project: edge midpoints toward cursor handled as mid when enabled
+      if (osnapEnabled.project) {
+        push(cx, b.top, 'project');
+        push(cx, b.bottom, 'project');
+        push(b.left, cy, 'project');
+        push(b.right, cy, 'project');
       }
+      comp.querySelectorAll('.terminal').forEach((term) => {
+        const c = getTerminalCenter(term);
+        const w = clientToWorld(c.x, c.y);
+        push(w.x, w.y, 'end');
+      });
     });
     if (panelLayerVisible) {
       panelSnapPoints.forEach((entry) => {
         push(entry.x, entry.y, 'snap');
       });
     }
+    // Panel CAD curves — End / Mid (and spline CVs as End)
+    if (activeWorkspacePage === 'panel') {
+      panelCurves.forEach((curve) => {
+        const pts = curve.points || [];
+        if (!pts.length) return;
+        pts.forEach((p, i) => {
+          const isEnd = i === 0 || i === pts.length - 1;
+          if (isEnd || curve.type === 'spline' || curve.type === 'arc') {
+            push(p.x, p.y, 'end');
+          }
+        });
+        if (curve.type === 'line' || curve.type === 'polyline') {
+          for (let i = 0; i + 1 < pts.length; i++) {
+            push((pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2, 'mid');
+          }
+        }
+      });
+      // Live draft ends so you can snap back to the chain start
+      if (panelCurveDraft?.points?.length) {
+        const d0 = panelCurveDraft.points[0];
+        const dN = panelCurveDraft.points[panelCurveDraft.points.length - 1];
+        push(d0.x, d0.y, 'end');
+        if (dN !== d0) push(dN.x, dN.y, 'end');
+      }
+    }
     return pts;
   }
 
   function findNearestObjectSnap(worldX, worldY, thresh) {
-    const priority = { center: 0, mid: 1, corner: 2, snap: 3 };
+    const priority = { end: 0, center: 1, mid: 2, project: 3, corner: 4, snap: 5 };
     let best = null;
     let bestDist = thresh;
     let bestPri = 99;
@@ -7387,7 +7556,12 @@
 
   function resolveDimPick(clientX, clientY, free) {
     const world = clientToWorld(clientX, clientY);
-    if (free) return { x: world.x, y: world.y, kind: 'free' };
+    // Panel default snap-off: Shift enables snap (callers pass shiftKey as `free`)
+    let forceFree = !!free;
+    if (activeWorkspacePage === 'panel' && !panelCursorGridSnap && !osnapEnabled.grid) {
+      forceFree = !free;
+    }
+    if (forceFree) return { x: world.x, y: world.y, kind: 'free' };
 
     const thresh = 14 / viewportScale();
     const obj = findNearestObjectSnap(world.x, world.y, thresh);
@@ -7412,15 +7586,22 @@
         }
       });
     });
-    if (bestTerm) return bestTerm;
+    if (bestTerm && osnapEnabled.end) return bestTerm;
 
+    const wantGrid = osnapEnabled.grid || (
+      activeWorkspacePage === 'panel'
+        ? (panelCursorGridSnap || !!window.__panelShiftSnapHeld)
+        : true
+    );
+    if (!wantGrid) {
+      return { x: world.x, y: world.y, kind: 'free' };
+    }
     const gx = snapWorkspace(world.x);
     const gy = snapWorkspace(world.y);
-    const gridOn = !(activeWorkspacePage === 'panel' && !panelCursorGridSnap);
     return {
       x: gx,
       y: gy,
-      kind: gridOn ? 'grid' : 'free',
+      kind: 'grid',
     };
   }
 
@@ -7494,12 +7675,14 @@
     hideDimensionToolVisual(false);
     dimLayer?.classList.add('hidden');
     setStatus('DIM — click first point (snap: center / mid / terminals / grid · Shift=free)');
+    updateSelectedToolHover();
   }
 
   function cancelDimensionTool() {
     if (!dimTool) return false;
     hideDimensionToolVisual(true);
     setStatus('Ready');
+    updateSelectedToolHover();
     return true;
   }
 
@@ -7523,6 +7706,7 @@
       current: null,
     };
     setStatus('MOVE — click base point (snap: center / mid) · Shift=free · Esc cancel');
+    updateSelectedToolHover();
   }
 
   function cancelMoveTool() {
@@ -7530,6 +7714,7 @@
     moveTool = null;
     if (!snappedTerminal && !placementMode) snapIndicator.classList.add('hidden');
     setStatus('Ready');
+    updateSelectedToolHover();
     return true;
   }
 
@@ -7664,6 +7849,7 @@
     moveTool = null;
     if (!snappedTerminal && !placementMode) snapIndicator.classList.add('hidden');
     setStatus(`Moved · Δ ${formatDimensionValue(Math.hypot(dx, dy))}`);
+    updateSelectedToolHover();
     return true;
   }
 
@@ -7826,6 +8012,7 @@
     hideDimensionToolVisual(true);
     markProjectDirty();
     setStatus(`DIM ${text} — label placed`);
+    updateSelectedToolHover();
     return true;
   }
 
@@ -8023,7 +8210,7 @@
     if (selectedComponents.size === 0) return false;
     // Leave focused selects/inputs in the cog so Q/E isn't swallowed as typing.
     const active = document.activeElement;
-    if (active?.closest?.('#asset-config-menu, #asset-state-chrome, #asset-state-term-menu')) {
+    if (active?.closest?.('#asset-config-menu, #dimensional-config-menu, #asset-editor, #asset-state-chrome, #asset-state-term-menu')) {
       active.blur?.();
     }
     if (cycleSelectedComponentState(direction)) return true;
@@ -8533,7 +8720,10 @@
 
   function snapWorkspace(v, free) {
     if (free) return v;
-    if (activeWorkspacePage === 'panel' && !panelCursorGridSnap) return v;
+    const panelSnapOn = panelCursorGridSnap
+      || osnapEnabled.grid
+      || (activeWorkspacePage === 'panel' && !!window.__panelShiftSnapHeld);
+    if (activeWorkspacePage === 'panel' && !panelSnapOn) return v;
     const grid = getWorkspaceGrid();
     return Math.round(v / grid) * grid;
   }
@@ -8544,8 +8734,8 @@
     document.body.classList.toggle('panel-grid-snap-off', !panelCursorGridSnap);
     setStatus(
       panelCursorGridSnap
-        ? 'Grid snap ON — cursor locks to grid / mid / center · Tab to turn off'
-        : 'Grid snap OFF — free cursor · Tab to turn on'
+        ? 'Grid snap ON — cursor locks to grid / mid / center · Shift toggles'
+        : 'Grid snap OFF — free cursor · hold Shift to snap · Shift toggles'
     );
     updatePanelCursorSnap(lastPointerX, lastPointerY, false);
     return true;
@@ -8573,7 +8763,13 @@
 
   /** Live CAD cursor: when Panel grid snap is on, lock indicator to grid / object snaps. */
   function updatePanelCursorSnap(clientX, clientY, shiftFree) {
-    if (activeWorkspacePage !== 'panel' || !panelCursorGridSnap || shiftFree) {
+    if (activeWorkspacePage !== 'panel') {
+      clearPanelCursorSnap();
+      return;
+    }
+    // Default snap OFF: hold Shift to enable. Persistent ON: Shift frees (legacy).
+    const snapNow = panelCursorGridSnap ? !shiftFree : !!shiftFree;
+    if (!snapNow && !osnapEnabled.grid) {
       clearPanelCursorSnap();
       return;
     }
@@ -8613,10 +8809,38 @@
   function updateAlignBar() {
     if (!alignBar) return;
     const n = selectedComponents.size;
-    const show = n >= 1;
-    alignBar.classList.toggle('hidden', !show);
+    const showActions = n >= 1;
+    alignBar.classList.toggle('hidden', false);
+    alignBar.classList.toggle('has-selection', showActions);
     if (btnAlignColumn) btnAlignColumn.disabled = n < 2;
     if (btnAlignRow) btnAlignRow.disabled = n < 2;
+    updateSelectedToolHover();
+  }
+
+  function getSelectedToolHoverLabel() {
+    if (spacePanDragging || spacePanHeld) return 'Pan';
+    if (eraseMode) return 'Erase';
+    if (wireMode) return 'Wire';
+    if (moveTool) return 'Move';
+    if (dimTool && dimTool.phase !== 'done') return 'Dimension';
+    if (placementMode) {
+      const name = GuitarAssets.getTemplate(placementMode)?.name;
+      return name ? `Place · ${name}` : 'Place';
+    }
+    if (panelSnapMode) return 'Snap';
+    if (panelCurveTool === 'line') return panelOrthoMode ? 'Line · Ortho' : 'Line';
+    if (panelCurveTool === 'polyline') return panelOrthoMode ? 'PLine · Ortho' : 'PLine';
+    if (panelCurveTool === 'arc') return panelOrthoMode ? 'Arc · Ortho' : 'Arc';
+    if (panelCurveTool === 'spline') return panelOrthoMode ? 'Spline · Ortho' : 'Spline';
+    return 'Select';
+  }
+
+  function updateSelectedToolHover() {
+    const el = document.getElementById('selected-tool-hover');
+    if (!el) return;
+    const label = getSelectedToolHoverLabel();
+    if (el.textContent !== label) el.textContent = label;
+    updateIdleWorkspaceChrome();
   }
 
   function alignSelectedColumn() {
@@ -9399,7 +9623,7 @@
       if (isManhattanWire(wire)) {
         const startPt = getAttachPoint(wire, 'start');
         const prev = idx === 0 ? startPt : wire.anchors[idx - 1];
-        const snapped = manhattanAxisSnap(prev, world.x, world.y, free);
+        const snapped = manhattanAxisSnap(prev, world.x, world.y);
         wire.anchors[idx] = snapped;
         x = snapped.x;
         y = snapped.y;
@@ -10029,7 +10253,7 @@
     if (wireMode || wireEditFocusMode || moveTool || e.button !== 0) return false;
     if (selectedWireGroups.size === 0) return false;
     if (e.shiftKey || e.ctrlKey || e.metaKey) return false;
-    if (e.target.closest?.('.app-header, .toolbar, #asset-config-menu, #asset-state-term-menu, .context-menu, .note-window, .schematic-pin-window, #workspace-group-chrome')) {
+    if (e.target.closest?.('.app-header, .toolbar, #asset-config-menu, #dimensional-config-menu, #asset-editor, #asset-state-term-menu, .context-menu, .note-window, .schematic-pin-window, #workspace-group-chrome')) {
       return false;
     }
     // Prefer hit testing that sees through assets/terminals
@@ -10060,7 +10284,7 @@
   /** Select / drag a wire even when an asset or terminal is painted on top of it. */
   function trySelectWireThroughOccluders(e) {
     if (wireMode || moveTool || e.button !== 0) return false;
-    if (e.target.closest?.('.app-header, .toolbar, #asset-config-menu, #asset-state-term-menu, .context-menu, .note-window, .schematic-pin-window, #workspace-group-chrome')) {
+    if (e.target.closest?.('.app-header, .toolbar, #asset-config-menu, #dimensional-config-menu, #asset-editor, #asset-state-term-menu, .context-menu, .note-window, .schematic-pin-window, #workspace-group-chrome')) {
       return false;
     }
     // Direct wire hits use the wire group's own handler
@@ -10117,7 +10341,14 @@
     workspacePagePanel?.setAttribute('aria-selected', isElectronics ? 'false' : 'true');
     document.body.classList.toggle('workspace-on-panel', !isElectronics);
     document.body.classList.toggle('workspace-on-electronics', isElectronics);
-    document.body.classList.toggle('workspace-cad', !isElectronics);
+    document.body.classList.add('workspace-cad');
+    // Rulers are world-space CAD marks — rebuild if grid unit changes across pages
+    if (typeof buildWorkspaceGridRulers === 'function') {
+      buildWorkspaceGridRulers();
+      updateWorkspaceRulers();
+    }
+    if (typeof syncPanelCurveToolsVisibility === 'function') syncPanelCurveToolsVisibility();
+    panelCurves.forEach((c) => ensurePanelCurveEl(c));
   }
 
   function wireTouchesPage(wire, page) {
@@ -10393,6 +10624,7 @@
       powerBtn.classList.toggle('panel-snap-active', panelSnapMode);
       powerBtn.classList.remove('active');
     }
+    updateSelectedToolHover();
   }
 
   function togglePanelSnapMode() {
@@ -10483,7 +10715,7 @@
     markProjectDirty();
     setStatus(
       next === 'panel'
-        ? `Panel · CAD · 1 grid = ${PANEL_MM_PER_UNIT} mm · Tab toggles grid snap (${panelCursorGridSnap ? 'ON' : 'OFF'}) · Enter → MOVE / DIM`
+        ? `Panel · CAD · 1 grid = ${PANEL_MM_PER_UNIT} mm · Shift toggles grid snap (${panelCursorGridSnap ? 'ON' : 'OFF'}) · Enter → MOVE / DIM`
         : 'Electronics page'
     );
     document.body.classList.toggle('panel-grid-snap-off', next === 'panel' && !panelCursorGridSnap);
@@ -10635,6 +10867,15 @@
     }
   }
 
+  function syncLightGridToggleUi() {
+    if (settingsLightGrid) {
+      settingsLightGrid.setAttribute('aria-pressed', lightGridEnabled ? 'true' : 'false');
+    }
+    if (settingsLightGridState) {
+      settingsLightGridState.textContent = lightGridEnabled ? 'On' : 'Off';
+    }
+  }
+
   function applyHeaderDitherEnabled(enabled) {
     headerDitherEnabled = !!enabled;
     const header = document.querySelector('.app-header');
@@ -10642,6 +10883,12 @@
     syncHeaderDitherToggleUi();
     if (headerDitherEnabled) startHeaderDitherMotion();
     else stopHeaderDitherMotion();
+  }
+
+  function applyLightGridEnabled(enabled) {
+    lightGridEnabled = !!enabled;
+    document.body.classList.toggle('light-grid', lightGridEnabled);
+    syncLightGridToggleUi();
   }
 
   function saveUiPrefs() {
@@ -10652,7 +10899,10 @@
         uiElementScalePct,
         accentThemeIndex,
         headerDitherEnabled,
+        lightGridEnabled,
         schematicWireColourEnabled,
+        wireAutoDelete,
+        wirePersist,
       }));
     } catch (_) { /* ignore */ }
   }
@@ -10670,9 +10920,12 @@
       if (Number.isFinite(raw.uiElementScalePct)) uiElementScalePct = raw.uiElementScalePct;
       if (typeof raw.colorblindMode === 'string') colorblindMode = raw.colorblindMode;
       if (typeof raw.headerDitherEnabled === 'boolean') headerDitherEnabled = raw.headerDitherEnabled;
+      if (typeof raw.lightGridEnabled === 'boolean') lightGridEnabled = raw.lightGridEnabled;
       if (typeof raw.schematicWireColourEnabled === 'boolean') {
         schematicWireColourEnabled = raw.schematicWireColourEnabled;
       }
+      if (typeof raw.wireAutoDelete === 'boolean') wireAutoDelete = raw.wireAutoDelete;
+      if (typeof raw.wirePersist === 'boolean') wirePersist = raw.wirePersist;
     } catch (_) { /* ignore */ }
   }
 
@@ -10692,6 +10945,7 @@
     clearOverlapLeadHighlights();
     clearPanelSnapSelection();
     clearDimAnnotationSelection();
+    if (typeof clearPanelCurveSelection === 'function') clearPanelCurveSelection();
     closeAssetConfigMenu();
     closeAssetStateTermMenu();
     clearAssetStateClickTimer();
@@ -10765,9 +11019,13 @@
     if (!assetStateTermMenu || !comp) return;
     const template = GuitarAssets.getTemplate(comp.dataset.assetId);
     if (!template) return;
-    const states = GuitarAssets.getEffectiveStates(comp);
+    // Clone template states onto the instance so workspace edits never mutate builtins
+    const states = GuitarAssets.ensureInstanceStates(comp);
     const state = states[stateIndex];
     if (!state) return;
+
+    // Keep focus if rebuilding the same open menu around an active field
+    const prevFocusKey = assetStateTermMenu.querySelector('input:focus')?.dataset?.stateField || null;
 
     assetStateMenuIndex = stateIndex;
     assetStateTermMenu.innerHTML = '';
@@ -10777,9 +11035,10 @@
     const removeBtn = document.createElement('button');
     removeBtn.type = 'button';
     removeBtn.className = 'asset-state-term-remove';
-    removeBtn.textContent = '−';
-    removeBtn.title = 'Delete state';
-    removeBtn.setAttribute('aria-label', `Delete state ${stateIndex + 1}`);
+    removeBtn.textContent = '×';
+    removeBtn.title = 'Remove state';
+    removeBtn.setAttribute('aria-label', `Remove state ${stateIndex + 1}`);
+    // Any state removable when more than one remains (including original template throws)
     removeBtn.disabled = states.length <= 1;
     removeBtn.addEventListener('click', (e) => {
       e.preventDefault();
@@ -10808,12 +11067,50 @@
     header.appendChild(renameBtn);
     assetStateTermMenu.appendChild(header);
 
+    const primaryRow = document.createElement('div');
+    primaryRow.className = 'asset-state-primary-row';
+    const primaryInput = document.createElement('input');
+    primaryInput.type = 'text';
+    primaryInput.className = 'asset-state-secondary-input';
+    primaryInput.dataset.stateField = 'primary';
+    primaryInput.maxLength = 96;
+    primaryInput.placeholder = 'State / hover name…';
+    primaryInput.value = String(state.label != null ? state.label : '');
+    primaryInput.spellcheck = false;
+    primaryInput.autocomplete = 'off';
+    const primaryHint = document.createElement('div');
+    primaryHint.className = 'asset-state-secondary-hint';
+    primaryHint.textContent = 'State name (hover float)';
+    primaryRow.appendChild(primaryInput);
+    primaryRow.appendChild(primaryHint);
+    assetStateTermMenu.appendChild(primaryRow);
+    const commitPrimary = () => {
+      GuitarAssets.setInstanceStateLabel(comp, stateIndex, primaryInput.value);
+      markProjectDirty();
+      updateSelectionStatus();
+      updateAssetConfigChrome();
+    };
+    primaryInput.addEventListener('mousedown', (e) => e.stopPropagation());
+    primaryInput.addEventListener('click', (e) => e.stopPropagation());
+    primaryInput.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commitPrimary();
+        primaryInput.blur();
+      }
+    });
+    primaryInput.addEventListener('keyup', (e) => e.stopPropagation());
+    primaryInput.addEventListener('change', commitPrimary);
+    primaryInput.addEventListener('input', commitPrimary);
+
     const secondaryRow = document.createElement('div');
-    secondaryRow.className = 'asset-state-secondary-row';
+    secondaryRow.className = 'asset-state-secondary-row is-open';
     const secondaryInput = document.createElement('input');
     secondaryInput.type = 'text';
     secondaryInput.className = 'asset-state-secondary-input';
-    secondaryInput.maxLength = 24;
+    secondaryInput.dataset.stateField = 'secondary';
+    secondaryInput.maxLength = 96;
     secondaryInput.placeholder = 'Optional line above…';
     secondaryInput.value = String(state.secondaryLabel || '');
     secondaryInput.spellcheck = false;
@@ -10895,6 +11192,10 @@
 
     assetStateTermMenu.classList.remove('hidden');
     positionAssetStateTermMenuInWorkspace(anchorEl);
+    if (prevFocusKey) {
+      const again = assetStateTermMenu.querySelector(`input[data-state-field="${prevFocusKey}"]`);
+      again?.focus({ preventScroll: true });
+    }
   }
 
   function rebuildAssetStateNumbers(comp) {
@@ -10962,30 +11263,39 @@
     assetStateChrome.classList.remove('hidden');
 
     if (assetStateTermMenu && !assetStateTermMenu.classList.contains('hidden') && assetStateMenuIndex != null) {
-      const anchor = assetStateNumbers?.querySelector(`[data-state-index="${assetStateMenuIndex}"]`);
-      if (anchor) openAssetStateTermMenu(comp, assetStateMenuIndex, anchor);
-      else closeAssetStateTermMenu();
+      if (assetStateTermMenu.contains(document.activeElement)) {
+        // Keep editing — only reposition
+        const anchor = assetStateNumbers?.querySelector(`[data-state-index="${assetStateMenuIndex}"]`);
+        if (anchor) positionAssetStateTermMenuInWorkspace(anchor);
+        else closeAssetStateTermMenu();
+      } else {
+        const anchor = assetStateNumbers?.querySelector(`[data-state-index="${assetStateMenuIndex}"]`);
+        if (anchor) openAssetStateTermMenu(comp, assetStateMenuIndex, anchor);
+        else closeAssetStateTermMenu();
+      }
     }
   }
 
   function isToggleSwitchComponent(comp) {
     const id = comp?.dataset?.assetId;
-    if (id === 'dpdt' || id === 'dpdt-on-off-on' || id === 'dpdt-on-on') return true;
+    if (id === 'dpdt' || id === 'dpdt-on-off-on' || id === 'dpdt-on-on' || id === 'spst-on-off') return true;
     if (id === 'push-pot-on-on') return true;
     const template = GuitarAssets.getTemplate(id);
-    return !!template?.pushPull;
+    return !!(template?.pushPull || template?.switchThrow);
   }
 
   function getToggleSwitchThrow(comp) {
     const template = GuitarAssets.getTemplate(comp?.dataset?.assetId);
     if (template?.switchThrow) return template.switchThrow;
     const id = comp?.dataset?.assetId;
+    if (id === 'spst-on-off') return 'on-off';
     if (id === 'dpdt-on-off-on') return 'on-off-on';
     if (id === 'dpdt-on-on') return 'on-on';
     return 'on-on-on';
   }
 
   function getToggleSwitchThrowLabel(throwKind) {
+    if (throwKind === 'on-off') return 'ON-OFF';
     if (throwKind === 'on-off-on') return 'ON-OFF-ON';
     if (throwKind === 'on-on') return 'ON-ON';
     return 'ON-ON-ON';
@@ -11001,6 +11311,10 @@
 
   function isOnOnToggle(comp) {
     return isToggleSwitchComponent(comp) && getToggleSwitchThrow(comp) === 'on-on';
+  }
+
+  function isOnOffToggle(comp) {
+    return isToggleSwitchComponent(comp) && getToggleSwitchThrow(comp) === 'on-off';
   }
 
   /** ON-ON-ON middle: A closes all six poles via commons; B is Type-2 mirror.
@@ -11124,6 +11438,13 @@
 
   function setToggleSwitchType(el, type) {
     if (!el || !isToggleSwitchComponent(el)) return;
+    if (isOnOffToggle(el)) {
+      // SPST has no Type 1/2 polarity swap — keep stock On/Off bridges
+      el.dataset.switchType = '1';
+      refreshToggleSwitchVisuals(el);
+      notifySchematicCircuitChanged();
+      return;
+    }
     const next = type === 2 ? 2 : 1;
     el.dataset.switchType = String(next);
     applyToggleSwitchTypeWiring(el, next);
@@ -11181,9 +11502,13 @@
     if (!taggedG) return false;
 
     // Pedal / amp supply chassis returns (not battery P− — that is supply return)
+    // Standalone chassis-ground asset is also a circuit ground reference
+    const assetId = host.dataset?.assetId || '';
     return isDcJackComponent(host)
       || isHvSupplyComponent(host)
-      || isDualRailComponent(host);
+      || isDualRailComponent(host)
+      || assetId === 'chassis-ground'
+      || GuitarAssets.getTemplate(assetId)?.isCircuitGround;
   }
 
   function collectOutputJackGroundTerminals() {
@@ -12041,6 +12366,7 @@
   /**
    * Concise insulation set. buildUpMm = Ø added to bare (mid of range if ranged).
    * packFactor = relative winding density vs plain enamel (1 = densest baseline).
+   * visualEdgeTurns42 ≈ winds to Strat top-bobbin edge @ 42 AWG (visual wind outline only).
    * Copper R/m is bare-only; packFactor affects filled-cavity turns / effective R.
    */
   const BOBBIN_COIL_INSULATIONS = {
@@ -12051,6 +12377,7 @@
       buildUpMmMin: 0.010,
       buildUpMmMax: 0.016,
       packFactor: 1.0,
+      visualEdgeTurns42: 9650,
     },
     heavyEnamel: {
       id: 'heavyEnamel',
@@ -12059,6 +12386,7 @@
       buildUpMmMin: 0.018,
       buildUpMmMax: 0.028,
       packFactor: 0.90,
+      visualEdgeTurns42: 8400,
     },
     formvar: {
       id: 'formvar',
@@ -12067,6 +12395,7 @@
       buildUpMmMin: 0.011,
       buildUpMmMax: 0.018,
       packFactor: 0.97,
+      visualEdgeTurns42: 8650,
     },
     heavyFormvar: {
       id: 'heavyFormvar',
@@ -12075,14 +12404,16 @@
       buildUpMmMin: 0.020,
       buildUpMmMax: 0.032,
       packFactor: 0.86,
+      visualEdgeTurns42: 7900,
     },
     poly: {
       id: 'poly',
-      label: 'Poly',
+      label: 'Polysol / Poly',
       buildUpMm: 0.015,
       buildUpMmMin: 0.012,
       buildUpMmMax: 0.022,
       packFactor: 0.95,
+      visualEdgeTurns42: 9100,
     },
   };
 
@@ -14898,6 +15229,47 @@
     syncBobbinConfigFields(el);
   }
 
+  /**
+   * Hypothetical copper wind pack depth (mm) for one coil — mostly visual.
+   * Biased by insulation edge-fill (~Strat top bobbin @ 42 AWG), with a light
+   * physics term from winds × OD × pack × cavity height.
+   */
+  function getBobbinCoilWindBuildDepthMm(el, coilIndex = 0) {
+    const N = getBobbinCoilTurnsList(el)[coilIndex] || 0;
+    const od = Math.max(1e-4, getBobbinCoilOdMm(el, coilIndex));
+    const pack = Math.max(0.05, getBobbinCoilPackFactor(el, coilIndex));
+    const cavityH = Math.max(0.5, getBobbinCavityHeightMm(el));
+    const widthMm = getBobbinWidthMm(el);
+    const maxBody = getBobbinMaxMagnetDiameterMm(el);
+    const windowMax = Math.max(0.25, (widthMm - maxBody) / 2);
+
+    const ins = getBobbinCoilInsulation(el, coilIndex);
+    const edge42 = Math.max(1000, ins?.visualEdgeTurns42 || 9650);
+    // Scale edge turns by OD area vs 42 AWG + plain enamel (≈0.0753 mm)
+    const od42ref = 0.0633 + 0.012;
+    const odAreaScale = (od / od42ref) * (od / od42ref);
+    const edgeTurns = edge42 / Math.max(0.45, odAreaScale);
+
+    const fill = Math.min(1.12, Math.max(0, N / edgeTurns));
+    const visualDepth = windowMax * fill;
+
+    // Light physics blend (kept small — outline is display-only)
+    const phys = (N * od * od) / (BOBBIN_WIND_FILL_ETA * pack * 2 * cavityH);
+    const depth = visualDepth * 0.82 + Math.min(windowMax, phys) * 0.18;
+    return Math.min(windowMax * 1.12, Math.max(od * 0.9, depth));
+  }
+
+  /** Mean turn perimeter (mm) at the outer wind boundary for display / future L. */
+  function getBobbinCoilWindPerimeterMm(el, coilIndex = 0) {
+    const lengthMm = getBobbinLengthMm(el);
+    const widthMm = getBobbinWidthMm(el);
+    const depth = getBobbinCoilWindBuildDepthMm(el, coilIndex);
+    const L = lengthMm + 2 * depth;
+    const W = widthMm + 2 * depth;
+    // Capsule perimeter ≈ 2·(L − W) + π·W
+    return 2 * Math.max(0, L - W) + Math.PI * W;
+  }
+
   /** Capsule path: length = tip-to-tip; width = full height / hemisphere diameter. */
   function bobbinCapsulePath(L, W) {
     const R = W / 2;
@@ -15135,6 +15507,39 @@
     };
   }
 
+  /** Copper wind pack preview in dimensional views — off until visuals are reworked. */
+  const BOBBIN_COPPER_WIND_PREVIEW = false;
+
+  /** Copper hypo wind pack band for front/side elevation (cavity height × radial build). */
+  function appendBobbinCoilWindElevation(g, ns, {
+    plateLeft, plateW, cavityTopY, cavityHpx, scale, windDepthMm, odMm, coilIndex = 0, dimmed = false,
+  }) {
+    if (!BOBBIN_COPPER_WIND_PREVIEW) return;
+    if (!(windDepthMm > 0.05) || !(cavityHpx > 0.2)) return;
+    const depthPx = windDepthMm * scale;
+    const wind = document.createElementNS(ns, 'rect');
+    wind.setAttribute('x', String(plateLeft - depthPx));
+    wind.setAttribute('y', String(cavityTopY));
+    wind.setAttribute('width', String(plateW + 2 * depthPx));
+    wind.setAttribute('height', String(cavityHpx));
+    // Small fillet — round the copper pack corners in elevation
+    const fillet = Math.min(depthPx * 0.45, cavityHpx * 0.28, 2.4 * Math.max(scale, 0.01));
+    wind.setAttribute('rx', String(Math.max(0.35, fillet)));
+    wind.setAttribute('ry', String(Math.max(0.35, fillet)));
+    wind.setAttribute('fill', 'rgba(184, 115, 51, 0.12)');
+    wind.setAttribute('stroke', '#c47a3a');
+    // Thin copper rim (≈ fraction of a wire diameter)
+    const strokePx = Math.max(odMm * 0.45, 0.06) * scale;
+    wind.setAttribute('stroke-width', String(strokePx));
+    wind.setAttribute('stroke-linejoin', 'round');
+    wind.setAttribute('pointer-events', 'none');
+    wind.classList.add('bobbin-coil-wind-boundary');
+    if (dimmed) wind.setAttribute('opacity', '0.28');
+    wind.dataset.bobbinCoil = String(coilIndex);
+    wind.dataset.windDepthMm = String(Math.round(windDepthMm * 100) / 100);
+    g.appendChild(wind);
+  }
+
   /**
    * End / side elevation: looking along bobbin length (width × height).
    * Dual-coil shows screw bobbin | bar magnet | slug bobbin, then NiAg baseplate.
@@ -15239,6 +15644,18 @@
         plateCls += ' is-dim';
         cavityCls += ' is-dim';
       }
+
+      appendBobbinCoilWindElevation(g, ns, {
+        plateLeft,
+        plateW,
+        cavityTopY,
+        cavityHpx,
+        scale,
+        windDepthMm: getBobbinCoilWindBuildDepthMm(el, coil),
+        odMm: getBobbinCoilOdMm(el, coil),
+        coilIndex: coil,
+        dimmed: coilDim,
+      });
 
       const cavity = document.createElementNS(ns, 'rect');
       cavity.setAttribute('x', String(plateLeft));
@@ -16001,6 +16418,29 @@
       });
     });
 
+    {
+      const coilCount = getBobbinCoilCount(el);
+      let windDepth = 0;
+      let odMm = getBobbinCoilOdMm(el, 0);
+      for (let c = 0; c < coilCount; c++) {
+        const d = getBobbinCoilWindBuildDepthMm(el, c);
+        if (d >= windDepth) {
+          windDepth = d;
+          odMm = getBobbinCoilOdMm(el, c);
+        }
+      }
+      appendBobbinCoilWindElevation(g, ns, {
+        plateLeft,
+        plateW,
+        cavityTopY,
+        cavityHpx,
+        scale,
+        windDepthMm: windDepth,
+        odMm,
+        coilIndex: 0,
+      });
+    }
+
     const cavity = document.createElementNS(ns, 'rect');
     cavity.setAttribute('x', String(plateLeft));
     cavity.setAttribute('y', String(cavityTopY));
@@ -16158,6 +16598,33 @@
 
     for (let coil = 0; coil < coils; coil++) {
       const coilCy = getBobbinCoilCenterYMm(el, coil);
+      // Hypothetical copper wind boundary (gauge × pack × winds → build depth)
+      if (BOBBIN_COPPER_WIND_PREVIEW) {
+        const windDepth = getBobbinCoilWindBuildDepthMm(el, coil);
+        const odMm = getBobbinCoilOdMm(el, coil);
+        const windL = Math.max(pathL + 2 * windDepth, pathW + 2 * windDepth);
+        const windW = Math.max(1, pathW + 2 * windDepth);
+        const wind = document.createElementNS(ns, 'path');
+        wind.setAttribute('d', bobbinCapsulePath(windL, windW));
+        wind.setAttribute('transform', `translate(${cx} ${cy + coilCy * scale}) scale(${scale})`);
+        wind.setAttribute('fill', 'rgba(184, 115, 51, 0.10)');
+        wind.setAttribute('stroke', '#c47a3a');
+        // Thin copper rim (≈ fraction of a wire diameter)
+        const windStrokeMm = Math.max(odMm * 0.4, 0.05);
+        wind.setAttribute('stroke-width', String(windStrokeMm));
+        wind.setAttribute('stroke-linejoin', 'round');
+        wind.setAttribute('stroke-linecap', 'round');
+        wind.setAttribute('pointer-events', 'none');
+        wind.classList.add('bobbin-coil-wind-boundary');
+        if (hasCoilSelection && !bobbinCoilSelection.has(coil)) {
+          wind.setAttribute('opacity', '0.28');
+        }
+        wind.dataset.bobbinCoil = String(coil);
+        wind.dataset.windDepthMm = String(Math.round(windDepth * 100) / 100);
+        wind.dataset.windPerimeterMm = String(Math.round(getBobbinCoilWindPerimeterMm(el, coil) * 10) / 10);
+        g.appendChild(wind);
+      }
+
       const path = document.createElementNS(ns, 'path');
       path.setAttribute('d', bobbinCapsulePath(pathL, pathW));
       path.setAttribute('transform', `translate(${cx} ${cy + coilCy * scale}) scale(${scale})`);
@@ -16379,6 +16846,7 @@
 
   function syncBobbinConfigFields(comp) {
     const section = document.getElementById('asset-config-bobbin-section');
+    const dimMenu = document.getElementById('dimensional-config-menu');
     const dimControls = document.getElementById('asset-config-dimensional-controls');
     const dimBtn = document.getElementById('asset-config-dimensional-btn');
     const bridgeToggle = document.getElementById('asset-config-dimensional-bridge');
@@ -16399,6 +16867,11 @@
       if (bridgeToggle) {
         bridgeToggle.checked = false;
         bridgeToggle.setAttribute('aria-checked', 'false');
+      }
+      if (dimMenu) {
+        dimMenu.classList.add('hidden');
+        dimMenu.hidden = true;
+        dimMenu.classList.remove('is-minimized');
       }
       if (section) {
         section.classList.add('hidden');
@@ -16428,6 +16901,22 @@
     if (bridgeToggle && document.activeElement !== bridgeToggle) {
       bridgeToggle.checked = bridgeOn;
       bridgeToggle.setAttribute('aria-checked', bridgeOn ? 'true' : 'false');
+    }
+    if (dimMenu) {
+      dimMenu.classList.toggle('hidden', !bobbinDimensionalExpanded);
+      dimMenu.hidden = !bobbinDimensionalExpanded;
+      if (!bobbinDimensionalExpanded) dimMenu.classList.remove('is-minimized');
+      const minBtn = document.getElementById('dimensional-config-minimize');
+      if (minBtn) {
+        const minimized = dimMenu.classList.contains('is-minimized');
+        minBtn.setAttribute('aria-expanded', minimized ? 'false' : 'true');
+        minBtn.title = minimized ? 'Restore' : 'Minimize';
+        minBtn.textContent = minimized ? '▸' : '▾';
+      }
+      if (bobbinDimensionalExpanded && !dimMenu.dataset.placed) {
+        positionDimensionalConfigMenu(dimBtn);
+        dimMenu.dataset.placed = '1';
+      }
     }
     if (section) {
       section.classList.toggle('hidden', !bobbinDimensionalExpanded);
@@ -16624,9 +17113,92 @@
       bobbinPreviewFocus = 'plan';
       bobbinElevAspect = 'front';
       syncBobbinPreviewFocusUi();
+      const dimMenu = document.getElementById('dimensional-config-menu');
+      if (dimMenu) delete dimMenu.dataset.placed;
     }
     const comp = getSingleSelectedComponent();
     syncBobbinConfigFields(comp);
+  }
+
+  function positionDimensionalConfigMenu(anchorBtn) {
+    const menu = document.getElementById('dimensional-config-menu');
+    if (!menu) return;
+    const pad = 12;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let left = Math.round(vw * 0.58);
+    let top = Math.round(vh * 0.12);
+    if (anchorBtn) {
+      const r = anchorBtn.getBoundingClientRect();
+      left = Math.round(r.right + 10);
+      top = Math.round(r.top);
+    }
+    menu.style.left = `${Math.max(pad, Math.min(left, vw - 300))}px`;
+    menu.style.top = `${Math.max(pad, Math.min(top, vh - 120))}px`;
+  }
+
+  function bindUiFloatMenuChrome(menuEl, {
+    barId,
+    minId,
+    closeId,
+    onClose,
+  } = {}) {
+    if (!menuEl) return;
+    const bar = barId ? document.getElementById(barId) : menuEl.querySelector('.ui-float-menu-bar');
+    const minBtn = minId ? document.getElementById(minId) : menuEl.querySelector('.ui-float-menu-min');
+    const closeBtn = closeId ? document.getElementById(closeId) : menuEl.querySelector('.ui-float-menu-close');
+    let drag = null;
+
+    const syncMinUi = () => {
+      const minimized = menuEl.classList.contains('is-minimized');
+      if (minBtn) {
+        minBtn.setAttribute('aria-expanded', minimized ? 'false' : 'true');
+        minBtn.title = minimized ? 'Restore' : 'Minimize';
+        minBtn.textContent = minimized ? '▸' : '▾';
+      }
+    };
+
+    minBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      menuEl.classList.toggle('is-minimized');
+      syncMinUi();
+    });
+
+    closeBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (typeof onClose === 'function') onClose();
+    });
+
+    bar?.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      if (e.target.closest('button')) return;
+      const rect = menuEl.getBoundingClientRect();
+      drag = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      };
+      menuEl.classList.add('is-dragging');
+      e.preventDefault();
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!drag) return;
+      const pad = 4;
+      const w = menuEl.offsetWidth || 280;
+      const h = menuEl.offsetHeight || 48;
+      const left = Math.max(pad, Math.min(e.clientX - drag.x, window.innerWidth - Math.min(w, 80) - pad));
+      const top = Math.max(pad, Math.min(e.clientY - drag.y, window.innerHeight - Math.min(h, 40) - pad));
+      menuEl.style.left = `${Math.round(left)}px`;
+      menuEl.style.top = `${Math.round(top)}px`;
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (!drag) return;
+      drag = null;
+      menuEl.classList.remove('is-dragging');
+    });
   }
 
   /**
@@ -17883,7 +18455,7 @@
 
   function setAssetPlaceLabel(el, text) {
     if (!el) return;
-    const next = String(text ?? '').trim().slice(0, 12);
+    const next = String(text ?? '').trim().slice(0, 64);
     if (next) el.dataset.placeLabel = next;
     else delete el.dataset.placeLabel;
     updateAssetLabelBox(el);
@@ -17918,7 +18490,7 @@
       delete el.dataset.hoverLabel;
       const idx = GuitarAssets.getComponentStateIndex(el);
       if (legacy && states[idx] && !String(states[idx].label || '').trim()) {
-        states[idx].label = legacy.slice(0, 24);
+        states[idx].label = legacy.slice(0, 48);
       }
     }
     if (template?.hideStateLabel) {
@@ -17926,7 +18498,7 @@
         const sec = String(s.secondaryLabel || '').trim();
         const lab = s.label != null ? String(s.label).trim() : '';
         if (sec && !lab) {
-          s.label = sec.slice(0, 24);
+          s.label = sec.slice(0, 48);
           s.secondaryLabel = '';
         }
       });
@@ -17944,7 +18516,7 @@
 
   function setAssetHoverLabel(el, text) {
     if (!el) return;
-    const next = String(text ?? '').trim().slice(0, 24);
+    const next = String(text ?? '').trim().slice(0, 96);
     if (!assetHasStates(el)) {
       const template = GuitarAssets.getTemplate(el.dataset.assetId);
       if (!template) return;
@@ -18661,6 +19233,9 @@
       ? state.ifA
       : parseCurrentAmps(getComponentElectricalValue(comp, 'forwardCurrent'));
     const vs = Number.isFinite(state.vs) ? state.vs : NaN;
+    const intensity = Number.isFinite(state.intensity)
+      ? state.intensity
+      : computeLedGlowIntensity({ powered: state.powered, vs, vf, ifA });
     const out = new Map();
     if (Number.isFinite(state.ballastR)) {
       out.set('led-ballast', `R ≈ ${formatOhmsCompact(state.ballastR)} (Vs=${vs} V)`);
@@ -18677,7 +19252,59 @@
       const ifText = ifA >= 0.001 ? `${(ifA * 1000).toFixed(1)} mA` : `${ifA} A`;
       out.set('kirchhoff-current', `Series chain shares If ≈ ${ifText}`);
     }
+    const pct = Math.round(Math.max(0, Math.min(1, intensity)) * 100);
+    out.set('led-glow-intensity', state.powered
+      ? `Glow ≈ ${pct}%${Number.isFinite(vs) && Number.isFinite(vf) ? ` · headroom ${(vs - vf).toFixed(2)} V` : ''}`
+      : 'Glow off — no closed DC path');
     return out;
+  }
+
+  function buildLedGlowIntensityGuide(comp) {
+    const wrap = document.createElement('div');
+    wrap.className = 'led-glow-intensity-guide';
+    wrap.setAttribute('role', 'group');
+    wrap.setAttribute('aria-label', 'LED glow intensity');
+
+    const neighbors = buildDcConductiveNeighborMap();
+    const state = analyzeLedPowerState(comp, neighbors, null);
+    const intensity = Number.isFinite(state.intensity) ? state.intensity : 0;
+    const pct = Math.round(Math.max(0, Math.min(1, intensity)) * 100);
+
+    const title = document.createElement('div');
+    title.className = 'led-glow-intensity-title';
+    title.textContent = 'Glow intensity';
+
+    const track = document.createElement('div');
+    track.className = 'led-glow-intensity-track';
+    track.setAttribute('aria-hidden', 'true');
+    const fill = document.createElement('div');
+    fill.className = 'led-glow-intensity-fill';
+    fill.style.width = `${pct}%`;
+    const color = normalizeGlowColor(getComponentElectricalValue(comp, 'glowColor'), '#ff3b30');
+    fill.style.background = `linear-gradient(90deg, color-mix(in srgb, ${color} 35%, #222), ${color})`;
+    track.appendChild(fill);
+    for (let i = 1; i <= 4; i++) {
+      const tick = document.createElement('span');
+      tick.className = 'led-glow-intensity-tick';
+      tick.style.left = `${i * 20}%`;
+      track.appendChild(tick);
+    }
+
+    const read = document.createElement('div');
+    read.className = 'led-glow-intensity-readout';
+    read.textContent = state.powered ? `${pct}%` : 'Off';
+
+    const hint = document.createElement('div');
+    hint.className = 'led-glow-intensity-hint';
+    hint.textContent = state.powered
+      ? 'Relative brightness from Vs vs Vf headroom'
+      : 'Needs anode→P+ and cathode→return';
+
+    wrap.appendChild(title);
+    wrap.appendChild(track);
+    wrap.appendChild(read);
+    wrap.appendChild(hint);
+    return wrap;
   }
 
   /** Which cog-menu formulas the user has expanded (per selected asset). */
@@ -18778,7 +19405,14 @@
       }
       host.appendChild(el);
     });
-    syncAssetConfigFormulasToggle(formulas.length > 0);
+    if (isLedIndicatorComponent(comp)) {
+      try {
+        host.appendChild(buildLedGlowIntensityGuide(comp));
+      } catch (err) {
+        console.warn('LED intensity guide skipped', err);
+      }
+    }
+    syncAssetConfigFormulasToggle(formulas.length > 0 || isLedIndicatorComponent(comp));
   }
 
   function applyDiodeMaterial(el, {
@@ -20942,6 +21576,22 @@
     });
   }
 
+  /**
+   * World-space loom/fan (`.hb-world-leads`) and tip→lug lead wires do not move with
+   * the dual-coil DOM node. Refresh them whenever the body is translated so the
+   * 4-conductor loom stays attached during drag.
+   */
+  function refreshDualCoilLeadsForMovedComponents(compList) {
+    if (!compList?.length) return;
+    let any = false;
+    compList.forEach((comp) => {
+      if (!isDualCoilComponent(comp)) return;
+      any = true;
+      syncDualCoilTipAttachments(comp);
+    });
+    if (any) moveAllHbWorldLeads();
+  }
+
   function eachHbTipAttachmentPair(fn) {
     components.forEach((comp) => {
       if (!isDualCoilComponent(comp)) return;
@@ -21427,7 +22077,7 @@
 
     if (groundRow) groundRow.classList.toggle('hidden', isOutput || !comp);
     if (switchThrowRow) switchThrowRow.classList.toggle('hidden', !isToggle || !comp);
-    if (switchTypeRow) switchTypeRow.classList.toggle('hidden', !isToggle || !comp);
+    if (switchTypeRow) switchTypeRow.classList.toggle('hidden', !isToggle || !comp || isOnOffToggle(comp));
     if (potVariantRow) potVariantRow.classList.toggle('hidden', !showPotVariant || !comp);
     if (potTaperRow) potTaperRow.classList.toggle('hidden', !isPot || !comp);
     if (potDialRow) potDialRow.classList.toggle('hidden', !isPot || !comp);
@@ -21609,25 +22259,16 @@
     return [...selectedComponents][0];
   }
 
-  /** Counter-scale for workspace-mounted chrome so text stays sharp at any zoom. */
-  function workspaceUiCounterScale() {
-    const s = viewportScale();
-    return s > 1e-6 ? (1 / s) : 1;
-  }
-
   function ensureWorkspaceUiHost(el) {
     if (!el || !workspace) return;
     if (el.parentElement !== workspace) workspace.appendChild(el);
   }
 
   /**
-   * Pin cog menus in workspace coords next to the asset (like before), with
-   * scale(1/zoom) so they cancel the workspace CSS transform and stay sharp.
+   * Pin cog menus in workspace coords next to the asset (scale with the board).
    */
   function positionAssetConfigFloatingUi() {
     if (!assetConfigBtn || assetConfigBtn.classList.contains('hidden')) return;
-    const inv = workspaceUiCounterScale();
-    const scale = viewportScale();
     const btnLeft = parseFloat(assetConfigBtn.style.left) || 0;
     const btnTop = parseFloat(assetConfigBtn.style.top) || 0;
     const btnSize = ASSET_CONFIG_BTN_SIZE;
@@ -21636,30 +22277,13 @@
     if (assetConfigMenu && !assetConfigMenu.classList.contains('hidden')) {
       ensureWorkspaceUiHost(assetConfigMenu);
       assetConfigMenu.style.position = 'absolute';
-      assetConfigMenu.style.zIndex = '45';
+      assetConfigMenu.style.zIndex = '41';
       assetConfigMenu.style.right = '';
       assetConfigMenu.style.bottom = '';
-      assetConfigMenu.style.transformOrigin = 'top left';
-      assetConfigMenu.style.transform = `scale(${inv})`;
-
-      let left = btnLeft + btnSize + gap;
-      let top = btnTop;
-      assetConfigMenu.style.left = `${left}px`;
-      assetConfigMenu.style.top = `${top}px`;
-
-      const view = canvas?.getBoundingClientRect() || {
-        left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight,
-      };
-      let mr = assetConfigMenu.getBoundingClientRect();
-      if (mr.right > view.right - 8) {
-        left = btnLeft - gap - (mr.width / scale);
-        assetConfigMenu.style.left = `${left}px`;
-        mr = assetConfigMenu.getBoundingClientRect();
-      }
-      if (mr.bottom > view.bottom - 8) {
-        top = btnTop - Math.max(0, (mr.bottom - (view.bottom - 8)) / scale);
-        assetConfigMenu.style.top = `${Math.max(0, top)}px`;
-      }
+      assetConfigMenu.style.transform = '';
+      assetConfigMenu.style.transformOrigin = '';
+      assetConfigMenu.style.left = `${btnLeft + btnSize + gap}px`;
+      assetConfigMenu.style.top = `${Math.max(0, btnTop)}px`;
     }
 
     if (assetStateTermMenu && !assetStateTermMenu.classList.contains('hidden')) {
@@ -21670,8 +22294,6 @@
   function positionAssetStateTermMenuInWorkspace(anchorEl) {
     if (!assetStateTermMenu || assetStateTermMenu.classList.contains('hidden')) return;
     ensureWorkspaceUiHost(assetStateTermMenu);
-    const inv = workspaceUiCounterScale();
-    const scale = viewportScale();
     const btnLeft = parseFloat(assetConfigBtn?.style.left) || 0;
     const btnTop = parseFloat(assetConfigBtn?.style.top) || 0;
     const btnSize = ASSET_CONFIG_BTN_SIZE;
@@ -21686,29 +22308,13 @@
     }
 
     assetStateTermMenu.style.position = 'absolute';
-    assetStateTermMenu.style.zIndex = '46';
+    assetStateTermMenu.style.zIndex = '42';
     assetStateTermMenu.style.right = '';
     assetStateTermMenu.style.bottom = '';
-    assetStateTermMenu.style.transformOrigin = 'top left';
-    assetStateTermMenu.style.transform = `scale(${inv})`;
-
-    let left = btnLeft + btnSize + gap;
-    assetStateTermMenu.style.left = `${left}px`;
-    assetStateTermMenu.style.top = `${top}px`;
-
-    const view = canvas?.getBoundingClientRect() || {
-      left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight,
-    };
-    let mr = assetStateTermMenu.getBoundingClientRect();
-    if (mr.right > view.right - 8) {
-      left = btnLeft - gap - (mr.width / scale);
-      assetStateTermMenu.style.left = `${left}px`;
-      mr = assetStateTermMenu.getBoundingClientRect();
-    }
-    if (mr.bottom > view.bottom - 8) {
-      top -= Math.max(0, (mr.bottom - (view.bottom - 8)) / scale);
-      assetStateTermMenu.style.top = `${Math.max(0, top)}px`;
-    }
+    assetStateTermMenu.style.transform = '';
+    assetStateTermMenu.style.transformOrigin = '';
+    assetStateTermMenu.style.left = `${btnLeft + btnSize + gap}px`;
+    assetStateTermMenu.style.top = `${Math.max(0, top)}px`;
   }
 
   function restoreAssetConfigMenuHost() {
@@ -21966,7 +22572,7 @@
     if (e.target.closest('.dim-annotation')) return false;
     if (e.target.closest('.note-window') || e.target.closest('.schematic-pin-window')) return false;
     if (e.target.closest('#workspace-group-chrome') || e.target.closest('#workspace-group-layer-bar')) return false;
-    if (e.target.closest('#asset-config-btn') || e.target.closest('#asset-config-menu')) return false;
+    if (e.target.closest('#asset-config-btn') || e.target.closest('#asset-config-menu') || e.target.closest('#dimensional-config-menu') || e.target.closest('#asset-editor')) return false;
     if (e.target.closest('#asset-state-chrome') || e.target.closest('#asset-state-term-menu')) return false;
     if (e.target.closest('.panel-snap-point')) return false;
     return e.target === canvas
@@ -22020,6 +22626,10 @@
     // Keep active group so +/- chrome still targets it after marquee picks outsiders
     const preservedGroupId = activeWorkspaceGroupId;
     if (!additive) deselectAll({ keepActiveGroup: inGroupEdit || !!preservedGroupId });
+    if (!additive && activeWorkspacePage === 'panel') {
+      selectedPanelCurveIds.clear();
+      clearPanelCurveGrips();
+    }
     // Marquee always bypasses group-unit select (singular or multi)
     workspaceGroupUnitSelect = false;
     if (!wireEditFocusMode) {
@@ -22049,6 +22659,12 @@
         entry.el.classList.add('selected');
         selectedPanelSnapIds.add(entry.el.dataset.id);
       });
+      panelCurves.forEach((curve) => {
+        if (!rectsIntersect(rect, getPanelCurveRect(curve))) return;
+        selectedPanelCurveIds.add(curve.id);
+        ensurePanelCurveEl(curve);
+      });
+      refreshPanelCurveGrips();
     }
     dimAnnotations.forEach((entry) => {
       if (!rectsIntersect(rect, getDimAnnotationRect(entry))) return;
@@ -22932,6 +23548,7 @@
             : `Click start point for wire (Layer ${activeLayer})`
           : 'Ready'
     );
+    updateSelectedToolHover();
   }
 
   function setPlacementMode(mode) {
@@ -22976,6 +23593,7 @@
             }, then end terminal`
         : 'Ready'
     );
+    updateSelectedToolHover();
   }
 
   function setEraseMode(active) {
@@ -22997,6 +23615,7 @@
     } else if (!wireMode) {
       setStatus('Ready');
     }
+    updateSelectedToolHover();
   }
 
   function eraseHitAtClient(clientX, clientY) {
@@ -23274,13 +23893,12 @@
 
   function updatePreviewLine(clientX, clientY) {
     if (!wireDraftStart) return;
-    const free = false;
     let end = clientToWorld(clientX, clientY);
     if (wireRouteMode === 'manhattan') {
       const prev = wireDraftAnchors.length
         ? wireDraftAnchors[wireDraftAnchors.length - 1]
         : { x: wireDraftStart.x, y: wireDraftStart.y };
-      end = manhattanAxisSnap(prev, end.x, end.y, free);
+      end = manhattanAxisSnap(prev, end.x, end.y);
     }
     let pts = [
       { x: wireDraftStart.x, y: wireDraftStart.y },
@@ -23504,17 +24122,17 @@
     return true;
   }
 
-  /** Snap a draft/bend point to horizontal or vertical from `prev`. */
-  function manhattanAxisSnap(prev, x, y, free) {
+  /** Snap a draft/bend point to horizontal or vertical from `prev` (cursor XY, no grid lock). */
+  function manhattanAxisSnap(prev, x, y) {
     if (!prev || !Number.isFinite(prev.x) || !Number.isFinite(prev.y)) {
-      return { x: snapWorkspace(x, free), y: snapWorkspace(y, free) };
+      return { x, y };
     }
     const dx = Math.abs(x - prev.x);
     const dy = Math.abs(y - prev.y);
     if (dx >= dy) {
-      return { x: snapWorkspace(x, free), y: prev.y };
+      return { x, y: prev.y };
     }
-    return { x: prev.x, y: snapWorkspace(y, free) };
+    return { x: prev.x, y };
   }
 
   /**
@@ -24541,25 +25159,63 @@
     reportGroundingStatus(n === 1 ? 'Deleted' : `Deleted ${n} items`);
   }
 
+  function detachWireEndpoint(wire, which) {
+    const ep = which === 'start' ? wire.start : wire.end;
+    if (!ep?.terminal) return false;
+    const pt = getAttachPoint(wire, which);
+    unregisterTerminalWire(ep.terminal, wire.id);
+    ep.terminal = null;
+    ep.x = pt.x;
+    ep.y = pt.y;
+    return true;
+  }
+
+  function countWireTerminalConnections(wire) {
+    let n = 0;
+    if (wire?.start?.terminal && document.body.contains(wire.start.terminal)) n += 1;
+    if (wire?.end?.terminal && document.body.contains(wire.end.terminal)) n += 1;
+    return n;
+  }
+
   function removeWiresForComponent(compEl) {
-    const terminals = compEl.querySelectorAll('.terminal');
-    const toRemove = [];
-    wires.forEach((wire, id) => {
-      for (const t of terminals) {
-        if (wire.start.terminal === t || wire.end.terminal === t) {
-          toRemove.push(id);
-          break;
-        }
+    const terminals = new Set([...compEl.querySelectorAll('.terminal')]);
+    const touched = [];
+    wires.forEach((wire) => {
+      const hitStart = terminals.has(wire.start?.terminal);
+      const hitEnd = terminals.has(wire.end?.terminal);
+      if (!hitStart && !hitEnd) return;
+      touched.push({ wire, hitStart, hitEnd });
+    });
+
+    if (wireAutoDelete) {
+      touched.forEach(({ wire }) => discardWire(wire));
+      return;
+    }
+
+    touched.forEach(({ wire, hitStart, hitEnd }) => {
+      if (hitStart) detachWireEndpoint(wire, 'start');
+      if (hitEnd) detachWireEndpoint(wire, 'end');
+      const n = countWireTerminalConnections(wire);
+      // Keep when ≥1 terminal remains; orphan free wires only if wire persist is on
+      if (n === 0 && !wirePersist) {
+        discardWire(wire);
+      } else {
+        updateWirePosition(wire);
       }
     });
-    toRemove.forEach((id) => {
-      const wire = wires.get(id);
-      unregisterTerminalWire(wire.start.terminal, id);
-      unregisterTerminalWire(wire.end.terminal, id);
-      if (selectedWireGroups.has(wire.group)) selectedWireGroups.delete(wire.group);
-      wire.group.remove();
-      wires.delete(id);
-    });
+  }
+
+  function finishWireDraftAt(endpoint) {
+    if (!wireDraftStart || !endpoint) return false;
+    let finishAnchors = wireDraftAnchors;
+    if (wireRouteMode === 'manhattan') {
+      finishAnchors = finalizeManhattanDraftAnchors(wireDraftStart, endpoint, wireDraftAnchors);
+    }
+    createWire(wireDraftStart, endpoint, finishAnchors);
+    cancelWireDraft();
+    clearSnapState();
+    reportGroundingStatus(`Wire on Layer ${activeLayer} — click for next wire`);
+    return true;
   }
 
   function handleWireCanvasClick(e) {
@@ -24568,6 +25224,10 @@
     const endpoint = resolveEndpoint(getEndpointFromEvent(e));
 
     if (!wireDraftStart) {
+      if (!endpoint.terminal && !wirePersist) {
+        setStatus('Wire persist off — click a terminal to start (or enable Wire persist)');
+        return true;
+      }
       wireDraftStart = endpoint;
       wireDraftAnchors = [];
       clearSnapState();
@@ -24578,21 +25238,28 @@
             ? 'Click canvas for orthogonal corners, or a terminal to finish'
             : 'Click canvas for curve anchors, or a terminal to finish')
           : (wireRouteMode === 'manhattan'
-            ? 'Click orthogonal corners, then a terminal to finish'
-            : 'Click anchors to route, then a terminal to finish')
+            ? 'Click orthogonal corners — double-click or Enter to finish free end'
+            : 'Click anchors — double-click or Enter to finish free end')
       );
       return true;
     }
 
     if (endpoint.terminal) {
-      let finishAnchors = wireDraftAnchors;
+      finishWireDraftAt(endpoint);
+      return true;
+    }
+
+    // Wire persist: double-click empty canvas finishes a free end
+    if (wirePersist && e.detail >= 2) {
+      let endPt = endpoint;
       if (wireRouteMode === 'manhattan') {
-        finishAnchors = finalizeManhattanDraftAnchors(wireDraftStart, endpoint, wireDraftAnchors);
+        const prev = wireDraftAnchors.length
+          ? wireDraftAnchors[wireDraftAnchors.length - 1]
+          : { x: wireDraftStart.x, y: wireDraftStart.y };
+        const snapped = manhattanAxisSnap(prev, endpoint.x, endpoint.y);
+        endPt = { x: snapped.x, y: snapped.y, terminal: null };
       }
-      createWire(wireDraftStart, endpoint, finishAnchors);
-      cancelWireDraft();
-      clearSnapState();
-      reportGroundingStatus(`Wire on Layer ${activeLayer} — click for next wire`);
+      finishWireDraftAt(endPt);
       return true;
     }
 
@@ -24603,7 +25270,7 @@
     let ax;
     let ay;
     if (wireRouteMode === 'manhattan') {
-      const snapped = manhattanAxisSnap(prev, endpoint.x, endpoint.y, free);
+      const snapped = manhattanAxisSnap(prev, endpoint.x, endpoint.y);
       ax = snapped.x;
       ay = snapped.y;
     } else {
@@ -24620,8 +25287,12 @@
     updatePreviewLine(e.clientX, e.clientY);
     setStatus(
       wireRouteMode === 'manhattan'
-        ? `Corner ${wireDraftAnchors.length} set — click more corners, or a terminal to finish (Esc cancels)`
-        : `Anchor ${wireDraftAnchors.length} set — click more anchors, or a terminal to finish (Esc cancels)`
+        ? `Corner ${wireDraftAnchors.length} set — click more corners, or a terminal to finish${
+            wirePersist ? ' · double-click / Enter for free end' : ''
+          } (Esc cancels)`
+        : `Anchor ${wireDraftAnchors.length} set — click more anchors, or a terminal to finish${
+            wirePersist ? ' · double-click / Enter for free end' : ''
+          } (Esc cancels)`
     );
     return true;
   }
@@ -24658,14 +25329,7 @@
             : 'Click canvas for curve anchors, or a terminal to finish'
         );
       } else {
-        let finishAnchors = wireDraftAnchors;
-        if (wireRouteMode === 'manhattan') {
-          finishAnchors = finalizeManhattanDraftAnchors(wireDraftStart, endpoint, wireDraftAnchors);
-        }
-        createWire(wireDraftStart, endpoint, finishAnchors);
-        cancelWireDraft();
-        clearSnapState();
-        reportGroundingStatus(`Wire on Layer ${activeLayer} — click for next wire`);
+        finishWireDraftAt(endpoint);
       }
     });
   }
@@ -25442,6 +26106,9 @@
         // Selected wires translate rigidly with assets (ends + bend midpoints)
         if (wireSnapshot) applyWireTranslateSnapshots(wireSnapshot, dx, dy);
 
+        // Dual-coil 4-conductor loom lives in world SVG — keep it glued while the body moves
+        refreshDualCoilLeadsForMovedComponents(dragTargets);
+
         // Coalesce expensive wire/chrome work — full flush on pointer up.
         scheduleViewportHeavyUpdate();
       }
@@ -25477,6 +26144,7 @@
         if (isDragging) {
           dragTargets.forEach((c) => c.classList.remove('dragging'));
           if (wiresDetached && wireSnapshot) restoreWireTerminalsAfterTranslate(wireSnapshot);
+          refreshDualCoilLeadsForMovedComponents(dragTargets);
           flushViewportHeavyUpdate();
           markProjectDirty();
           refreshLightningWireGlow();
@@ -25597,7 +26265,7 @@
     collectCapLeadsAtClient(clientX, clientY).forEach(pushCapLead);
 
     for (const el of document.elementsFromPoint(clientX, clientY)) {
-      if (el.closest?.('#asset-config-menu, #asset-config-btn, #asset-state-chrome, #asset-state-term-menu, .context-menu, .app-header, .toolbar')) {
+      if (el.closest?.('#asset-config-menu, #dimensional-config-menu, #asset-editor, #asset-config-btn, #asset-state-chrome, #asset-state-term-menu, .context-menu, .app-header, .toolbar')) {
         continue;
       }
       const wireG = el.closest?.('.wire-group');
@@ -25899,6 +26567,14 @@
     setStatus(`Header dither: ${headerDitherEnabled ? 'On' : 'Off'}`);
   });
 
+  settingsLightGrid?.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    applyLightGridEnabled(!lightGridEnabled);
+    saveUiPrefs();
+    setStatus(`Light grid: ${lightGridEnabled ? 'On' : 'Off'}`);
+  });
+
   wireGaugeDimensionalToggle?.addEventListener('change', (e) => {
     e.stopPropagation();
     setDimensionalWireGauge(!!wireGaugeDimensionalToggle.checked);
@@ -25970,6 +26646,80 @@
   btnDashed.addEventListener('click', () => setWireStyle('dashed'));
   btnRouteFree?.addEventListener('click', () => setWireRouteMode('free'));
   btnRouteManhattan?.addEventListener('click', () => setWireRouteMode('manhattan'));
+
+  (function bindWireSettingsMenu() {
+    const btn = document.getElementById('btn-wire-settings');
+    const panel = document.getElementById('wire-settings-panel');
+    const autoBtn = document.getElementById('wire-setting-auto-delete');
+    const persistBtn = document.getElementById('wire-setting-persist');
+    const autoState = document.getElementById('wire-setting-auto-delete-state');
+    const persistState = document.getElementById('wire-setting-persist-state');
+    if (!btn || !panel) return;
+
+    function syncWireSettingsUi() {
+      if (autoBtn) {
+        autoBtn.setAttribute('aria-pressed', wireAutoDelete ? 'true' : 'false');
+        if (autoState) autoState.textContent = wireAutoDelete ? 'On' : 'Off';
+      }
+      if (persistBtn) {
+        persistBtn.setAttribute('aria-pressed', wirePersist ? 'true' : 'false');
+        if (persistState) persistState.textContent = wirePersist ? 'On' : 'Off';
+      }
+    }
+
+    function setWireSettingsOpen(open) {
+      panel.classList.toggle('hidden', !open);
+      panel.hidden = !open;
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    window.syncWireSettingsUi = syncWireSettingsUi;
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setWireSettingsOpen(panel.hidden);
+    });
+    panel.addEventListener('mousedown', (e) => e.stopPropagation());
+    panel.addEventListener('click', (e) => e.stopPropagation());
+
+    autoBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      wireAutoDelete = !wireAutoDelete;
+      syncWireSettingsUi();
+      saveUiPrefs();
+      setStatus(
+        wireAutoDelete
+          ? 'Wire auto-delete ON — deleting an asset removes its attached wires'
+          : 'Wire auto-delete OFF — wires stay if ≥1 terminal remains'
+      );
+    });
+    persistBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      wirePersist = !wirePersist;
+      syncWireSettingsUi();
+      saveUiPrefs();
+      setStatus(
+        wirePersist
+          ? 'Wire persist ON — start/finish wires on empty canvas (double-click or Enter)'
+          : 'Wire persist OFF — wires must start and finish on terminals'
+      );
+    });
+
+    document.addEventListener('mousedown', (e) => {
+      if (panel.hidden) return;
+      if (panel.contains(e.target) || btn.contains(e.target)) return;
+      setWireSettingsOpen(false);
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || panel.hidden) return;
+      setWireSettingsOpen(false);
+    });
+
+    syncWireSettingsUi();
+  })();
 
   btnLayerVisibility.addEventListener('click', toggleLayerVisibility);
   btnLayerFront.addEventListener('click', () => setLayerAbove(activeLayer, true));
@@ -26289,13 +27039,21 @@
       notifySchematicCircuitChanged();
     };
     input.addEventListener('change', commit);
+    input.addEventListener('input', () => {
+      const comp = getSingleSelectedComponent();
+      if (!comp) return;
+      applyFn(comp, input.value);
+    });
     input.addEventListener('keydown', (e) => {
+      e.stopPropagation();
       if (e.key === 'Enter') {
         e.preventDefault();
         commit();
         input.blur();
       }
     });
+    input.addEventListener('keyup', (e) => e.stopPropagation());
+    input.addEventListener('keypress', (e) => e.stopPropagation());
     input.addEventListener('mousedown', (e) => e.stopPropagation());
     input.addEventListener('click', (e) => e.stopPropagation());
   }
@@ -26357,6 +27115,13 @@
   });
   document.getElementById('asset-config-dimensional-btn')?.addEventListener('mousedown', (e) => {
     e.stopPropagation();
+  });
+
+  bindUiFloatMenuChrome(document.getElementById('dimensional-config-menu'), {
+    barId: 'dimensional-config-menu-bar',
+    minId: 'dimensional-config-minimize',
+    closeId: 'dimensional-config-close',
+    onClose: () => setBobbinDimensionalExpanded(false),
   });
 
   document.getElementById('asset-config-dimensional-bridge')?.addEventListener('change', (e) => {
@@ -27309,7 +28074,7 @@
 
   document.addEventListener('mousedown', (e) => {
     if (!assetConfigMenu || assetConfigMenu.classList.contains('hidden')) return;
-    if (e.target.closest('#asset-config-menu') || e.target.closest('#asset-config-btn')) return;
+    if (e.target.closest('#asset-config-menu') || e.target.closest('#asset-config-btn') || e.target.closest('#dimensional-config-menu') || e.target.closest('#asset-editor')) return;
     closeAssetConfigMenu();
   });
 
@@ -27336,6 +28101,13 @@
     if (dimTool && dimTool.phase !== 'done') {
       handleDimClick(e);
       return;
+    }
+    if (panelCurveTool && activeWorkspacePage === 'panel') {
+      const world = clientToWorld(e.clientX, e.clientY);
+      if (handlePanelCurveClick(world, { dbl: e.detail >= 2 })) {
+        e.preventDefault();
+        return;
+      }
     }
     if (e.target.closest('.wire-group')) return;
     if (e.target.classList.contains('terminal')) return;
@@ -27367,11 +28139,18 @@
       return;
     }
 
-    if (e.target.closest('#asset-config-btn') || e.target.closest('#asset-config-menu')) return;
+    if (e.target.closest('#asset-config-btn') || e.target.closest('#asset-config-menu') || e.target.closest('#dimensional-config-menu') || e.target.closest('#asset-editor')) return;
     if (e.target.closest('#asset-state-chrome') || e.target.closest('#asset-state-term-menu')) return;
     if (e.target.closest('#workspace-group-chrome') || e.target.closest('#workspace-group-layer-bar')) return;
+    if (e.target.closest('#panel-sel-filter')) return;
+
+    if (activeWorkspacePage === 'panel' && tryPanelObjectSelectionAtPoint(e)) {
+      return;
+    }
 
     if (e.target === canvas || e.target === workspace || !e.target.closest('.component')) {
+      hidePanelSelFilter();
+      clearPanelCurveSelection();
       deselectAll();
       clearSnapState();
       setStatus(wireMode ? `Click start point (Layer ${activeLayer})` : 'Ready');
@@ -27379,6 +28158,10 @@
   });
 
   canvas.addEventListener('contextmenu', (e) => {
+    if (spacePanHeld || spacePanDragging) {
+      e.preventDefault();
+      return;
+    }
     if (wireDraftStart) {
       e.preventDefault();
       cancelActiveWireDraft();
@@ -27391,13 +28174,45 @@
     GuitarAssets.showContextMenu(e.clientX, e.clientY, comp);
   });
 
+  // Block middle-click autoscroll / auxclick side effects so MMB can pan
+  canvas.addEventListener('auxclick', (e) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  });
+
   canvas.addEventListener('mousedown', (e) => {
-    if (spacePanHeld && e.button === 0) {
+    // Middle mouse = pan (Electronics + Panel share #canvas)
+    if (e.button === 1) {
       e.preventDefault();
       e.stopPropagation();
       startSpacePanDrag(e.clientX, e.clientY);
       canvas.focus();
       return;
+    }
+    // Space + left or right mouse = pan
+    if (spacePanHeld && (e.button === 0 || e.button === 2)) {
+      e.preventDefault();
+      e.stopPropagation();
+      startSpacePanDrag(e.clientX, e.clientY);
+      canvas.focus();
+      return;
+    }
+    if (e.button === 0) {
+      const grip = e.target?.closest?.('.panel-curve-grip');
+      if (grip && activeWorkspacePage === 'panel') {
+        e.preventDefault();
+        e.stopPropagation();
+        panelCurveGripDrag = {
+          curveId: grip.dataset.curveId,
+          pointIndex: Number(grip.dataset.pointIndex),
+          kind: grip.dataset.gripKind || 'vertex',
+        };
+        grip.classList.add('is-dragging');
+        selectPanelCurve(grip.dataset.curveId, { additive: e.shiftKey || e.metaKey || e.ctrlKey });
+        return;
+      }
     }
     if (eraseMode) return;
     if (moveTool) return;
@@ -27408,7 +28223,7 @@
       && !textCommandOpen
       && !isEditorOpen()
       && !(dimTool && dimTool.phase !== 'done')
-      && !e.target.closest?.('.app-header, .toolbar, #asset-config-menu, #asset-state-term-menu, .context-menu, .note-window, .schematic-pin-window, #workspace-group-chrome')
+      && !e.target.closest?.('.app-header, .toolbar, #asset-config-menu, #dimensional-config-menu, #asset-editor, #asset-state-term-menu, .context-menu, .note-window, .schematic-pin-window, #workspace-group-chrome')
     ) {
       const clickCount = noteRapidAssetClick(e.clientX, e.clientY);
       if (clickCount === 2) {
@@ -27485,7 +28300,7 @@
     if (!eraseMode || e.button !== 0 || eraseStrokeActive) return;
     if (spacePanHeld) return;
     if (e.target.closest?.(
-      '.app-header, .toolbar, .app-settings, .context-menu, .wire-gauge-panel, .project-switcher, .status-bar, .schematic-peek, #asset-config-menu, #asset-config-btn, #asset-state-chrome, #asset-state-term-menu, #workspace-group-chrome, .note-window, .schematic-pin-window, .layer-help-popup, .workspace-layer-rail, .workspace-page-bar'
+      '.app-header, .toolbar, .app-settings, .context-menu, .wire-gauge-panel, .project-switcher, .status-bar, .schematic-peek, #asset-config-menu, #dimensional-config-menu, #asset-editor, #asset-config-btn, #asset-state-chrome, #asset-state-term-menu, #workspace-group-chrome, .note-window, .schematic-pin-window, .layer-help-popup, .workspace-layer-rail, .workspace-page-bar'
     )) return;
     beginEraseStroke(e.clientX, e.clientY);
     e.preventDefault();
@@ -27495,6 +28310,10 @@
   // Native dblclick is too loose — overlap cycle / cog open use quick-succession clicks only
 
   document.addEventListener('mousemove', (e) => {
+    window.__panelShiftSnapHeld = !!e.shiftKey;
+    if (isPointerOverAppChrome(e.clientX, e.clientY)) {
+      hideWorkspaceCursorsForUi();
+    }
     if (spacePanDragging) {
       moveSpacePanDrag(e.clientX, e.clientY);
       return;
@@ -27528,6 +28347,12 @@
   }
 
   document.addEventListener('mouseup', (e) => {
+    if (panelCurveGripDrag) {
+      panelCurveGripDrag = null;
+      refreshPanelCurveGrips();
+      suppressNextClick = true;
+      return;
+    }
     if (spacePanDragging) {
       endSpacePanDrag();
       suppressNextClick = true;
@@ -27561,6 +28386,76 @@
   canvas.addEventListener('mousemove', (e) => {
     if (wireDraftStart) {
       updatePreviewLine(e.clientX, e.clientY);
+    }
+    if (panelCurveGripDrag) {
+      const world = clientToWorld(e.clientX, e.clientY);
+      let pt = { x: snapWorkspace(world.x), y: snapWorkspace(world.y) };
+      const curve = panelCurves.get(panelCurveGripDrag.curveId);
+      if (curve && panelCurveGripDrag.kind === 'mid') {
+        const i = panelCurveGripDrag.pointIndex;
+        const a = curve.points[i];
+        const b = curve.points[i + 1];
+        if (a && b) {
+          const ox = (a.x + b.x) / 2;
+          const oy = (a.y + b.y) / 2;
+          const dx = pt.x - ox;
+          const dy = pt.y - oy;
+          a.x += dx; a.y += dy;
+          b.x += dx; b.y += dy;
+          ensurePanelCurveEl(curve);
+          // Move mid grip with the segment without rebuilding (avoids losing drag target)
+          document.querySelectorAll(
+            `.panel-curve-grip.is-mid[data-curve-id="${curve.id}"][data-point-index="${i}"]`
+          ).forEach((g) => {
+            g.setAttribute('cx', String((a.x + b.x) / 2));
+            g.setAttribute('cy', String((a.y + b.y) / 2));
+          });
+          document.querySelectorAll(
+            `.panel-curve-grip[data-curve-id="${curve.id}"]:not(.is-mid)`
+          ).forEach((g) => {
+            const pi = Number(g.dataset.pointIndex);
+            if (curve.points[pi]) {
+              g.setAttribute('cx', String(curve.points[pi].x));
+              g.setAttribute('cy', String(curve.points[pi].y));
+            }
+          });
+          markProjectDirty();
+        }
+      } else if (curve && Number.isFinite(panelCurveGripDrag.pointIndex)) {
+        const i = panelCurveGripDrag.pointIndex;
+        if (curve.points[i]) {
+          if (panelOrthoMode && i > 0) {
+            pt = applyPanelOrthoPoint(curve.points[i - 1], pt);
+            pt = { x: snapWorkspace(pt.x), y: snapWorkspace(pt.y) };
+          }
+          curve.points[i] = pt;
+          if (curve.type === 'spline') curve.knots = null;
+          ensurePanelCurveEl(curve);
+          document.querySelectorAll(
+            `.panel-curve-grip[data-curve-id="${curve.id}"][data-point-index="${i}"]:not(.is-mid)`
+          ).forEach((g) => {
+            g.setAttribute('cx', String(pt.x));
+            g.setAttribute('cy', String(pt.y));
+            g.classList.add('is-dragging');
+          });
+          // Update adjacent mid grips
+          document.querySelectorAll(`.panel-curve-grip.is-mid[data-curve-id="${curve.id}"]`).forEach((g) => {
+            const si = Number(g.dataset.pointIndex);
+            const a = curve.points[si];
+            const b = curve.points[si + 1];
+            if (a && b) {
+              g.setAttribute('cx', String((a.x + b.x) / 2));
+              g.setAttribute('cy', String((a.y + b.y) / 2));
+            }
+          });
+          markProjectDirty();
+        }
+      }
+      return;
+    }
+    if (panelCurveDraft && panelCurveTool) {
+      const world = clientToWorld(e.clientX, e.clientY);
+      updatePanelCurveDraftPreview(snapPanelCurveWorldPoint(world));
     }
   });
 
@@ -27634,11 +28529,17 @@
     }
   }, { passive: false });
 
+  document.addEventListener('mousedown', () => { window.__panelShiftSnapArmed = false; }, true);
+
   document.addEventListener('keydown', (e) => {
-    if ((e.key === ' ' || e.code === 'Space') && !e.repeat && canEngageSpacePan(e)) {
-      e.preventDefault();
-      setSpacePanHeld(true);
-      return;
+    if (e.key === ' ' || e.code === 'Space') {
+      if (isTypingTarget() || textCommandOpen || isEditorOpen()) return;
+      // Always swallow Space in the workspace so held-key OS beep does not fire
+      if (canEngageSpacePan(e) || spacePanHeld || spacePanDragging) {
+        e.preventDefault();
+        if (!e.repeat && canEngageSpacePan(e)) setSpacePanHeld(true);
+        return;
+      }
     }
     if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       if (textCommandOpen) {
@@ -27647,6 +28548,30 @@
         return;
       }
       if (isTypingTarget() || isEditorOpen()) return;
+      // While drafting panel CAD geometry, Enter places — never open text command
+      if (panelCurveDraft && panelCurveTool && activeWorkspacePage === 'panel') {
+        e.preventDefault();
+        finishPanelCurveDraft();
+        return;
+      }
+      if (panelCurveTool && activeWorkspacePage === 'panel') {
+        // Tool armed but no draft yet — don't open text command
+        e.preventDefault();
+        return;
+      }
+      if (wireMode && wireDraftStart && wirePersist) {
+        e.preventDefault();
+        let endPt = resolveEndpoint({ type: 'point', clientX: lastPointerX, clientY: lastPointerY });
+        if (wireRouteMode === 'manhattan') {
+          const prev = wireDraftAnchors.length
+            ? wireDraftAnchors[wireDraftAnchors.length - 1]
+            : { x: wireDraftStart.x, y: wireDraftStart.y };
+          const snapped = manhattanAxisSnap(prev, endPt.x, endPt.y);
+          endPt = { x: snapped.x, y: snapped.y, terminal: null };
+        }
+        finishWireDraftAt(endPt);
+        return;
+      }
       if (dimTool && dimTool.phase !== 'done') return;
       if (moveTool) return;
       // Group +/- edit: Enter confirms the current selection
@@ -27686,6 +28611,23 @@
       e.preventDefault();
       togglePanelCursorGridSnap();
       return;
+    }
+    // Shift toggles panel grid snap (Rhino-style); Shift+digit still switches layers above
+    if (e.key === 'Shift') {
+      window.__panelShiftSnapHeld = true;
+      if (
+        !e.repeat
+        && !e.ctrlKey
+        && !e.metaKey
+        && !e.altKey
+        && !textCommandOpen
+        && !isTypingTarget()
+        && !isEditorOpen()
+        && activeWorkspacePage === 'panel'
+      ) {
+        // Defer toggle to keyup unless a digit/mouse chord starts
+        window.__panelShiftSnapArmed = true;
+      }
     }
 
     const mod = e.ctrlKey || e.metaKey;
@@ -27749,19 +28691,54 @@
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (isTypingTarget() || textCommandOpen) return;
-      if (cancelActiveWireDraft()) {
+      // Wire draft: Backspace undoes last corner/anchor; Delete cancels whole draft
+      if (wireMode && wireDraftStart) {
         e.preventDefault();
+        if (e.key === 'Backspace' && wireDraftAnchors.length > 0) {
+          wireDraftAnchors.pop();
+          updatePreviewLine(lastPointerX, lastPointerY);
+          setStatus(
+            wireDraftAnchors.length
+              ? `Corner removed — ${wireDraftAnchors.length} left · Esc cancels draft`
+              : 'Start set — click corners, or a terminal to finish · Esc cancels'
+          );
+          return;
+        }
+        cancelActiveWireDraft();
+        return;
+      }
+      if (panelCurveDraft && e.key === 'Backspace') {
+        e.preventDefault();
+        if (panelCurveDraft.points.length > 1) {
+          panelCurveDraft.points.pop();
+          updatePanelCurveDraftPreview(null);
+          setStatus('Point removed');
+        } else {
+          finishPanelCurveDraft({ cancel: true });
+        }
         return;
       }
       if (deleteSelectedPanelSnapPoint()) {
         e.preventDefault();
         return;
       }
+      if (deleteSelectedPanelCurves()) {
+        e.preventDefault();
+        setStatus('Curve deleted');
+        return;
+      }
       e.preventDefault();
       deleteSelected();
     }
+    if (e.key === 'Enter' && !isTypingTarget() && !textCommandOpen && panelCurveDraft && panelCurveTool) {
+      e.preventDefault();
+      finishPanelCurveDraft();
+      return;
+    }
     if ((e.key === '+' || e.key === '=' || e.key === '-' || e.code === 'NumpadAdd' || e.code === 'NumpadSubtract')
       && !isTypingTarget() && !textCommandOpen) {
+      // Swallow so held +/- does not OS-beep when nothing adjusts
+      e.preventDefault();
       const slackDelta = (e.key === '-' || e.code === 'NumpadSubtract') ? -SLACK_STEP : SLACK_STEP;
       // Holding or selecting a wire always bends (even if dual coil is also selected)
       if (heldWireId || heldHbConductor || selectedWireGroups.size > 0) {
@@ -27787,6 +28764,7 @@
     if (!e.ctrlKey && !e.metaKey && !e.altKey) {
       const digitMatch = /^Digit([1-9])$/.exec(e.code);
       if (digitMatch) {
+        window.__panelShiftSnapArmed = false;
         if (isTypingTarget() || textCommandOpen) return;
         const n = Number(digitMatch[1]);
         const switchOther = e.shiftKey;
@@ -27862,6 +28840,18 @@
         e.preventDefault();
         return;
       }
+      if (panelCurveDraft) {
+        e.preventDefault();
+        finishPanelCurveDraft({ cancel: true });
+        return;
+      }
+      if (panelCurveTool) {
+        e.preventDefault();
+        setPanelCurveTool(null);
+        hidePanelSelFilter();
+        setStatus('Ready');
+        return;
+      }
       if (cancelMoveTool()) {
         e.preventDefault();
         return;
@@ -27902,6 +28892,22 @@
     if (e.key === ' ' || e.code === 'Space') {
       setSpacePanHeld(false);
       // Keep dragging until mouseup if mid-pan (Figma-style).
+      return;
+    }
+    if (e.key === 'Shift') {
+      window.__panelShiftSnapHeld = false;
+      if (window.__panelShiftSnapArmed) {
+        window.__panelShiftSnapArmed = false;
+        if (
+          activeWorkspacePage === 'panel'
+          && !isTypingTarget()
+          && !textCommandOpen
+          && !isEditorOpen()
+        ) {
+          togglePanelCursorGridSnap();
+          syncOsnapGridButton();
+        }
+      }
       return;
     }
     if (e.key !== 'q' && e.key !== 'Q') return;
@@ -28052,6 +29058,7 @@
         top: parseFloat(el.style.top) || 0,
         rotation: parseFloat(el.dataset.rotation) || 0,
         workspacePage: 'panel',
+        layer: getComponentLayer(el),
       };
     }
     const circuitFlat = typeof CalcEngines?.collectCircuitFlatFields === 'function'
@@ -28324,10 +29331,10 @@
         applyPotCaseGroundFromRecord(el, compData);
         applySwitchCaseGroundFromRecord(el, compData);
         if (compData.placeLabel != null && String(compData.placeLabel).trim() !== '') {
-          el.dataset.placeLabel = String(compData.placeLabel).trim().slice(0, 12);
+          el.dataset.placeLabel = String(compData.placeLabel).trim().slice(0, 24);
         }
         if (compData.hoverLabel != null && String(compData.hoverLabel).trim() !== '') {
-          el.dataset.hoverLabel = String(compData.hoverLabel).trim().slice(0, 24);
+          el.dataset.hoverLabel = String(compData.hoverLabel).trim().slice(0, 48);
         }
         applyBobbinGeometryFromRecord(el, compData);
         applyHbLeadData(el, compData);
@@ -28365,15 +29372,22 @@
             return { ...end, componentId: idMap.get(end.componentId) };
           }
           if (end.componentId && !idMap.has(end.componentId)) {
-            return { x: (end.x || 0) + PASTE_OFFSET, y: (end.y || 0) + PASTE_OFFSET };
+            return { x: (end.x || 0) + dx, y: (end.y || 0) + dy };
           }
           return {
-            x: (end.x || 0) + PASTE_OFFSET,
-            y: (end.y || 0) + PASTE_OFFSET,
+            x: (end.x || 0) + dx,
+            y: (end.y || 0) + dy,
           };
         };
         src.start = remapEnd(src.start);
         src.end = remapEnd(src.end);
+        // Manhattan / free anchors are absolute world points — shift with the paste
+        if (Array.isArray(src.anchors) && src.anchors.length) {
+          src.anchors = src.anchors.map((a) => ({
+            x: (a?.x || 0) + dx,
+            y: (a?.y || 0) + dy,
+          }));
+        }
         const wire = createWireFromSnapshot(src);
         if (wire) {
           wire.group.classList.add('selected');
@@ -28509,6 +29523,16 @@
         y,
         layer: Number(layer) || Number(el.dataset.layer) || 1,
       })),
+      panelCurves: [...panelCurves.values()].map((c) => ({
+        id: c.id,
+        type: c.type,
+        points: c.points,
+        degree: c.degree,
+        knots: c.knots,
+        weights: c.weights,
+        closed: !!c.closed,
+        layer: Number(c.layer) || 1,
+      })),
       notes: [...noteWindows.values()].map((note) => ({
         id: note.id,
         x: note.x,
@@ -28548,6 +29572,12 @@
     clearSnapState();
     setPanelSnapMode(false);
     clearAllPanelSnapPoints();
+    panelCurves.forEach((c) => c.el?.remove());
+    panelCurves.clear();
+    selectedPanelCurveIds.clear();
+    clearPanelCurveDraft();
+    setPanelCurveTool(null);
+    hidePanelSelFilter();
     clearAllNoteWindows();
     clearAllSchematicPinWindows();
     clearAllWorkspaceGroups();
@@ -28842,10 +29872,10 @@
       applyPotCaseGroundFromRecord(el, compData);
       applySwitchCaseGroundFromRecord(el, compData);
       if (compData.placeLabel != null && String(compData.placeLabel).trim() !== '') {
-        el.dataset.placeLabel = String(compData.placeLabel).trim().slice(0, 12);
+        el.dataset.placeLabel = String(compData.placeLabel).trim().slice(0, 24);
       }
       if (compData.hoverLabel != null && String(compData.hoverLabel).trim() !== '') {
-        el.dataset.hoverLabel = String(compData.hoverLabel).trim().slice(0, 24);
+        el.dataset.hoverLabel = String(compData.hoverLabel).trim().slice(0, 48);
       }
       applyBobbinGeometryFromRecord(el, compData);
       applyHbLeadData(el, compData);
@@ -28886,6 +29916,22 @@
       if (pt && Number.isFinite(pt.x) && Number.isFinite(pt.y)) {
         createPanelSnapPoint(pt.x, pt.y, pt.id, pt.layer);
       }
+    });
+
+    panelCurves.forEach((c) => c.el?.remove());
+    panelCurves.clear();
+    selectedPanelCurveIds.clear();
+    panelCurveIdCounter = 0;
+    (data.panelCurves || []).forEach((c) => {
+      if (!c || !Array.isArray(c.points) || c.points.length < 2) return;
+      addPanelCurve(c.type || 'polyline', c.points, {
+        id: c.id,
+        degree: c.degree,
+        knots: c.knots,
+        weights: c.weights,
+        closed: c.closed,
+        layer: c.layer,
+      });
     });
 
     clearAllNoteWindows();
@@ -29833,7 +30879,7 @@
       if (id === 'tube-6v6' || subtype === 'tube-6v6') return 'tube-power';
       return 'tube-dual';
     }
-    if (subtype === 'ninevolt' || id === 'ninevolt') return 'battery';
+    if (subtype === 'ninevolt' || id === 'ninevolt') return 'supply';
     if (subtype === 'dc-jack' || id === 'dc-jack') return 'dc-jack';
     if (subtype === 'heater-supply' || id === 'heater-supply') return 'heater-supply';
     if (subtype === 'hv-supply' || id === 'hv-supply') return 'hv-supply';
@@ -29847,7 +30893,8 @@
     if (subtype === 'monooutput' || id === 'mono-output') return 'jack';
     if (subtype === 'stereooutput' || id === 'stereo-output') return 'jack-stereo';
     if (subtype === 'dpdt' || subtype === 'dpdt-on-off-on' || subtype === 'dpdt-on-on'
-      || id === 'dpdt' || id === 'dpdt-on-off-on' || id === 'dpdt-on-on') {
+      || subtype === 'spst-on-off'
+      || id === 'dpdt' || id === 'dpdt-on-off-on' || id === 'dpdt-on-on' || id === 'spst-on-off') {
       return 'switch';
     }
     return 'generic';
@@ -33766,6 +34813,827 @@
     }, true);
   }
 
+
+  function isPointerOverAppChrome(clientX, clientY) {
+    const stack = document.elementsFromPoint(clientX, clientY) || [];
+    for (const el of stack) {
+      if (!el?.closest) continue;
+      if (el.closest('.app-header, .toolbar, .status-bar, .workspace-page-bar, .workspace-layer-rail, .wire-gauge-panel, .project-switcher, .app-settings, .context-menu, #asset-config-menu, #dimensional-config-menu, #asset-editor, #asset-state-term-menu, #commands-panel, .bugtest-dock, .note-window, .schematic-pin-window, .layer-help-popup, .workspace-group-help-popup, .schematic-peek')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function hideWorkspaceCursorsForUi() {
+    snapIndicator?.classList.add('hidden');
+    clearPanelCursorSnap();
+    document.body.classList.remove('panel-cursor-snapping');
+  }
+
+  function syncOsnapGridButton() {
+    const btn = document.getElementById('osnap-grid-btn');
+    if (!btn) return;
+    const on = !!osnapEnabled.grid || (activeWorkspacePage === 'panel' && panelCursorGridSnap);
+    btn.classList.toggle('is-on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+
+
+  function getPanelCurvesSvg() {
+    return document.getElementById('panel-curves');
+  }
+
+
+  function syncPanelCurveToolsVisibility() {
+    const host = document.getElementById('panel-curve-tools');
+    if (!host) return;
+    const onPanel = activeWorkspacePage === 'panel';
+    host.hidden = !onPanel;
+    host.querySelectorAll('[data-panel-curve]').forEach((btn) => {
+      const on = onPanel && panelCurveTool === btn.dataset.panelCurve;
+      btn.classList.toggle('active', on);
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    const orthoBtn = document.getElementById('btn-panel-ortho');
+    if (orthoBtn) {
+      orthoBtn.classList.toggle('is-on', !!panelOrthoMode);
+      orthoBtn.setAttribute('aria-pressed', panelOrthoMode ? 'true' : 'false');
+    }
+  }
+
+  function setPanelOrthoMode(on) {
+    panelOrthoMode = !!on;
+    syncPanelCurveToolsVisibility();
+    setStatus(panelOrthoMode ? 'Ortho on — 90° lock' : 'Ortho off');
+  }
+
+  function clearPanelCurveDraft() {
+    if (panelCurveDraft?.previewEl) panelCurveDraft.previewEl.remove();
+    panelCurveDraft = null;
+  }
+
+  function setPanelCurveTool(tool) {
+    const next = tool && ['line', 'polyline', 'arc', 'spline'].includes(tool) ? tool : null;
+    if (panelCurveTool === next && next) {
+      panelCurveTool = null;
+      clearPanelCurveDraft();
+      syncPanelCurveToolsVisibility();
+      updateSelectedToolHover();
+      setStatus('Panel curve tool off');
+      return;
+    }
+    if (next) {
+      if (activeWorkspacePage !== 'panel') setActiveWorkspacePage('panel');
+      if (wireMode) setWireMode(false);
+      if (eraseMode) setEraseMode(false);
+      if (panelSnapMode) setPanelSnapMode(false);
+      if (dimTool) cancelDimensionTool();
+      clearPanelCurveSelection();
+    }
+    panelCurveTool = next;
+    clearPanelCurveDraft();
+    syncPanelCurveToolsVisibility();
+    updateSelectedToolHover();
+    if (panelCurveTool) {
+      const hints = {
+        line: 'Line: click points · Enter places · Esc cancels (continuous)',
+        polyline: 'Polyline: click · Enter places · Esc cancels',
+        arc: 'Arc: start → through → end · continuous',
+        spline: 'Spline: control points · Enter places · Esc cancels',
+      };
+      setStatus(hints[panelCurveTool] || 'Panel curve');
+    }
+  }
+
+  /** Lock a point to 90° from `from` (ortho). */
+  function applyPanelOrthoPoint(from, to) {
+    if (!panelOrthoMode || !from || !to) return to;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    if (Math.abs(dx) >= Math.abs(dy)) return { x: to.x, y: from.y };
+    return { x: from.x, y: to.y };
+  }
+
+  function snapPanelCurveWorldPoint(world) {
+    const thresh = 14 / Math.max(0.001, viewportScale());
+    const obj = findNearestObjectSnap(world.x, world.y, thresh);
+    let pt = obj
+      ? { x: obj.x, y: obj.y, snapKind: obj.kind }
+      : { x: snapWorkspace(world.x), y: snapWorkspace(world.y), snapKind: 'grid' };
+    if (panelCurveDraft?.points?.length) {
+      const last = panelCurveDraft.points[panelCurveDraft.points.length - 1];
+      pt = applyPanelOrthoPoint(last, pt);
+      // After ortho, prefer nearby End/Mid again if very close
+      const obj2 = findNearestObjectSnap(pt.x, pt.y, thresh * 0.65);
+      if (obj2 && (!panelOrthoMode || (Math.abs(obj2.x - last.x) < 1e-6 || Math.abs(obj2.y - last.y) < 1e-6))) {
+        pt = { x: obj2.x, y: obj2.y, snapKind: obj2.kind };
+      } else {
+        pt = { x: snapWorkspace(pt.x), y: snapWorkspace(pt.y), snapKind: pt.snapKind || 'ortho' };
+      }
+    }
+    return pt;
+  }
+
+  function panelCurvePathD(curve) {
+    const C = window.GuitarCurves;
+    if (!curve || !curve.points?.length) return '';
+    if (curve.type === 'line' && curve.points.length >= 2) {
+      const a = curve.points[0];
+      const b = curve.points[1];
+      return `M ${a.x} ${a.y} L ${b.x} ${b.y}`;
+    }
+    if (curve.type === 'polyline') {
+      let d = '';
+      curve.points.forEach((p, i) => {
+        d += (i === 0 ? `M ${p.x} ${p.y}` : ` L ${p.x} ${p.y}`);
+      });
+      if (curve.closed && curve.points.length > 2) d += ' Z';
+      return d;
+    }
+    if (curve.type === 'arc' && curve.points.length >= 3 && C?.arcFrom3Points) {
+      const arc = C.arcFrom3Points(curve.points[0], curve.points[1], curve.points[2]);
+      return C.arcToSvgPath(arc);
+    }
+    if (curve.type === 'spline' && curve.points.length >= 2 && C?.nurbsToSvgPath) {
+      const degree = Math.min(curve.degree || 3, curve.points.length - 1);
+      const knots = curve.knots || C.openUniformKnots(curve.points.length, degree);
+      return C.nurbsToSvgPath(curve.points, degree, knots, curve.weights, 80);
+    }
+    return curve.points.map((p, i) => (i === 0 ? `M ${p.x} ${p.y}` : `L ${p.x} ${p.y}`)).join(' ');
+  }
+
+  function getPanelCurveRect(curve) {
+    const pts = curve?.points || [];
+    if (!pts.length) return { left: 0, top: 0, right: 0, bottom: 0 };
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    pts.forEach((p) => {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
+    });
+    const pad = 4;
+    return { left: minX - pad, top: minY - pad, right: maxX + pad, bottom: maxY + pad };
+  }
+
+  function clearPanelCurveGrips() {
+    const svg = getPanelCurvesSvg();
+    if (!svg) return;
+    svg.querySelectorAll('.panel-curve-grip, .panel-curve-seg').forEach((n) => n.remove());
+  }
+
+  /**
+   * Rhino-like grips: white dots / black outline.
+   * Shows End / Mid / control points according to active osnap toggles.
+   */
+  function refreshPanelCurveGrips() {
+    clearPanelCurveGrips();
+    const svg = getPanelCurvesSvg();
+    if (!svg || activeWorkspacePage !== 'panel') return;
+    const showEnd = osnapEnabled.end !== false;
+    const showMid = !!osnapEnabled.mid;
+    const r = Math.max(2.2, 3.2 / Math.max(0.35, viewportScale()));
+
+    selectedPanelCurveIds.forEach((id) => {
+      const curve = panelCurves.get(id);
+      if (!curve?.points?.length) return;
+      const pts = curve.points;
+
+      // Fat invisible segment hits for polyline/line (segment select → same curve)
+      if (curve.type === 'line' || curve.type === 'polyline') {
+        for (let i = 0; i + 1 < pts.length; i++) {
+          const a = pts[i];
+          const b = pts[i + 1];
+          const seg = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          seg.setAttribute('x1', String(a.x));
+          seg.setAttribute('y1', String(a.y));
+          seg.setAttribute('x2', String(b.x));
+          seg.setAttribute('y2', String(b.y));
+          seg.classList.add('panel-curve-seg');
+          seg.dataset.curveId = id;
+          seg.dataset.segIndex = String(i);
+          svg.appendChild(seg);
+        }
+      }
+
+      pts.forEach((p, i) => {
+        const isEnd = i === 0 || i === pts.length - 1;
+        if (isEnd && !showEnd) return;
+        if (!isEnd && curve.type === 'spline' && !showEnd) return; // spline CVs use End osnap
+        if (!isEnd && (curve.type === 'line' || curve.type === 'polyline') && !showEnd) return;
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        g.setAttribute('cx', String(p.x));
+        g.setAttribute('cy', String(p.y));
+        g.setAttribute('r', String(r));
+        g.classList.add('panel-curve-grip');
+        g.dataset.curveId = id;
+        g.dataset.pointIndex = String(i);
+        g.dataset.gripKind = isEnd ? 'end' : (curve.type === 'spline' ? 'cv' : 'vertex');
+        svg.appendChild(g);
+      });
+
+      if (showMid && (curve.type === 'line' || curve.type === 'polyline')) {
+        for (let i = 0; i + 1 < pts.length; i++) {
+          const a = pts[i];
+          const b = pts[i + 1];
+          const mx = (a.x + b.x) / 2;
+          const my = (a.y + b.y) / 2;
+          const g = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          g.setAttribute('cx', String(mx));
+          g.setAttribute('cy', String(my));
+          g.setAttribute('r', String(r * 0.85));
+          g.classList.add('panel-curve-grip', 'is-mid');
+          g.dataset.curveId = id;
+          g.dataset.pointIndex = String(i);
+          g.dataset.gripKind = 'mid';
+          svg.appendChild(g);
+        }
+      }
+    });
+  }
+
+  function ensurePanelCurveEl(curve) {
+    const svg = getPanelCurvesSvg();
+    if (!svg || !curve) return null;
+    let el = curve.el;
+    if (!el) {
+      el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      el.classList.add('panel-curve');
+      el.dataset.curveId = curve.id;
+      el.dataset.curveType = curve.type;
+      svg.appendChild(el);
+      curve.el = el;
+    }
+    el.setAttribute('d', panelCurvePathD(curve) || 'M 0 0');
+    el.classList.toggle('is-selected', selectedPanelCurveIds.has(curve.id));
+    el.style.display = activeWorkspacePage === 'panel' ? '' : 'none';
+    el.dataset.layer = String(Number(curve.layer) || 1);
+    return el;
+  }
+
+  function addPanelCurve(type, points, opts = {}) {
+    const id = opts.id || `pcurve-${++panelCurveIdCounter}`;
+    const m = /^pcurve-(\d+)$/.exec(id);
+    if (m) panelCurveIdCounter = Math.max(panelCurveIdCounter, Number(m[1]));
+    const curve = {
+      id,
+      type,
+      points: points.map((p) => ({ x: p.x, y: p.y })),
+      degree: opts.degree || 3,
+      knots: opts.knots || null,
+      weights: opts.weights || null,
+      closed: !!opts.closed,
+      layer: Number.isFinite(Number(opts.layer))
+        ? Number(opts.layer)
+        : (pageLayerStacks.panel.activeLayer || 1),
+      el: null,
+    };
+    panelCurves.set(id, curve);
+    ensurePanelCurveEl(curve);
+    markProjectDirty();
+    return curve;
+  }
+
+  function selectPanelCurve(id, { additive = false } = {}) {
+    if (!additive) {
+      selectedPanelCurveIds.clear();
+      selectedComponents.forEach((el) => el.classList.remove('selected'));
+      selectedComponents.clear();
+      clearPanelSnapSelection?.();
+      document.querySelectorAll('.cad-ent.is-selected').forEach((n) => n.classList.remove('is-selected'));
+    }
+    if (id) selectedPanelCurveIds.add(id);
+    panelCurves.forEach((c) => ensurePanelCurveEl(c));
+    refreshPanelCurveGrips();
+    updateAlignBar?.();
+    updateSelectedToolHover?.();
+  }
+
+  function clearPanelCurveSelection() {
+    selectedPanelCurveIds.clear();
+    panelCurveGripDrag = null;
+    panelCurves.forEach((c) => ensurePanelCurveEl(c));
+    clearPanelCurveGrips();
+    document.querySelectorAll('.cad-ent.is-selected').forEach((n) => n.classList.remove('is-selected'));
+  }
+
+  function deleteSelectedPanelCurves() {
+    if (!selectedPanelCurveIds.size) return false;
+    [...selectedPanelCurveIds].forEach((id) => {
+      const c = panelCurves.get(id);
+      c?.el?.remove();
+      panelCurves.delete(id);
+    });
+    selectedPanelCurveIds.clear();
+    clearPanelCurveGrips();
+    markProjectDirty();
+    return true;
+  }
+
+  function updatePanelCurveDraftPreview(worldPt) {
+    if (!panelCurveDraft) return;
+    const svg = getPanelCurvesSvg();
+    if (!svg) return;
+    const pts = panelCurveDraft.points.slice();
+    if (worldPt) pts.push(worldPt);
+    if (!panelCurveDraft.previewEl) {
+      const el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      el.classList.add('panel-curve', 'panel-curve-preview');
+      svg.appendChild(el);
+      panelCurveDraft.previewEl = el;
+    }
+    const temp = {
+      type: panelCurveDraft.type,
+      points: pts,
+      degree: 3,
+    };
+    panelCurveDraft.previewEl.setAttribute('d', panelCurvePathD(temp) || 'M 0 0');
+  }
+
+  /** Place current draft; Line stays continuous from the last end point. */
+  function finishPanelCurveDraft({ cancel = false, exitTool = false, continueLine = false } = {}) {
+    if (!panelCurveDraft) {
+      if (exitTool) setPanelCurveTool(null);
+      return;
+    }
+    const { type, points } = panelCurveDraft;
+    if (cancel) {
+      clearPanelCurveDraft();
+      setStatus(exitTool ? 'Tool cancelled' : 'Curve cancelled — click to start again');
+      if (exitTool) setPanelCurveTool(null);
+      else updateSelectedToolHover();
+      return;
+    }
+    // Enter while waiting for next Line vertex — end the continuous chain
+    if (type === 'line' && points.length < 2) {
+      clearPanelCurveDraft();
+      setStatus('Line chain finished — click to start again · Esc exits tool');
+      if (exitTool) setPanelCurveTool(null);
+      updateSelectedToolHover();
+      return;
+    }
+    const need = type === 'line' || type === 'arc' ? (type === 'line' ? 2 : 3) : 2;
+    if (points.length < need) {
+      setStatus('Not enough points — keep drawing or Esc');
+      return;
+    }
+    const continueFrom = (type === 'line' && points.length >= 2)
+      ? { x: points[points.length - 1].x, y: points[points.length - 1].y }
+      : null;
+    clearPanelCurveDraft();
+    if (type === 'line') addPanelCurve('line', points.slice(-2));
+    else if (type === 'arc') addPanelCurve('arc', points.slice(0, 3));
+    else if (type === 'polyline') addPanelCurve('polyline', points);
+    else if (type === 'spline') {
+      addPanelCurve('spline', points, { degree: Math.min(3, points.length - 1) });
+    }
+    // Rhino-like continuous Line: keep drafting from the last endpoint
+    if (continueLine && continueFrom && panelCurveTool === 'line') {
+      panelCurveDraft = { type: 'line', points: [continueFrom] };
+      updatePanelCurveDraftPreview(null);
+      setStatus('Line continued — click next end · Enter finishes chain · Esc exits');
+    } else {
+      setStatus(`${(window.GuitarCurves?.typeLabel(type) || type)} placed — click to continue · Esc exits`);
+    }
+    updateSelectedToolHover();
+  }
+
+  function handlePanelCurveClick(world, { dbl = false } = {}) {
+    if (!panelCurveTool || activeWorkspacePage !== 'panel') return false;
+    const pt = snapPanelCurveWorldPoint(world);
+    if (!panelCurveDraft) {
+      panelCurveDraft = { type: panelCurveTool, points: [{ x: pt.x, y: pt.y }] };
+      updatePanelCurveDraftPreview(null);
+      if (panelCurveTool === 'line') setStatus('Line: click end · keeps going until Enter/Esc');
+      else if (panelCurveTool === 'arc') setStatus('Arc: click through point');
+      else setStatus(`${panelCurveTool}: click next · Enter places · Esc cancels`);
+      return true;
+    }
+    panelCurveDraft.points.push({ x: pt.x, y: pt.y });
+    // Continuous Line: place segment and keep drafting from this end
+    if (panelCurveTool === 'line' && panelCurveDraft.points.length >= 2) {
+      finishPanelCurveDraft({ continueLine: true });
+      return true;
+    }
+    if (panelCurveTool === 'arc' && panelCurveDraft.points.length >= 3) {
+      finishPanelCurveDraft();
+      // Arc continuous: start fresh next click (tool stays armed)
+      return true;
+    }
+    if (dbl && (panelCurveTool === 'polyline' || panelCurveTool === 'spline')) {
+      finishPanelCurveDraft();
+      return true;
+    }
+    updatePanelCurveDraftPreview(null);
+    return true;
+  }
+
+  function hidePanelSelFilter() {
+    const el = document.getElementById('panel-sel-filter');
+    if (!el) return;
+    el.classList.add('hidden');
+    el.hidden = true;
+    el.setAttribute('aria-hidden', 'true');
+    el.innerHTML = '';
+    panelSelFilterItems = [];
+  }
+
+  function showPanelSelFilter(items, clientX, clientY) {
+    const el = document.getElementById('panel-sel-filter');
+    if (!el || !items?.length) {
+      hidePanelSelFilter();
+      return;
+    }
+    panelSelFilterItems = items;
+    panelSelFilterIndex = 0;
+    const C = window.GuitarCurves;
+    el.innerHTML = `<div class="panel-sel-filter-title">Select object</div>` + items.map((it, i) => {
+      const kind = C?.typeLabel(it.kind) || it.kind;
+      const meta = it.meta || '';
+      return `<button type="button" class="panel-sel-filter-btn${i === 0 ? ' is-active' : ''}" data-sel-idx="${i}" role="menuitem">`
+        + `<span class="panel-sel-filter-kind">${kind}</span>`
+        + `<span class="panel-sel-filter-meta">${meta}</span></button>`;
+    }).join('');
+    el.classList.remove('hidden');
+    el.hidden = false;
+    el.setAttribute('aria-hidden', 'false');
+    const pad = 8;
+    let left = clientX + pad;
+    let top = clientY + pad;
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    requestAnimationFrame(() => {
+      const r = el.getBoundingClientRect();
+      if (r.right > window.innerWidth - 4) left = Math.max(4, clientX - r.width - pad);
+      if (r.bottom > window.innerHeight - 4) top = Math.max(4, clientY - r.height - pad);
+      el.style.left = `${left}px`;
+      el.style.top = `${top}px`;
+    });
+  }
+
+  function applyPanelSelFilterIndex(idx) {
+    const item = panelSelFilterItems[idx];
+    if (!item) return;
+    panelSelFilterIndex = idx;
+    document.querySelectorAll('#panel-sel-filter .panel-sel-filter-btn').forEach((b, i) => {
+      b.classList.toggle('is-active', i === idx);
+    });
+    if (item.source === 'curve') {
+      selectPanelCurve(item.id);
+      setStatus(`Selected: ${window.GuitarCurves?.typeLabel(item.kind) || item.kind}`);
+    } else if (item.source === 'cad-ent') {
+      clearPanelCurveSelection();
+      document.querySelectorAll('.cad-ent.is-selected').forEach((n) => n.classList.remove('is-selected'));
+      item.el?.classList.add('is-selected');
+      const group = item.el?.closest?.('.cad-group');
+      if (group) selectComponent(group);
+      setStatus(`Selected: ${window.GuitarCurves?.typeLabel(item.kind) || item.kind} (CAD)`);
+    } else if (item.source === 'cad-group') {
+      clearPanelCurveSelection();
+      if (item.el) selectComponent(item.el);
+    } else if (item.source === 'snap') {
+      clearPanelCurveSelection();
+      selectPanelSnapPoint?.(item.id);
+    }
+  }
+
+  function collectPanelSelectableAtPoint(clientX, clientY, hitPx = 10) {
+    const items = [];
+    const world = clientToWorld(clientX, clientY);
+    const thresh = hitPx / Math.max(0.001, viewportScale());
+
+    panelCurves.forEach((curve) => {
+      if ((Number(curve.layer) || 1) !== (pageLayerStacks.panel.activeLayer || 1)
+        && pageLayerStacks.panel.layerState) {
+        /* still allow hit; layer hide handled elsewhere */
+      }
+      const el = curve.el;
+      if (!el) return;
+      try {
+        const svg = getPanelCurvesSvg();
+        const pt = svg.createSVGPoint();
+        pt.x = world.x;
+        pt.y = world.y;
+        // Stroke hit via getBoundingClientRect proximity fallback
+      } catch (_) { /* ignore */ }
+      // Sample path points for distance
+      const pts = curve.points || [];
+      let best = Infinity;
+      for (let i = 0; i + 1 < pts.length; i++) {
+        const a = pts[i];
+        const b = pts[i + 1];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len2 = dx * dx + dy * dy || 1;
+        let t = ((world.x - a.x) * dx + (world.y - a.y) * dy) / len2;
+        t = Math.max(0, Math.min(1, t));
+        const px = a.x + t * dx;
+        const py = a.y + t * dy;
+        best = Math.min(best, Math.hypot(world.x - px, world.y - py));
+      }
+      if (curve.type === 'spline' || curve.type === 'arc') {
+        // Also check bbox padding
+        const bb = el.getBoundingClientRect?.();
+        if (bb) {
+          const cx = Math.max(bb.left, Math.min(clientX, bb.right));
+          const cy = Math.max(bb.top, Math.min(clientY, bb.bottom));
+          if (Math.hypot(clientX - cx, clientY - cy) <= hitPx) best = Math.min(best, thresh * 0.5);
+        }
+      }
+      if (best <= thresh) {
+        items.push({
+          source: 'curve',
+          id: curve.id,
+          kind: curve.type,
+          meta: curve.id.replace('pcurve-', '#'),
+          dist: best,
+        });
+      }
+    });
+
+    document.querySelectorAll('.component.cad-group .cad-ent').forEach((ent) => {
+      const bb = ent.getBoundingClientRect();
+      const cx = Math.max(bb.left, Math.min(clientX, bb.right));
+      const cy = Math.max(bb.top, Math.min(clientY, bb.bottom));
+      const d = Math.hypot(clientX - cx, clientY - cy);
+      if (d <= hitPx + 2) {
+        items.push({
+          source: 'cad-ent',
+          el: ent,
+          kind: ent.getAttribute('data-cad-kind') || 'cad',
+          meta: ent.closest('.cad-group')?.dataset.cadName || 'CAD',
+          dist: d,
+        });
+      }
+    });
+
+    // Whole CAD groups (bbox) if no entity hit but group under cursor
+    document.querySelectorAll('.component.cad-group').forEach((g) => {
+      if (getComponentWorkspacePage(g) !== 'panel') return;
+      const bb = g.getBoundingClientRect();
+      if (clientX >= bb.left && clientX <= bb.right && clientY >= bb.top && clientY <= bb.bottom) {
+        if (!items.some((it) => it.source === 'cad-ent' && it.el?.closest('.cad-group') === g)) {
+          items.push({
+            source: 'cad-group',
+            el: g,
+            kind: 'cad',
+            meta: g.dataset.cadName || 'CAD',
+            dist: 0,
+          });
+        }
+      }
+    });
+
+    items.sort((a, b) => a.dist - b.dist);
+    return items;
+  }
+
+  function tryPanelObjectSelectionAtPoint(e) {
+    if (activeWorkspacePage !== 'panel' || panelCurveTool || panelSnapMode || wireMode || eraseMode) {
+      return false;
+    }
+    if (e.target?.closest?.('#panel-sel-filter, .app-header, .toolbar, .status-bar')) return false;
+    const items = collectPanelSelectableAtPoint(e.clientX, e.clientY);
+    if (items.length <= 1) {
+      hidePanelSelFilter();
+      if (items.length === 1) {
+        panelSelFilterItems = items;
+        applyPanelSelFilterIndex(0);
+        return true;
+      }
+      return false;
+    }
+    // Rhino-like: small window to cycle object types under cursor
+    showPanelSelFilter(items, e.clientX, e.clientY);
+    applyPanelSelFilterIndex(0);
+    return true;
+  }
+
+  function initPanelSelFilter() {
+    const el = document.getElementById('panel-sel-filter');
+    if (!el || el.dataset.bound === '1') return;
+    el.dataset.bound = '1';
+    el.addEventListener('mousedown', (e) => e.stopPropagation());
+    el.addEventListener('click', (e) => {
+      const btn = e.target?.closest?.('[data-sel-idx]');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      applyPanelSelFilterIndex(Number(btn.dataset.selIdx));
+      hidePanelSelFilter();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (el.hidden || el.classList.contains('hidden')) return;
+      if (e.key === 'Escape') {
+        hidePanelSelFilter();
+        return;
+      }
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const n = panelSelFilterItems.length;
+        if (!n) return;
+        const next = e.key === 'ArrowDown'
+          ? (panelSelFilterIndex + 1) % n
+          : (panelSelFilterIndex - 1 + n) % n;
+        applyPanelSelFilterIndex(next);
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        hidePanelSelFilter();
+      }
+    });
+  }
+
+  function initPanelCurveTools() {
+    const host = document.getElementById('panel-curve-tools');
+    host?.addEventListener('click', (e) => {
+      const ortho = e.target?.closest?.('#btn-panel-ortho, [data-panel-ortho]');
+      if (ortho) {
+        e.preventDefault();
+        e.stopPropagation();
+        setPanelOrthoMode(!panelOrthoMode);
+        return;
+      }
+      const btn = e.target?.closest?.('[data-panel-curve]');
+      if (!btn) return;
+      e.preventDefault();
+      setPanelCurveTool(btn.dataset.panelCurve);
+    });
+    syncPanelCurveToolsVisibility();
+  }
+
+
+  function initOsnapBar() {
+    const bar = document.getElementById('osnap-bar');
+    if (!bar || bar.dataset.bound === '1') return;
+    bar.dataset.bound = '1';
+    bar.addEventListener('click', (e) => {
+      const btn = e.target?.closest?.('.osnap-btn');
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const key = btn.dataset.osnap;
+      if (!key || !(key in osnapEnabled)) return;
+      if (key === 'grid') {
+        if (activeWorkspacePage === 'panel') {
+          togglePanelCursorGridSnap();
+          osnapEnabled.grid = panelCursorGridSnap;
+        } else {
+          osnapEnabled.grid = !osnapEnabled.grid;
+        }
+        syncOsnapGridButton();
+        return;
+      }
+      osnapEnabled[key] = !osnapEnabled[key];
+      btn.classList.toggle('is-on', osnapEnabled[key]);
+      btn.setAttribute('aria-pressed', osnapEnabled[key] ? 'true' : 'false');
+      setStatus(`Osnap ${key}: ${osnapEnabled[key] ? 'on' : 'off'}`);
+      if (typeof refreshPanelCurveGrips === 'function') refreshPanelCurveGrips();
+    });
+    syncOsnapGridButton();
+  }
+
+  /**
+   * World-space CAD rulers fixed at the workspace grid origin (0,0).
+   * They live inside #workspace so they pan/zoom with the grid (not screen UI).
+   * Tick spacing is constant in world units — does not counter-scale.
+   */
+  function updateWorkspaceRulers() {
+    const host = document.getElementById('workspace-grid-rulers');
+    if (!host) return;
+    host.classList.toggle('is-hidden', !workspaceRulersVisible);
+    host.setAttribute('aria-hidden', workspaceRulersVisible ? 'false' : 'true');
+  }
+
+  function buildWorkspaceGridRulers() {
+    const host = document.getElementById('workspace-grid-rulers');
+    const rh = document.getElementById('workspace-ruler-h');
+    const rv = document.getElementById('workspace-ruler-v');
+    if (!host || !rh || !rv) return;
+    const ns = 'http://www.w3.org/2000/svg';
+    const grid = getWorkspaceGrid();
+    const majorEvery = 10;
+    const band = 14;
+    host.setAttribute('width', String(WORKSPACE_SIZE));
+    host.setAttribute('height', String(WORKSPACE_SIZE));
+    host.setAttribute('viewBox', `0 0 ${WORKSPACE_SIZE} ${WORKSPACE_SIZE}`);
+    rh.replaceChildren();
+    rv.replaceChildren();
+
+    const hBand = document.createElementNS(ns, 'rect');
+    hBand.setAttribute('x', '0');
+    hBand.setAttribute('y', '0');
+    hBand.setAttribute('width', String(WORKSPACE_SIZE));
+    hBand.setAttribute('height', String(band));
+    hBand.setAttribute('class', 'workspace-ruler-band');
+    rh.appendChild(hBand);
+
+    const vBand = document.createElementNS(ns, 'rect');
+    vBand.setAttribute('x', '0');
+    vBand.setAttribute('y', '0');
+    vBand.setAttribute('width', String(band));
+    vBand.setAttribute('height', String(WORKSPACE_SIZE));
+    vBand.setAttribute('class', 'workspace-ruler-band');
+    rv.appendChild(vBand);
+
+    for (let i = 0; i * grid <= WORKSPACE_SIZE; i++) {
+      const x = i * grid;
+      const major = i % majorEvery === 0;
+      const tick = document.createElementNS(ns, 'line');
+      tick.setAttribute('x1', String(x));
+      tick.setAttribute('y1', major ? '0' : String(band * 0.45));
+      tick.setAttribute('x2', String(x));
+      tick.setAttribute('y2', String(band));
+      tick.setAttribute('class', major ? 'workspace-ruler-tick is-major' : 'workspace-ruler-tick');
+      rh.appendChild(tick);
+      if (major && i > 0) {
+        const label = document.createElementNS(ns, 'text');
+        label.setAttribute('x', String(x + 1));
+        label.setAttribute('y', '9');
+        label.setAttribute('class', 'workspace-ruler-label');
+        label.textContent = String(i);
+        rh.appendChild(label);
+      }
+    }
+    for (let i = 0; i * grid <= WORKSPACE_SIZE; i++) {
+      const y = i * grid;
+      const major = i % majorEvery === 0;
+      const tick = document.createElementNS(ns, 'line');
+      tick.setAttribute('x1', major ? '0' : String(band * 0.45));
+      tick.setAttribute('y1', String(y));
+      tick.setAttribute('x2', String(band));
+      tick.setAttribute('y2', String(y));
+      tick.setAttribute('class', major ? 'workspace-ruler-tick is-major' : 'workspace-ruler-tick');
+      rv.appendChild(tick);
+      if (major && i > 0) {
+        const label = document.createElementNS(ns, 'text');
+        label.setAttribute('x', '3');
+        label.setAttribute('y', String(y - 2));
+        label.setAttribute('class', 'workspace-ruler-label workspace-ruler-label-v');
+        label.textContent = String(i);
+        rv.appendChild(label);
+      }
+    }
+  }
+
+  function initWorkspaceRulers() {
+    buildWorkspaceGridRulers();
+    const corner = document.getElementById('ruler-corner');
+    corner?.addEventListener('mousedown', (e) => e.stopPropagation());
+    corner?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      workspaceRulersVisible = !workspaceRulersVisible;
+      updateWorkspaceRulers();
+      setStatus(workspaceRulersVisible ? 'Rulers shown' : 'Rulers hidden');
+    });
+    updateWorkspaceRulers();
+  }
+
+  function formatHudKeys(text) {
+    const escapeHtml = (s) => String(s ?? '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const mouseIcon = (side) => {
+      const right = side === 'right';
+      const fill = right
+        ? '<path d="M8 2.15c2.55 0 4.55 1.85 4.55 4.35V9H8V2.15Z" fill="currentColor"/>'
+        : '<path d="M8 2.15C5.45 2.15 3.45 4 3.45 6.5V9H8V2.15Z" fill="currentColor"/>';
+      return (
+        `<span class="mouse-click mouse-click-${right ? 'right' : 'left'}">` +
+        `<svg viewBox="0 0 16 22" width="11" height="15" aria-hidden="true">` +
+        `<rect x="3.1" y="1.9" width="9.8" height="18.2" rx="4.9" fill="none" stroke="currentColor" stroke-width="1.35"/>` +
+        `<path d="M3.4 9h9.2M8 2.1V9" fill="none" stroke="currentColor" stroke-width="1.2"/>` +
+        fill + `</svg></span>`
+      );
+    };
+    return escapeHtml(text)
+      .replace(/\[\[L-click\]\]/g, () => mouseIcon('left'))
+      .replace(/\[\[R-click\]\]/g, () => mouseIcon('right'))
+      .replace(/\[\[(.+?)\]\]/g, (_, key) => `<kbd class="kbd">${key}</kbd>`);
+  }
+
+  function updateIdleWorkspaceChrome() {
+    const pan = document.getElementById('pan-help-label');
+    if (!pan) return;
+    const idle = selectedComponents.size === 0
+      && selectedWireGroups.size === 0
+      && selectedPanelSnapIds.size === 0
+      && selectedDimAnnotationIds.size === 0
+      && !wireDraftStart
+      && !placementMode;
+    if (!idle) {
+      pan.hidden = true;
+      return;
+    }
+    pan.hidden = false;
+    pan.innerHTML = `${formatHudKeys('[[Space]] + [[R-click]]')} <span class="pan-help-action">Pan</span>`;
+  }
+
+
   function initCommandsPanel() {
     const panel = document.getElementById('commands-panel');
     const chevron = document.getElementById('commands-chevron');
@@ -33808,35 +35676,36 @@
         .replace(/\[\[(.+?)\]\]/g, (_, key) => `<kbd class="kbd">${key}</kbd>`);
     }
 
-    /** Shortcuts only — omit anything covered by layer / panel help popups. */
-    function buildCommandsPresetList() {
-      return [
-        { name: '[[R-click]]', description: 'Place menu' },
-        { name: '[[L-click]] drag', description: 'Marquee select' },
-        { name: '[[Shift]] drag', description: 'Free move' },
-        { name: '[[Alt]] drag', description: 'Drag a copy' },
-        { name: `[[${mod}]] + [[C]] / [[X]] / [[V]]`, description: 'Copy / cut / paste' },
-        { name: `[[${mod}]] + [[G]]`, description: 'Group' },
-        { name: `[[${mod}]] + [[Shift]] + [[G]]`, description: 'Ungroup' },
-        { name: `[[${mod}]] + [[S]]`, description: 'Save project' },
-        { name: '[[`]]', description: 'Bugtest error terminal' },
-        { name: '[[Q]] / [[E]]', description: 'Cycle asset state' },
-        { name: '[[Delete]] / [[Backspace]]', description: 'Delete selection' },
-        { name: '[[Space]] + drag', description: 'Pan' },
-        { name: '[[+]] / [[−]]', description: 'Rotate or wire slack' },
-        { name: '[[1]] – [[9]]', description: 'Wire layer' },
-        { name: '[[Enter]]', description: 'Text command' },
-        { name: '[[Escape]]', description: 'Cancel / clear' },
-        { name: '[[Q]] hold', description: 'Asset / wire wheel' },
-        { name: 'Mouse wheel', description: 'Zoom' },
+    function buildTextCommandList() {
+      const rows = [
+        {
+          name: '[[Enter]]',
+          description: 'Open text command prompt',
+          run: () => {
+            setCommandsOpen(false);
+            openTextCommandBox(lastPointerX, lastPointerY);
+          },
+        },
       ];
+      textCommands.forEach((cmd) => {
+        rows.push({
+          name: cmd.short || cmd.name,
+          description: cmd.description || cmd.name,
+          run: () => {
+            setCommandsOpen(false);
+            cmd.run?.();
+          },
+        });
+      });
+      return rows;
     }
 
     function renderCommandsList() {
       list.innerHTML = '';
-      buildCommandsPresetList().forEach(({ name, description }) => {
-        const row = document.createElement('div');
-        row.className = 'commands-row';
+      buildTextCommandList().forEach(({ name, description, run }) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'commands-row commands-row-btn';
         row.setAttribute('role', 'listitem');
         const nameEl = document.createElement('span');
         nameEl.className = 'commands-name';
@@ -33846,6 +35715,11 @@
         descEl.innerHTML = formatCommandKeys(description);
         row.appendChild(nameEl);
         row.appendChild(descEl);
+        row.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          run?.();
+        });
         list.appendChild(row);
       });
     }
@@ -33856,8 +35730,8 @@
       panel.classList.toggle('is-open', open);
       body.setAttribute('aria-hidden', open ? 'false' : 'true');
       chevron.setAttribute('aria-expanded', open ? 'true' : 'false');
-      chevron.setAttribute('aria-label', open ? 'Collapse commands' : 'Expand commands');
-      chevron.title = open ? 'Hide commands' : 'Commands';
+      chevron.setAttribute('aria-label', open ? 'Collapse text commands' : 'Expand text commands');
+      chevron.title = open ? 'Hide text commands' : 'Text commands';
       if (open) renderCommandsList();
     }
 
@@ -33880,14 +35754,22 @@
   initLayerUI();
   initPanelLayerUI();
   loadUiPrefs();
+  if (typeof window.syncWireSettingsUi === 'function') window.syncWireSettingsUi();
   applyAccentTheme(accentThemeIndex);
   applyUiScalePrefs();
   applyColorblindMode(colorblindMode);
   applyHeaderDitherEnabled(headerDitherEnabled);
+  applyLightGridEnabled(lightGridEnabled);
   initLogoMark();
   initCadImportDialog();
   initPanelCadDrop();
   initCommandsPanel();
+  initOsnapBar();
+  initWorkspaceRulers();
+  initPanelCurveTools();
+  initPanelSelFilter();
+  updateIdleWorkspaceChrome();
+  document.body.classList.toggle('panel-grid-snap-off', !panelCursorGridSnap);
   initSchematicPeek();
   initRemakeWorkplaceConfirmDialog();
   textCommandInput?.addEventListener('input', updateTextCommandHint);
@@ -33965,6 +35847,7 @@
   resizeWireStacks();
   applyViewport();
   refreshCircuitFaultWarning();
+  updateAlignBar();
   canvas.focus();
 
   function terminalByRole(comp, role) {

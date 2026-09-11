@@ -25221,6 +25221,27 @@
     return true;
   }
 
+  /** Finish in-progress wire at pointer (terminal under cursor if any). Keeps wire tool armed. */
+  function finishWireDraftFromPointer(clientX = lastPointerX, clientY = lastPointerY) {
+    if (!wireDraftStart) return false;
+    const hit = document.elementFromPoint(clientX, clientY);
+    const term = hit?.closest?.('.terminal');
+    let endPt;
+    if (term && document.body.contains(term)) {
+      endPt = resolveEndpoint({ type: 'terminal', el: term });
+    } else {
+      endPt = resolveEndpoint({ type: 'point', clientX, clientY });
+      if (wireRouteMode === 'manhattan') {
+        const prev = wireDraftAnchors.length
+          ? wireDraftAnchors[wireDraftAnchors.length - 1]
+          : { x: wireDraftStart.x, y: wireDraftStart.y };
+        const snapped = manhattanAxisSnap(prev, endPt.x, endPt.y);
+        endPt = { x: snapped.x, y: snapped.y, terminal: null };
+      }
+    }
+    return finishWireDraftAt(endPt);
+  }
+
   function handleWireCanvasClick(e) {
     if (!wireMode) return false;
 
@@ -25252,8 +25273,8 @@
       return true;
     }
 
-    // Wire persist: double-click empty canvas finishes a free end
-    if (wirePersist && e.detail >= 2) {
+    // Double-click empty canvas finishes a free end (wire tool stays armed)
+    if (e.detail >= 2) {
       let endPt = endpoint;
       if (wireRouteMode === 'manhattan') {
         const prev = wireDraftAnchors.length
@@ -25290,12 +25311,8 @@
     updatePreviewLine(e.clientX, e.clientY);
     setStatus(
       wireRouteMode === 'manhattan'
-        ? `Corner ${wireDraftAnchors.length} set — click more corners, or a terminal to finish${
-            wirePersist ? ' · double-click / Enter for free end' : ''
-          } (Esc cancels)`
-        : `Anchor ${wireDraftAnchors.length} set — click more anchors, or a terminal to finish${
-            wirePersist ? ' · double-click / Enter for free end' : ''
-          } (Esc cancels)`
+        ? `Corner ${wireDraftAnchors.length} set — click more corners, terminal, or Enter to finish (Esc cancels)`
+        : `Anchor ${wireDraftAnchors.length} set — click more anchors, terminal, or Enter to finish (Esc cancels)`
     );
     return true;
   }
@@ -28604,17 +28621,15 @@
         e.preventDefault();
         return;
       }
-      if (wireMode && wireDraftStart && wirePersist) {
+      // Wire draft: Enter finishes the wire at the pointer; wire tool stays armed
+      if (wireMode && wireDraftStart) {
         e.preventDefault();
-        let endPt = resolveEndpoint({ type: 'point', clientX: lastPointerX, clientY: lastPointerY });
-        if (wireRouteMode === 'manhattan') {
-          const prev = wireDraftAnchors.length
-            ? wireDraftAnchors[wireDraftAnchors.length - 1]
-            : { x: wireDraftStart.x, y: wireDraftStart.y };
-          const snapped = manhattanAxisSnap(prev, endPt.x, endPt.y);
-          endPt = { x: snapped.x, y: snapped.y, terminal: null };
-        }
-        finishWireDraftAt(endPt);
+        finishWireDraftFromPointer();
+        return;
+      }
+      if (wireMode) {
+        // Wire tool armed — don't open text command (Esc exits wire mode)
+        e.preventDefault();
         return;
       }
       if (dimTool && dimTool.phase !== 'done') return;

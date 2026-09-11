@@ -2,7 +2,7 @@
 ; Build after EndoASD.exe exists: iscc build\EndoASD.iss
 
 #define AppName "Endo Audio Schematic Editor"
-#define AppVersion "1.0.569"
+#define AppVersion "1.0.570"
 #define AppPublisher "Endo"
 #define AppExe "EndoASD.exe"
 

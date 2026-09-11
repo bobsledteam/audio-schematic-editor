@@ -11,7 +11,7 @@
 
   const APP_META = Object.freeze({
     label: 'Bugtest Ver.',
-    build: 569,
+    build: 570,
     product: 'Endo Audio Schematic Editor',
   });
 

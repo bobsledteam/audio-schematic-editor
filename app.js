@@ -19625,24 +19625,11 @@
   }
 
   function clientToCapacitorLocal(el, clientX, clientY) {
-    const svg = el.querySelector('.cap-leads-svg');
-    if (svg) {
-      const ctm = svg.getScreenCTM();
-      if (ctm) {
-        const pt = svg.createSVGPoint();
-        pt.x = clientX;
-        pt.y = clientY;
-        const local = pt.matrixTransform(ctm.inverse());
-        return { x: local.x, y: local.y };
-      }
-    }
-    const rect = el.getBoundingClientRect();
-    const sx = el.offsetWidth / (rect.width || 1);
-    const sy = el.offsetHeight / (rect.height || 1);
-    return {
-      x: (clientX - rect.left) * sx,
-      y: (clientY - rect.top) * sy,
-    };
+    // Component CSS pixels via world math — SVG getScreenCTM drifts under workspace zoom.
+    const world = clientToWorld(clientX, clientY);
+    const left = parseFloat(el.style.left) || 0;
+    const top = parseFloat(el.style.top) || 0;
+    return { x: world.x - left, y: world.y - top };
   }
 
   function getCapacitorLeadEndpoints(el, which) {
@@ -20131,24 +20118,11 @@
   }
 
   function clientToAssetWireLocal(el, clientX, clientY) {
-    const svg = el.querySelector('.asset-wire-leads-svg');
-    if (svg) {
-      const ctm = svg.getScreenCTM();
-      if (ctm) {
-        const pt = svg.createSVGPoint();
-        pt.x = clientX;
-        pt.y = clientY;
-        const local = pt.matrixTransform(ctm.inverse());
-        return { x: local.x, y: local.y };
-      }
-    }
-    const rect = el.getBoundingClientRect();
-    const sx = el.offsetWidth / (rect.width || 1);
-    const sy = el.offsetHeight / (rect.height || 1);
-    return {
-      x: (clientX - rect.left) * sx,
-      y: (clientY - rect.top) * sy,
-    };
+    // Same world-space local math as dual-coil / capacitor leads (zoom-safe).
+    const world = clientToWorld(clientX, clientY);
+    const left = parseFloat(el.style.left) || 0;
+    const top = parseFloat(el.style.top) || 0;
+    return { x: world.x - left, y: world.y - top };
   }
 
   function persistAssetWireTipPositions(el) {

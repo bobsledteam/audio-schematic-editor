@@ -5151,12 +5151,15 @@ body.workspace-on-panel .panel-layer-tab.is-active::after {
   display: flex;
   flex-direction: column;
   gap: 0.14rem;
-  background: rgba(0, 0, 0, 0.18);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: #121216;
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 0;
   color: rgba(255, 255, 255, 0.55);
-  backdrop-filter: blur(6px);
-  box-shadow: none;
+  /* Solid fill only — backdrop-filter blurs the whole workspace under WebKit/pywebview */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  filter: none;
 }
 
 .asset-state-term-menu.hidden {
@@ -11375,14 +11378,25 @@ body.asset-wheel-open {
 
 #dimensional-config-menu {
   width: min(320px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
 }
 
-/* Full (non-minimized) dimensional menu — 1.8× overall scale */
+/* Full (non-minimized) dimensional menu — 1.8× size without CSS zoom (zoom breaks drag/coords) */
 #dimensional-config-menu:not(.is-minimized) {
-  zoom: 1.8;
-  width: min(320px, calc((100vw - 24px) / 1.8));
-  max-width: min(420px, calc((100vw - 24px) / 1.8));
-  max-height: calc((100vh - 24px) / 1.8);
+  --ui-menu-font: calc(0.68rem * 1.8 * var(--ui-text-scale));
+  --ui-menu-label: calc(0.62rem * 1.8 * var(--ui-text-scale));
+  --ui-menu-title: calc(0.72rem * 1.8 * var(--ui-text-scale));
+  --dim-control-h: calc(1.05rem * 1.8);
+  width: min(576px, calc(100vw - 24px));
+  max-width: min(756px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+}
+
+#dimensional-config-menu .ui-float-menu-body {
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-bottom: 1rem;
+  -webkit-overflow-scrolling: touch;
 }
 
 #dimensional-config-menu .asset-config-bobbin-section {
@@ -11395,6 +11409,63 @@ body.asset-wheel-open {
 #dimensional-config-menu .asset-config-bobbin-previews {
   width: 100%;
   margin: 0;
+}
+
+/* Scale fixed-height bobbin controls with the 1.8× menu so text isn't clipped */
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-stepper {
+  height: var(--dim-control-h);
+  min-height: var(--dim-control-h);
+  overflow: visible;
+}
+
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-step {
+  flex: 0 0 calc(0.78rem * 1.8);
+  font-size: var(--ui-menu-font);
+}
+
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-input,
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-stepper-narrow .asset-config-bobbin-input {
+  font-size: var(--ui-menu-font);
+  line-height: 1.25;
+  padding: 0 0.25rem;
+}
+
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-dia-select,
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-preset {
+  height: var(--dim-control-h);
+  min-height: var(--dim-control-h);
+  font-size: var(--ui-menu-font);
+  line-height: 1.25;
+  padding: 0 0.35rem;
+}
+
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-preset-btn {
+  height: var(--dim-control-h);
+  min-height: var(--dim-control-h);
+  font-size: var(--ui-menu-font);
+  padding: 0 0.45rem;
+}
+
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-reset {
+  width: calc(0.85rem * 1.8);
+  height: calc(0.7rem * 1.8);
+  font-size: var(--ui-menu-label);
+}
+
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-category-btn {
+  font-size: var(--ui-menu-label);
+  padding: 0.32rem 0.18rem;
+}
+
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-field {
+  row-gap: 0.12rem;
+  align-items: start;
+}
+
+#dimensional-config-menu:not(.is-minimized) .asset-config-bobbin-field > .asset-config-field-label {
+  line-height: 1.3;
+  overflow: visible;
+  white-space: normal;
 }
 
 /* Even type scale inside dimensional + custom-asset float menus */

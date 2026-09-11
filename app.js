@@ -11691,6 +11691,8 @@
     /** Strat single-coil magnet wire. */
     coilWireAwg: 42,
     coilInsulation: 'plainEnamel',
+    /** Strat SC reference wind count (Formvar/PE era ~7.5–8.5k); not cavity-fill estimate. */
+    coilTurns: 8000,
     /** Strat / most common Alnico slug grade. */
     magnetType: 'alnico5',
     coilGapMm: 0,
@@ -13223,8 +13225,12 @@
 
   /** Cavity-fill turns estimate per coil (ignores manual overrides). */
   function estimateBobbinCoilTurnsList(el) {
-    if (!supportsBobbinDimensionalConfig(el)) return [5000];
+    if (!supportsBobbinDimensionalConfig(el)) return [BOBBIN_DEFAULTS.coilTurns || 8000];
     const coils = getBobbinCoilCount(el);
+    // Single-coil: use Strat reference wind — cavity-fill estimate is too geometry-sensitive.
+    if (coils === 1) {
+      return [snapBobbinCoilTurns(getBobbinDefaults(el).coilTurns ?? BOBBIN_DEFAULTS.coilTurns, 8000)];
+    }
     const cavityH = getBobbinCavityHeightMm(el);
     const widthMm = getBobbinWidthMm(el);
     const maxBody = getBobbinMaxMagnetDiameterMm(el);
@@ -17126,15 +17132,27 @@
     const pad = 12;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    let left = Math.round(vw * 0.58);
-    let top = Math.round(vh * 0.12);
+    let left = Math.round(vw * 0.5 - 180);
+    let top = Math.round(vh * 0.1);
     if (anchorBtn) {
       const r = anchorBtn.getBoundingClientRect();
-      left = Math.round(r.right + 10);
+      left = Math.round(r.right + 12);
       top = Math.round(r.top);
     }
-    menu.style.left = `${Math.max(pad, Math.min(left, vw - 300))}px`;
-    menu.style.top = `${Math.max(pad, Math.min(top, vh - 120))}px`;
+    menu.style.left = `${Math.max(pad, left)}px`;
+    menu.style.top = `${Math.max(pad, top)}px`;
+    // Clamp after layout so the large menu stays on-screen
+    requestAnimationFrame(() => {
+      const br = menu.getBoundingClientRect();
+      let l = br.left;
+      let t = br.top;
+      if (br.right > vw - pad) l = Math.max(pad, vw - pad - br.width);
+      if (br.bottom > vh - pad) t = Math.max(pad, vh - pad - br.height);
+      if (l < pad) l = pad;
+      if (t < pad) t = pad;
+      menu.style.left = `${Math.round(l)}px`;
+      menu.style.top = `${Math.round(t)}px`;
+    });
   }
 
   function bindUiFloatMenuChrome(menuEl, {
@@ -17163,6 +17181,9 @@
       e.stopPropagation();
       menuEl.classList.toggle('is-minimized');
       syncMinUi();
+      if (menuEl.id === 'dimensional-config-menu' && !menuEl.classList.contains('is-minimized')) {
+        positionDimensionalConfigMenu(document.getElementById('asset-config-dimensional-btn'));
+      }
     });
 
     closeBtn?.addEventListener('click', (e) => {
@@ -17174,22 +17195,30 @@
     bar?.addEventListener('mousedown', (e) => {
       if (e.button !== 0) return;
       if (e.target.closest('button')) return;
+      const left = parseFloat(menuEl.style.left);
+      const top = parseFloat(menuEl.style.top);
       const rect = menuEl.getBoundingClientRect();
       drag = {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
+        startX: e.clientX,
+        startY: e.clientY,
+        origLeft: Number.isFinite(left) ? left : rect.left,
+        origTop: Number.isFinite(top) ? top : rect.top,
       };
       menuEl.classList.add('is-dragging');
       e.preventDefault();
+      e.stopPropagation();
     });
 
     document.addEventListener('mousemove', (e) => {
       if (!drag) return;
       const pad = 4;
-      const w = menuEl.offsetWidth || 280;
-      const h = menuEl.offsetHeight || 48;
-      const left = Math.max(pad, Math.min(e.clientX - drag.x, window.innerWidth - Math.min(w, 80) - pad));
-      const top = Math.max(pad, Math.min(e.clientY - drag.y, window.innerHeight - Math.min(h, 40) - pad));
+      const br = menuEl.getBoundingClientRect();
+      const w = br.width || menuEl.offsetWidth || 280;
+      const h = br.height || menuEl.offsetHeight || 48;
+      let left = drag.origLeft + (e.clientX - drag.startX);
+      let top = drag.origTop + (e.clientY - drag.startY);
+      left = Math.max(pad, Math.min(left, window.innerWidth - Math.min(w, 120) - pad));
+      top = Math.max(pad, Math.min(top, window.innerHeight - Math.min(h, 48) - pad));
       menuEl.style.left = `${Math.round(left)}px`;
       menuEl.style.top = `${Math.round(top)}px`;
     });
@@ -26504,12 +26533,47 @@
 
   appSettingsPanel?.addEventListener('mousedown', (e) => e.stopPropagation());
   appSettingsPanel?.addEventListener('click', (e) => e.stopPropagation());
+  appSettingsPanel?.addEventListener('pointerdown', (e) => e.stopPropagation());
+  // Keep text selection / slider drags from closing the panel when the pointer leaves it
+  let settingsPointerDownInside = false;
+  appSettingsPanel?.addEventListener('pointerdown', () => {
+    settingsPointerDownInside = true;
+  });
+  btnSettings?.addEventListener('pointerdown', () => {
+    settingsPointerDownInside = true;
+  });
 
-  document.addEventListener('mousedown', (e) => {
+  document.addEventListener('pointerdown', (e) => {
     if (!appSettingsPanel || appSettingsPanel.classList.contains('hidden')) return;
-    if (appSettingsPanel.contains(e.target) || btnSettings?.contains(e.target)) return;
+    if (
+      appSettingsPanel.contains(e.target)
+      || btnSettings?.contains(e.target)
+      || e.target.closest?.('#app-settings')
+    ) {
+      settingsPointerDownInside = true;
+      return;
+    }
+    settingsPointerDownInside = false;
+  });
+
+  document.addEventListener('pointerup', (e) => {
+    if (!appSettingsPanel || appSettingsPanel.classList.contains('hidden')) return;
+    if (settingsPointerDownInside) {
+      settingsPointerDownInside = false;
+      return;
+    }
+    if (
+      appSettingsPanel.contains(e.target)
+      || btnSettings?.contains(e.target)
+      || e.target.closest?.('#app-settings')
+    ) return;
+    // Selecting text can end outside the panel; keep it open if selection is anchored inside
+    const sel = window.getSelection?.();
+    if (sel && !sel.isCollapsed && sel.anchorNode && appSettingsPanel.contains(sel.anchorNode)) return;
     setSettingsPanelOpen(false);
   });
+
+  // Legacy mousedown-outside close removed — pointerup handles it without killing text select.
 
   window.addEventListener('resize', () => {
     if (appSettingsPanel && !appSettingsPanel.classList.contains('hidden')) {
@@ -27114,6 +27178,13 @@
     setBobbinDimensionalExpanded(!bobbinDimensionalExpanded);
   });
   document.getElementById('asset-config-dimensional-btn')?.addEventListener('mousedown', (e) => {
+    e.stopPropagation();
+  });
+
+  document.getElementById('dimensional-config-menu')?.addEventListener('mousedown', (e) => {
+    e.stopPropagation();
+  });
+  document.getElementById('dimensional-config-menu')?.addEventListener('pointerdown', (e) => {
     e.stopPropagation();
   });
 

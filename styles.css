@@ -3225,45 +3225,101 @@ body.workspace-on-panel .workspace-layer-tab.is-active {
 
 .wire-stack .wire-group.lightning-glow .wire-visible {
   stroke: #ffe566;
+  stroke-width: 2.6;
   animation:
-    wire-lightning-flow 0.22s linear infinite,
-    wire-lightning-pulse 0.22s linear infinite;
+    wire-lightning-flow 0.35s linear infinite,
+    wire-lightning-pulse 0.55s ease-in-out infinite;
 }
 
 .wire-stack .wire-group.lightning-glow .wire-visible:not(.dashed) {
-  stroke-dasharray: 3 7;
+  stroke-dasharray: 5 6;
 }
 
 .wire-stack .wire-group.lightning-glow .wire-outline {
-  animation: wire-lightning-pulse 0.22s linear infinite;
+  stroke: rgba(255, 229, 102, 0.45);
+  stroke-width: 5;
+  animation: wire-lightning-pulse 0.55s ease-in-out infinite;
 }
 
 @keyframes wire-lightning-flow {
   from { stroke-dashoffset: 0; }
-  to { stroke-dashoffset: -10; }
+  to { stroke-dashoffset: -22; }
 }
 
 @keyframes wire-lightning-pulse {
   0%, 100% {
-    filter: drop-shadow(0 0 0.5px rgba(255, 230, 90, 0.55));
-    opacity: 0.82;
+    filter: drop-shadow(0 0 1px rgba(255, 230, 90, 0.65));
+    opacity: 0.88;
   }
-  20% {
-    filter: drop-shadow(0 0 1px rgba(255, 245, 140, 1)) drop-shadow(0 0 2px rgba(255, 215, 0, 0.9));
+  50% {
+    filter: drop-shadow(0 0 2px rgba(255, 245, 140, 1)) drop-shadow(0 0 5px rgba(255, 200, 40, 0.75));
     opacity: 1;
   }
-  40% {
-    filter: drop-shadow(0 0 0.5px rgba(255, 220, 60, 0.5));
-    opacity: 0.78;
-  }
-  60% {
-    filter: drop-shadow(0 0 1px rgba(255, 245, 140, 0.95)) drop-shadow(0 0 2px rgba(255, 215, 0, 0.85));
-    opacity: 1;
-  }
-  80% {
-    filter: drop-shadow(0 0 0.5px rgba(255, 220, 60, 0.45));
-    opacity: 0.8;
-  }
+}
+
+/* Focus: Active — mute everything except the live signal path */
+body.signal-path-focus .wire-stack .wire-group:not(.signal-path-wire):not(.lightning-glow) {
+  opacity: 0.14;
+  filter: grayscale(0.85);
+}
+
+body.signal-path-focus .wire-stack .wire-group.signal-path-wire {
+  opacity: 1;
+  filter: none;
+  z-index: 8;
+}
+
+body.signal-path-focus .component:not(.signal-path-active) {
+  opacity: 0.22;
+  filter: grayscale(0.9) brightness(0.75);
+}
+
+body.signal-path-focus .component.signal-path-active {
+  opacity: 1;
+  filter: none;
+  z-index: 7;
+}
+
+body.signal-path-focus .component.signal-path-active .placeholder {
+  filter: none;
+  opacity: 1;
+}
+
+body.signal-path-focus .component .terminal:not(.signal-path-live) {
+  opacity: 0.28;
+}
+
+body.signal-path-focus .terminal.signal-path-live {
+  opacity: 1;
+  box-shadow:
+    0 0 0 1px rgba(255, 229, 102, 0.95),
+    0 0 8px rgba(255, 210, 60, 0.7);
+  z-index: 9;
+}
+
+body.signal-path-focus .terminal.signal-path-source {
+  box-shadow:
+    0 0 0 1.5px #fff3a0,
+    0 0 12px rgba(255, 220, 80, 0.95);
+}
+
+body.signal-path-focus .component.signal-path-source .placeholder {
+  box-shadow: 0 0 10px rgba(255, 220, 80, 0.35);
+}
+
+/* Keep path readable when Wire edit focus is also on */
+body.signal-path-focus.wire-edit-focus .component.signal-path-active {
+  pointer-events: none;
+}
+
+body.signal-path-focus.wire-edit-focus .component.signal-path-active .placeholder {
+  filter: none;
+  opacity: 1;
+}
+
+body.signal-path-focus.wire-edit-focus .terminal.signal-path-live {
+  pointer-events: auto;
+  opacity: 1;
 }
 
 /* Wire-focus + ground-focus: chained grounding net + chase into ISGROUND */

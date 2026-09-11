@@ -5342,7 +5342,7 @@
         powerBtn.setAttribute('aria-pressed', deps.getPanelSnapMode?.() ? 'true' : 'false');
       } else {
         powerBtn.innerHTML = CONTEXT_FOCUS_ICON_ACTIVE;
-        powerBtn.title = 'Focus: Active — highlight wires on active signal path';
+        powerBtn.title = 'Focus: Active — show live signal path only';
         powerBtn.setAttribute('aria-label', 'Focus: Active signal path');
         powerBtn.classList.remove('panel-snap-active');
         syncContextMenuPowerButton();

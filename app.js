@@ -789,8 +789,8 @@
   let shortCheckMode = false;
 
   /**
-   * Lightning mode: glow wires on conducting nets that carry signal.
-   * Seeds = signal injectors only (pickup coil ends / jack tip H with terminalActive).
+   * Focus: Active — highlight the live signal path only.
+   * Seeds = signal injectors (pickup coil ends / jack tip H with terminalActive).
    * Switch poles and pot lugs join via buildWireNets() expansion — seeding them
    * also lit the ground bus whenever an active pole sat on a grounded net.
    * Nets that reach chassis / circuit ground are excluded so phase-reverse (or any
@@ -833,11 +833,22 @@
     return false;
   }
 
+  function clearSignalPathFocusClasses() {
+    document.body.classList.remove('signal-path-focus');
+    wires.forEach((wire) => {
+      wire.group?.classList.remove('lightning-glow', 'signal-path-wire');
+    });
+    components.forEach((comp) => {
+      comp.classList.remove('signal-path-active', 'signal-path-source');
+      comp.querySelectorAll('.terminal.signal-path-live, .terminal.signal-path-source').forEach((t) => {
+        t.classList.remove('signal-path-live', 'signal-path-source');
+      });
+    });
+  }
+
   function refreshLightningWireGlow() {
     withWireNets(() => {
-      wires.forEach((wire) => {
-        wire.group?.classList.remove('lightning-glow');
-      });
+      clearSignalPathFocusClasses();
       if (!lightningMode) return;
 
       const seedTerms = new Set();
@@ -856,7 +867,15 @@
           seedTerms.add(term);
         });
       });
-      if (!seedTerms.size) return;
+      if (!seedTerms.size) {
+        if (document.body.dataset.signalPathStatus === '1') {
+          setStatus('Focus: Active — no active signal injectors in the current state');
+          delete document.body.dataset.signalPathStatus;
+        }
+        return;
+      }
+
+      document.body.classList.add('signal-path-focus');
 
       const { groundTerms } = collectGroundNetMembership();
       const liveTerms = new Set();
@@ -877,18 +896,46 @@
         }
         net.forEach((t) => liveTerms.add(t));
       });
-      if (!liveTerms.size) return;
 
+      // Always mark injectors so unwired sources still read as the path origin
+      seedTerms.forEach((t) => {
+        if (!t?.classList) return;
+        t.classList.add('signal-path-live', 'signal-path-source');
+        const host = t.closest?.('.component');
+        if (host) host.classList.add('signal-path-active', 'signal-path-source');
+      });
+      liveTerms.forEach((t) => {
+        if (!t?.classList) return;
+        t.classList.add('signal-path-live');
+        const host = t.closest?.('.component');
+        if (host) host.classList.add('signal-path-active');
+      });
+
+      let pathWireCount = 0;
       wires.forEach((wire) => {
         if (!wire?.group) return;
         if (wire.group.classList.contains('workspace-page-hidden')) return;
         if (wire.group.classList.contains('is-subgroup-disabled')) return;
         const a = wire.start?.terminal;
         const b = wire.end?.terminal;
-        if (a && b && liveTerms.has(a) && liveTerms.has(b)) {
-          wire.group.classList.add('lightning-glow');
-        }
+        const aLive = !!(a && liveTerms.has(a));
+        const bLive = !!(b && liveTerms.has(b));
+        // Path wire: both ends live, or one live + free end (open spur still carrying signal)
+        const onPath = (aLive && bLive) || (aLive && !b) || (bLive && !a);
+        if (!onPath) return;
+        wire.group.classList.add('lightning-glow', 'signal-path-wire');
+        pathWireCount += 1;
       });
+
+      if (document.body.dataset.signalPathStatus === '1') {
+        const srcN = seedTerms.size;
+        setStatus(
+          pathWireCount > 0
+            ? `Focus: Active — ${pathWireCount} wire${pathWireCount === 1 ? '' : 's'} on signal path · ${srcN} source${srcN === 1 ? '' : 's'}`
+            : `Focus: Active — ${srcN} source${srcN === 1 ? '' : 's'}, no wired path yet`
+        );
+        delete document.body.dataset.signalPathStatus;
+      }
     });
   }
 
@@ -2559,8 +2606,11 @@
 
   function toggleLightningMode() {
     lightningMode = !lightningMode;
+    document.body.dataset.signalPathStatus = '1';
     refreshLightningWireGlow();
-    setStatus(lightningMode ? 'Active signal-path wires highlighted' : 'Active signal-path highlight off');
+    if (!lightningMode) {
+      setStatus('Focus: Active off — signal path clear');
+    }
   }
 
   function toggleGroundCheckMode() {

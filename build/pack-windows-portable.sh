@@ -8,7 +8,7 @@ ZIP="dist/EndoASD-Windows-Bugtest.zip"
 rm -rf "$OUT"
 mkdir -p "$OUT/assets"
 
-cp -f index.html app.js assets.js cad.js engines.js errorreporting.js materials.js \
+cp -f index.html app.js assets.js cad.js curves.js engines.js errorreporting.js materials.js \
   gate.js gate.css styles.css serve.py updater.py update-channel.json requirements.txt \
   "$OUT/"
 cp -f EndoASD.bat "$OUT/EndoASD.bat"

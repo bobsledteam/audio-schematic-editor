@@ -1,6 +1,6 @@
 {
   "name": "audio-schematic-editor",
-  "version": "1.0.572",
+  "version": "1.0.573",
   "private": true,
   "description": "Endo Audio Schematic Editor — desktop app",
   "scripts": {

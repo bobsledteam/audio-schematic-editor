@@ -196,8 +196,8 @@ html.desktop-mac .app-gate__stage {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 0.35rem;
-  width: min(15rem, 54vw);
+  gap: calc(0.35rem * var(--ui-element-scale, 1));
+  width: min(calc(15rem * var(--ui-element-scale, 1)), 54vw);
   padding: 0;
   border: 0;
   background: transparent;
@@ -224,7 +224,7 @@ html.desktop-mac .app-gate__stage {
 }
 
 .app-gate__asd {
-  font-size: 0.9rem;
+  font-size: calc(0.9rem * var(--ui-text-scale, 1));
   font-weight: 700;
   letter-spacing: 0.36em;
   text-indent: 0.36em;

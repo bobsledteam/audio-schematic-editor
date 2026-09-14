@@ -102,6 +102,7 @@
         label: 'Potentiometer',
         match: (t) => t?.potFamily === 'potentiometer'
           || t?.subtype === 'potentiometer'
+          || t?.subtype === 'trimmer'
           || t?.subtype === 'push-pot-on-on'
           || !!t?.pushPull,
         children: [
@@ -110,6 +111,11 @@
             id: 'pot-standard',
             direct: true,
             match: (t) => (t?.subtype === 'potentiometer' || t?.id === 'potentiometer') && !t?.pushPull,
+          },
+          {
+            id: 'pot-trimmer',
+            direct: true,
+            match: (t) => t?.subtype === 'trimmer' || t?.id === 'trimmer',
           },
           {
             id: 'pot-special',
@@ -126,7 +132,6 @@
     pickup: [
       { id: 'singlecoil', label: 'Single Coil' },
       { id: 'dualcoil', label: 'Dual Coil' },
-      { id: '4conductor', label: '4 Conductor HB' },
     ],
     switch: [
       { id: 'spst-on-off', label: 'ON-OFF' },
@@ -137,6 +142,7 @@
     ],
     jack: [
       { id: 'monooutput', label: 'Mono Output' },
+      { id: 'monoinput', label: 'Mono Input' },
       { id: 'stereooutput', label: 'Stereo Output' },
     ],
     power: [
@@ -150,6 +156,7 @@
     component: [
       { id: 'chassis-ground', label: 'Chassis Ground' },
       { id: 'potentiometer', label: 'Standard Pot' },
+      { id: 'trimmer', label: 'Trimmer Pot' },
       { id: 'push-pot-on-on', label: 'Push/Pull ON-ON' },
       { id: 'capacitor', label: 'Capacitor' },
       { id: 'resistor', label: 'Resistor' },
@@ -158,7 +165,10 @@
       { id: 'inductor', label: 'Inductor / Choke' },
       { id: 'audio-transformer', label: 'Audio Transformer' },
       { id: 'relay', label: 'Relay' },
-      { id: 'transistor', label: 'Transistor' },
+      { id: 'transistor', label: 'BJT Transistor' },
+      { id: 'jfet', label: 'JFET' },
+      { id: 'mosfet-n', label: 'N-MOSFET' },
+      { id: 'mosfet-p', label: 'P-MOSFET' },
       { id: 'opamp', label: 'Op Amp' },
       { id: 'vacuum-tube', label: 'Vacuum Tube' },
     ],
@@ -171,17 +181,43 @@
   /**
    * Browser tooltip: "Full name (Symbol)".
    * Used for every asset terminal so hover text stays consistent.
+   * @param {number} index 0-based pole index
+   * @param {{ contactRole?: 'common'|'throw-up'|'throw-down'|string, pole?: 'A'|'B', className?: string }} [opts]
    */
-  function switchTerminalSpec(index) {
+  function switchTerminalSpec(index, opts = {}) {
     const n = index + 1;
+    const contactRole = opts.contactRole || null;
+    const pole = opts.pole || null;
+    const isCommon = contactRole === 'common';
+    const poleTag = pole === 'A' || pole === 'B' ? ` ${pole}` : '';
+    let termName = `Terminal ${n}`;
+    let menuLabel = `T${n}`;
+    if (isCommon) {
+      termName = pole ? `Common${poleTag}` : 'Common';
+      menuLabel = `Common (T${n})`;
+    } else if (contactRole === 'throw-up') {
+      termName = pole ? `Throw up${poleTag}` : 'Throw up';
+      menuLabel = `Throw up (T${n})`;
+    } else if (contactRole === 'throw-down') {
+      termName = pole ? `Throw down${poleTag}` : 'Throw down';
+      menuLabel = `Throw down (T${n})`;
+    }
+    const classes = ['switch-term'];
+    if (isCommon) classes.push('switch-common');
+    if (opts.className) classes.push(String(opts.className).trim());
     return {
       label: `T${n}`,
       role: `T${n}`,
       color: '#c9a227',
-      className: 'switch-term',
-      termName: `Terminal ${n}`,
+      className: classes.filter(Boolean).join(' '),
+      contactRole: contactRole || undefined,
+      pole: pole || undefined,
+      termName,
       symbol: `T${n}`,
-      title: `Terminal ${n} (T${n})`,
+      menuLabel,
+      title: isCommon ? `${termName} (T${n})` : `${termName} (T${n})`,
+      // Gold .switch-common styling marks commons — no stacked "C" (squashes T in 18px cells)
+      signalMark: false,
     };
   }
 
@@ -200,11 +236,105 @@
     };
   }
 
+  /**
+   * DPDT 3×2 pole grid + case G.
+   * Commons are the middle row (T3 / T4) — same-side throws only.
+   *   T1 T2  throw-up
+   *   T3 T4  commons
+   *   T5 T6  throw-down
+   */
+  function dpdtPoleTerminalsWithCaseGround() {
+    return [
+      switchTerminalSpec(0, { contactRole: 'throw-up', pole: 'A' }),
+      switchTerminalSpec(1, { contactRole: 'throw-up', pole: 'B' }),
+      switchTerminalSpec(2, { contactRole: 'common', pole: 'A' }),
+      switchTerminalSpec(3, { contactRole: 'common', pole: 'B' }),
+      switchTerminalSpec(4, { contactRole: 'throw-down', pole: 'A' }),
+      switchTerminalSpec(5, { contactRole: 'throw-down', pole: 'B' }),
+      switchCaseGroundSpec(),
+    ];
+  }
+
   function switchTerminalsWithCaseGround(count = 6) {
+    if (count === 6) return dpdtPoleTerminalsWithCaseGround();
     return [
       ...Array.from({ length: count }, (_, i) => switchTerminalSpec(i)),
       switchCaseGroundSpec(),
     ];
+  }
+
+  /** True for throw-matrix contact lugs (not coil, not case ground). */
+  function isSwitchContactSpec(spec) {
+    if (!spec) return false;
+    if (spec.contactRole === 'common' || spec.contactRole === 'throw-up' || spec.contactRole === 'throw-down') {
+      return true;
+    }
+    if (spec.role === 'C' || spec.role === 'NO' || spec.role === 'NC') {
+      const cls = String(spec.className || '');
+      return cls.includes('switch-term') || cls.includes('relay-contact');
+    }
+    const cls = String(spec.className || '');
+    return cls.includes('switch-term') && !cls.includes('switch-case-ground');
+  }
+
+  function isSwitchContactTermEl(termEl) {
+    if (!termEl?.classList) return false;
+    if (termEl.classList.contains('switch-case-ground') || termEl.classList.contains('is-ground')) return false;
+    return termEl.classList.contains('switch-term') || termEl.classList.contains('relay-contact');
+  }
+
+  /**
+   * Common (shared pole) indices for a switch template.
+   * SPST has none — both lugs are interchangeable closes.
+   */
+  function getSwitchCommonIndices(template) {
+    const terms = template?.terminals || [];
+    const fromSpec = [];
+    terms.forEach((spec, i) => {
+      if (!spec || spec.isGround) return;
+      if (spec.contactRole === 'common') {
+        fromSpec.push(i);
+        return;
+      }
+      const cls = String(spec.className || '');
+      if (
+        (spec.role === 'C' || spec.symbol === 'C' || spec.label === 'C')
+        && (cls.includes('switch-term') || cls.includes('relay-contact'))
+      ) {
+        fromSpec.push(i);
+      }
+    });
+    if (fromSpec.length) return fromSpec;
+    if (template?.switchThrow === 'on-off') return [];
+    if (template?.pushPull || template?.switchThrow || /^dpdt/i.test(String(template?.subtype || template?.id || ''))) {
+      return [2, 3];
+    }
+    return [];
+  }
+
+  /** Pole common for a throw index (DPDT left=even→T3, right=odd→T4; SPDT→sole C). */
+  function getPoleCommonIndexForTerm(template, termIndex) {
+    const commons = getSwitchCommonIndices(template);
+    if (!commons.length) return null;
+    if (commons.length === 1) return commons[0];
+    if (commons.includes(termIndex)) return termIndex;
+    const wantEven = termIndex % 2 === 0;
+    const match = commons.find((c) => (c % 2 === 0) === wantEven);
+    return match ?? commons[0];
+  }
+
+  function getSwitchContactRole(template, termIndex, termEl) {
+    const spec = template?.terminals?.[termIndex];
+    if (spec?.contactRole) return spec.contactRole;
+    if (termEl?.dataset?.contactRole) return termEl.dataset.contactRole;
+    if (termEl?.classList?.contains('switch-common')) return 'common';
+    const commons = getSwitchCommonIndices(template);
+    if (commons.includes(termIndex)) return 'common';
+    const role = String(spec?.role || termEl?.dataset?.role || '').trim();
+    if (role === 'NO') return 'no';
+    if (role === 'NC') return 'nc';
+    if (role === 'C' && isSwitchContactSpec(spec)) return 'common';
+    return null;
   }
 
   function formatTerminalTitle(fullName, symbol) {
@@ -220,7 +350,7 @@
 
   /**
    * Secondary polarity / earth glyph under the primary terminal letter.
-   * Returns 'plus' | 'minus' | 'ground' | null.
+   * Returns 'plus' | 'minus' | 'ground' | 'chassis' | 'common' | null.
    * Skip when the primary label already is +/−, or for tip/pin UIs that use float labels.
    */
   function resolveTerminalSignalMark(spec, ctx = {}) {
@@ -231,6 +361,11 @@
     if (explicit === '-' || explicit === '−' || explicit === 'minus') return 'minus';
     if (explicit === 'G' || explicit === 'ground' || explicit === 'earth') return 'ground';
     if (explicit === 'chassis' || explicit === 'frame') return 'chassis';
+    if (explicit === 'common' || explicit === 'C') {
+      // Primary already reads "C" (footswitch / relay) — no stacked mark
+      if (String(spec.label || spec.symbol || '').trim().toUpperCase() === 'C') return null;
+      return 'common';
+    }
 
     const className = String(spec.className || '');
     // Tip / pin / lead UIs render marks on float labels (or skip)
@@ -246,11 +381,32 @@
 
     const role = String(spec.role || '').trim();
     const label = String(spec.label || spec.symbol || '').trim();
+    if (
+      (spec.contactRole === 'common' || className.includes('switch-common'))
+      && label.toUpperCase() !== 'C'
+      && role !== 'C'
+    ) {
+      return 'common';
+    }
+
     // Primary glyph already carries polarity
     if (label === '+' || label === '−' || label === '-') return null;
 
     const identity = resolveTerminalIdentity(spec, ctx);
     const name = String(identity?.name || spec.termName || '');
+
+    // Switch / relay Common lug already labeled C — no extra mark
+    if (
+      role === 'C'
+      && (className.includes('switch-term') || className.includes('relay-contact'))
+      && !/collector/i.test(name)
+    ) {
+      return null;
+    }
+    // DPDT / push-pull commons keep T3/T4 glyph; gold .switch-common is enough
+    if (spec.contactRole === 'common' || className.includes('switch-common')) {
+      return null;
+    }
 
     // Enclosure / case lugs → chassis mark (not earth bars)
     if (
@@ -318,12 +474,32 @@
     markEl.setAttribute('aria-hidden', 'true');
     if (mark === 'plus') markEl.textContent = '+';
     else if (mark === 'minus') markEl.textContent = '−';
+    else if (mark === 'common') markEl.textContent = 'C';
     else if (mark === 'chassis') markEl.innerHTML = buildTerminalChassisIconHtml();
     else if (mark === 'ground') markEl.innerHTML = buildTerminalEarthIconHtml();
     term.appendChild(markEl);
     keep.forEach((ch) => term.appendChild(ch));
     term.classList.add('has-signal-mark');
     term.dataset.signalMark = mark;
+  }
+
+  /** Remove stacked signal mark (e.g. legacy common “C” under T3/T4). */
+  function clearTerminalSignalMarkDom(term) {
+    if (!term?.classList?.contains('has-signal-mark')) return;
+    const primary = term.querySelector('.terminal-primary-label')?.textContent
+      || term.dataset.terminalLabel
+      || term.dataset.termSymbol
+      || '';
+    const keep = [...term.children].filter((ch) => (
+      ch.classList?.contains('terminal-ground-tag')
+      || ch.classList?.contains('wire-count')
+      || ch.classList?.contains('opamp-hover-label')
+    ));
+    term.classList.remove('has-signal-mark');
+    delete term.dataset.signalMark;
+    term.replaceChildren();
+    if (primary) term.appendChild(document.createTextNode(primary));
+    keep.forEach((ch) => term.appendChild(ch));
   }
 
   /** Fill a float label (HB / asset-wire) with letter + optional polarity mark. */
@@ -412,7 +588,9 @@
     const isTube = !!(className.includes('tube-pin') || template?.tubeFamily
       || subtype === 'vacuum-tube' || subtype === 'tube-generic'
       || subtype === 'tube-12ax7' || subtype === 'tube-6v6');
-    const isJack = category === 'jack' || !!template?.isOutputJack;
+    const isJack = category === 'jack' || !!template?.isOutputJack || !!template?.isInputJack;
+    const isFet = subtype === 'jfet' || subtype === 'mosfet-n' || subtype === 'mosfet-p'
+      || template?.id === 'jfet' || template?.id === 'mosfet-n' || template?.id === 'mosfet-p';
 
     if (spec?.termName) {
       return {
@@ -427,7 +605,28 @@
     }
 
     const sw = switchTerminalIdentity(label || role);
-    if (sw) return sw;
+    if (sw) {
+      if (spec?.contactRole === 'common' || String(spec?.className || '').includes('switch-common')) {
+        return { name: String(spec.termName || 'Common').trim(), symbol: sw.symbol };
+      }
+      if (spec?.termName) return { name: String(spec.termName).trim(), symbol: sw.symbol };
+      return sw;
+    }
+
+    // Footswitch / relay Common — before transistor Collector
+    if (
+      (role === 'C' || label === 'C')
+      && (className.includes('switch-term') || className.includes('relay-contact'))
+    ) {
+      return { name: 'Common', symbol: 'C' };
+    }
+    if (role === 'NO' || label === 'NO') return { name: 'Normally open', symbol: 'NO' };
+    if (
+      (role === 'NC' || label === 'NC')
+      && (className.includes('switch-term') || className.includes('relay-contact'))
+    ) {
+      return { name: 'Normally closed', symbol: 'NC' };
+    }
 
     if (subtype === 'capacitor' && (role === 'C' || className.includes('cap-term'))) {
       return { name: 'Capacitor lead', symbol: 'C' };
@@ -438,6 +637,11 @@
     if (subtype === 'transistor' && role === 'C') {
       return { name: 'Collector', symbol: 'C' };
     }
+    if (isFet && (role === 'S' || label === 'S')) return { name: 'Source', symbol: 'S' };
+    if (isFet && (role === 'Gt' || role === 'GATE' || symbol === 'G' || label === 'G')) {
+      return { name: 'Gate', symbol: 'G' };
+    }
+    if (isFet && (role === 'D' || label === 'D')) return { name: 'Drain', symbol: 'D' };
     if (isJack && (role === 'G' || label === 'G')) {
       return { name: 'Sleeve', symbol: 'G' };
     }
@@ -503,6 +707,8 @@
       placeholder: 'e.g. 8000',
       /** EM-owned; shown with Z/L but not stored as circuit electricalValues. */
       electromagnetOnly: true,
+      /** Wiring diagrams show DCR, not turn count. */
+      schematicHidden: true,
     },
     impedance: {
       key: 'impedance',
@@ -519,6 +725,8 @@
       dataset: 'inductance',
       label: 'Inductance (H)',
       placeholder: 'e.g. 2.5',
+      /** Parts sheets show L; guitar wiring diagrams usually omit it. */
+      schematicHidden: true,
     },
     resistance: {
       key: 'resistance',
@@ -567,6 +775,38 @@
       dataset: 'hfe',
       label: 'Current gain (hFE / β)',
       placeholder: 'e.g. 100',
+    },
+    idss: {
+      key: 'idss',
+      symbol: 'Idss',
+      unit: 'A',
+      dataset: 'idss',
+      label: 'Saturation current (Idss)',
+      placeholder: 'e.g. 0.005',
+    },
+    vgsOff: {
+      key: 'vgsOff',
+      symbol: 'Vp',
+      unit: 'V',
+      dataset: 'vgsOff',
+      label: 'Pinch-off / VGS(off)',
+      placeholder: 'e.g. -1.5',
+    },
+    vgsTh: {
+      key: 'vgsTh',
+      symbol: 'Vth',
+      unit: 'V',
+      dataset: 'vgsTh',
+      label: 'Threshold VGS(th)',
+      placeholder: 'e.g. 2.5',
+    },
+    rdsOn: {
+      key: 'rdsOn',
+      symbol: 'Rds',
+      unit: 'Ω',
+      dataset: 'rdsOn',
+      label: 'On-resistance Rds(on)',
+      placeholder: 'e.g. 0.05',
     },
     mu: {
       key: 'mu',
@@ -730,6 +970,13 @@
     if (subtype === 'transistor' || (category === 'component' && subtype === 'transistor')) {
       return ['hfe'];
     }
+    if (subtype === 'jfet' || (category === 'component' && subtype === 'jfet')) {
+      return ['idss', 'vgsOff'];
+    }
+    if (subtype === 'mosfet-n' || subtype === 'mosfet-p'
+      || (category === 'component' && (subtype === 'mosfet-n' || subtype === 'mosfet-p'))) {
+      return ['vgsTh', 'rdsOn'];
+    }
     if (subtype === 'opamp' || (category === 'component' && subtype === 'opamp')) {
       return ['openLoopGain', 'gainBandwidth', 'slewRate', 'inputOffset', 'supplyVoltage'];
     }
@@ -737,7 +984,8 @@
       || (category === 'component' && (subtype === 'vacuum-tube' || subtype === 'tube-generic'))) {
       return ['mu', 'plateDissipation', 'heaterVoltage'];
     }
-    if (subtype === 'potentiometer' || (category === 'component' && subtype === 'potentiometer')) {
+    if (subtype === 'potentiometer' || subtype === 'trimmer'
+      || (category === 'component' && (subtype === 'potentiometer' || subtype === 'trimmer'))) {
       return ['resistance'];
     }
     if (subtype === 'push-pot-on-on' || (category === 'component' && subtype === 'push-pot-on-on')) {
@@ -768,6 +1016,7 @@
   /**
    * Default YESGROUND for parts whose metalwork / return path should reach jack G.
    * Jacks are ground sources — never YESGROUND.
+   * Toggle switches default NOGROUND (case lug optional); push-pull pots stay YESGROUND.
    * Signal-only passives (cap, R, diode, …) default NOGROUND unless the template opts in.
    */
   function defaultNeedsGrounding(category, subtype) {
@@ -778,15 +1027,17 @@
       || subtype === '4conductor') {
       return true;
     }
+    // Standalone toggles / footswitches: no chassis G required by default
     if (category === 'switch'
       || subtype === 'dpdt'
       || subtype === 'dpdt-on-on'
       || subtype === 'dpdt-on-off-on'
       || subtype === 'spst-on-off'
       || subtype === 'footswitch') {
-      return true;
+      return false;
     }
     if (subtype === 'potentiometer'
+      || subtype === 'trimmer'
       || subtype === 'push-pot-on-on'
       || subtype === 'vacuum-tube'
       || subtype === 'tube-generic'
@@ -800,6 +1051,9 @@
       || subtype === 'resistor'
       || subtype === 'diode'
       || subtype === 'transistor'
+      || subtype === 'jfet'
+      || subtype === 'mosfet-n'
+      || subtype === 'mosfet-p'
       || subtype === 'opamp'
       || subtype === 'inductor') {
       return false;
@@ -824,6 +1078,7 @@
     { id: 'none', label: 'None' },
     { id: 'pickup', label: 'Pickup' },
     { id: 'potentiometer', label: 'Potentiometer' },
+    { id: 'trimmer', label: 'Trimmer Pot' },
     { id: 'switch', label: 'Switch' },
     { id: 'power', label: 'Power' },
     { id: 'dc-jack', label: 'DC Jack' },
@@ -838,7 +1093,10 @@
     { id: 'inductor', label: 'Inductor / Choke' },
     { id: 'audio-transformer', label: 'Audio Transformer' },
     { id: 'relay', label: 'Relay' },
-    { id: 'transistor', label: 'Transistor' },
+    { id: 'transistor', label: 'BJT Transistor' },
+    { id: 'jfet', label: 'JFET' },
+    { id: 'mosfet-n', label: 'N-MOSFET' },
+    { id: 'mosfet-p', label: 'P-MOSFET' },
     { id: 'opamp', label: 'Op Amp' },
     { id: 'vacuum-tube', label: 'Vacuum Tube' },
   ];
@@ -852,6 +1110,7 @@
   const ELECTRICAL_PRESET_SOURCE_TEMPLATE = {
     pickup: 'singlecoil',
     potentiometer: 'potentiometer',
+    trimmer: 'trimmer',
     'push-pot': 'push-pot-on-on',
     switch: 'dpdt-on-on',
     power: 'ninevolt',
@@ -868,6 +1127,9 @@
     'audio-transformer': 'audio-transformer',
     relay: 'relay',
     transistor: 'transistor',
+    jfet: 'jfet',
+    'mosfet-n': 'mosfet-n',
+    'mosfet-p': 'mosfet-p',
     opamp: 'opamp',
     'vacuum-tube': 'vacuum-tube',
   };
@@ -878,6 +1140,7 @@
       case 'pickup':
         return ['coilWinds', 'impedance', 'inductance'];
       case 'potentiometer':
+      case 'trimmer':
       case 'push-pot':
         return ['resistance'];
       case 'power':
@@ -908,6 +1171,11 @@
         return ['coilVoltage', 'resistance'];
       case 'transistor':
         return ['hfe'];
+      case 'jfet':
+        return ['idss', 'vgsOff'];
+      case 'mosfet-n':
+      case 'mosfet-p':
+        return ['vgsTh', 'rdsOn'];
       case 'opamp':
         return ['openLoopGain', 'gainBandwidth', 'slewRate', 'inputOffset', 'supplyVoltage'];
       case 'vacuum-tube':
@@ -932,7 +1200,7 @@
 
   function isPotentiometerFamilyPreset(id) {
     const p = normalizeElectricalPresetId(id);
-    return p === 'potentiometer' || p === 'push-pot';
+    return p === 'potentiometer' || p === 'trimmer' || p === 'push-pot';
   }
 
   /** Preset value shown in the visible <select> (hidden push-pot maps to Potentiometer). */
@@ -1536,11 +1804,14 @@
       {
         label: 'C',
         color: '#c9a227',
-        className: 'switch-term',
+        className: 'switch-term switch-common',
         role: 'C',
+        contactRole: 'common',
         termName: 'Common',
         symbol: 'C',
+        menuLabel: 'Common (C)',
         title: 'Common (C)',
+        signalMark: false,
         x: startX,
         y: ty,
         w: tw,
@@ -1551,8 +1822,10 @@
         color: '#2ecc71',
         className: 'switch-term',
         role: 'NO',
+        contactRole: 'no',
         termName: 'Normally open',
         symbol: 'NO',
+        menuLabel: 'NO',
         title: 'Normally open (NO)',
         x: startX + tw + gap,
         y: ty,
@@ -1564,8 +1837,10 @@
         color: '#e74c3c',
         className: 'switch-term',
         role: 'NC',
+        contactRole: 'nc',
         termName: 'Normally closed',
         symbol: 'NC',
+        menuLabel: 'NC',
         title: 'Normally closed (NC)',
         x: startX + (tw + gap) * 2,
         y: ty,
@@ -1618,10 +1893,14 @@
         {
           label: 'C',
           color: '#c9a227',
-          className: 'relay-contact',
+          className: 'relay-contact switch-common',
           role: 'C',
+          contactRole: 'common',
           termName: 'Common',
           symbol: 'C',
+          menuLabel: 'Common (C)',
+          title: 'Common (C)',
+          signalMark: false,
           x: bx + bodyW + sideGap,
           y: contactY,
           w: tw,
@@ -1632,8 +1911,11 @@
           color: '#2ecc71',
           className: 'relay-contact',
           role: 'NO',
+          contactRole: 'no',
           termName: 'Normally open',
           symbol: 'NO',
+          menuLabel: 'NO',
+          title: 'Normally open (NO)',
           x: bx + bodyW + sideGap,
           y: contactY + th + gap,
           w: tw,
@@ -1644,8 +1926,11 @@
           color: '#e74c3c',
           className: 'relay-contact',
           role: 'NC',
+          contactRole: 'nc',
           termName: 'Normally closed',
           symbol: 'NC',
+          menuLabel: 'NC',
+          title: 'Normally closed (NC)',
           x: bx + bodyW + sideGap,
           y: contactY + (th + gap) * 2,
           w: tw,
@@ -1655,19 +1940,13 @@
     };
   }
 
-  /**
-   * Pot lugs 1 / 2 (wiper) / 3 below + chassis/case ground on the left shell.
-   * NA practice: case is IEEE chassis ground (connectable); often bonded to lug 1
-   * on volume pots — schematic shows that bond when wiring allows.
-   */
-  function potentiometerTerminals(bx, by, bw, bodyH) {
+  /** Pot track lugs 1 / 2 (wiper) / 3 only (no case ground) — used by trimmers. */
+  function potentiometerTrackTerminals(bx, by, bw, bodyH) {
     const { w: tw, h: th } = getTermSize('square');
     const gap = TERM_GAP;
     const rowW = tw * 3 + gap * 2;
     const startX = bx + snapEditor((bw - rowW) / 2);
     const ty = by + bodyH + TERM_BELOW_BODY;
-    // Extra apron so case G clears lug 1 (cap leads attach here often)
-    const sideGap = TERM_GAP + 6;
     return [
       {
         label: '1',
@@ -1706,6 +1985,20 @@
         w: tw,
         h: th,
       },
+    ];
+  }
+
+  /**
+   * Pot lugs 1 / 2 (wiper) / 3 below + chassis/case ground on the left shell.
+   * NA practice: case is IEEE chassis ground (connectable); often bonded to lug 1
+   * on volume pots — schematic shows that bond when wiring allows.
+   */
+  function potentiometerTerminals(bx, by, bw, bodyH) {
+    const { w: tw, h: th } = getTermSize('square');
+    // Extra apron so case G clears lug 1 (cap leads attach here often)
+    const sideGap = TERM_GAP + 6;
+    return [
+      ...potentiometerTrackTerminals(bx, by, bw, bodyH),
       {
         label: 'G',
         color: '#ffffff',
@@ -1748,13 +2041,17 @@
     let i = 0;
     for (let row = 0; row < 3; row++) {
       for (let col = 0; col < 2; col++) {
+        const pole = col === 0 ? 'A' : 'B';
+        let contactRole = 'throw-up';
+        if (row === 1) contactRole = 'common';
+        else if (row === 2) contactRole = 'throw-down';
+        const base = switchTerminalSpec(i, {
+          contactRole,
+          pole,
+          className: 'push-pot-switch-term',
+        });
         switchTerms.push({
-          label: `T${i + 1}`,
-          color: '#c9a227',
-          className: 'switch-term push-pot-switch-term',
-          role: `T${i + 1}`,
-          termName: `Terminal ${i + 1}`,
-          symbol: `T${i + 1}`,
+          ...base,
           x: switchStartX + col * (tw + gap),
           y: switchStartY + row * (th + gap),
           w: tw,
@@ -1918,10 +2215,10 @@
   }
 
   /**
-   * Transistor: square body half capacitor width (1×1 unit), 3 straight leads below (E/B/C).
-   * Lead tips use the same cap-term / lead-leg behavior as capacitors.
+   * Discrete 3-lead device: square body (1×1 unit), straight leads below.
+   * Gate uses role `Gt` (display symbol G) so it is not treated as chassis ground.
    */
-  function transistorParts(bx = 0, by = 0) {
+  function discreteThreeLeadParts(bx = 0, by = 0, pinRoles) {
     const bodyW = UNIT;
     const bodyH = UNIT;
     const lead = 2 * UNIT;
@@ -1932,7 +2229,7 @@
     const tipsSpan = tip * 3 + tipGap * 2;
     const tipStartX = bodyX + (bodyW - tipsSpan) / 2;
     const tipY = bodyY + bodyH + lead - tip;
-    const roles = [
+    const roles = pinRoles || [
       { role: 'E', termName: 'Emitter', symbol: 'E' },
       { role: 'B', termName: 'Base', symbol: 'B' },
       { role: 'C', termName: 'Collector', symbol: 'C' },
@@ -1957,6 +2254,20 @@
         h: tip,
       })),
     };
+  }
+
+  /** BJT: E / B / C leads. */
+  function transistorParts(bx = 0, by = 0) {
+    return discreteThreeLeadParts(bx, by);
+  }
+
+  /** JFET / MOSFET: S / G / D (gate role Gt). */
+  function fetParts(bx = 0, by = 0) {
+    return discreteThreeLeadParts(bx, by, [
+      { role: 'S', termName: 'Source', symbol: 'S' },
+      { role: 'Gt', termName: 'Gate', symbol: 'G' },
+      { role: 'D', termName: 'Drain', symbol: 'D' },
+    ]);
   }
 
   /**
@@ -2542,6 +2853,71 @@
       ].join(''),
       legend: 'Pot wiper ≈ R₁ / R₂ split of total R',
     },
+    transistorGain: {
+      id: 'transistor-gain',
+      tag: 'Electrical formula',
+      title: 'BJT current gain',
+      html: [
+        '<span class="eq-inline" aria-label="I sub C equals beta I sub B">',
+        '<span class="eq-term"><i class="eq-var">I</i><sub>C</sub></span>',
+        '<span class="eq-op">=</span>',
+        '<i class="eq-var">β</i>',
+        '<span class="eq-term"><i class="eq-var">I</i><sub>B</sub></span>',
+        '</span>',
+      ].join(''),
+      legend: 'β = hFE · I_C collector · I_B base (active region)',
+    },
+    jfetSquareLaw: {
+      id: 'jfet-square-law',
+      tag: 'Electrical formula',
+      title: 'JFET square-law (saturation)',
+      html: [
+        '<span class="eq-inline" aria-label="I sub D equals I sub DSS times 1 minus V sub GS over V sub P squared">',
+        '<span class="eq-term"><i class="eq-var">I</i><sub>D</sub></span>',
+        '<span class="eq-op">=</span>',
+        '<span class="eq-term"><i class="eq-var">I</i><sub>DSS</sub></span>',
+        '<span class="eq-op">(</span>',
+        '<span class="eq-numeral">1</span>',
+        '<span class="eq-op">−</span>',
+        '<span class="eq-frac"><span class="eq-num"><i class="eq-var">V</i><sub>GS</sub></span>',
+        '<span class="eq-den"><i class="eq-var">V</i><sub>P</sub></span></span>',
+        '<span class="eq-op">)</span><sup>2</sup>',
+        '</span>',
+      ].join(''),
+      legend: 'I_DSS Idss · V_P = V_GS(off) · valid for |V_GS| ≤ |V_P|',
+    },
+    mosfetSaturation: {
+      id: 'mosfet-saturation',
+      tag: 'Electrical formula',
+      title: 'MOSFET saturation (square-law)',
+      html: [
+        '<span class="eq-inline" aria-label="I sub D equals k times V sub GS minus V sub th squared">',
+        '<span class="eq-term"><i class="eq-var">I</i><sub>D</sub></span>',
+        '<span class="eq-op">=</span>',
+        '<i class="eq-var">k</i>',
+        '<span class="eq-op">(</span>',
+        '<span class="eq-term"><i class="eq-var">V</i><sub>GS</sub></span>',
+        '<span class="eq-op">−</span>',
+        '<span class="eq-term"><i class="eq-var">V</i><sub>th</sub></span>',
+        '<span class="eq-op">)</span><sup>2</sup>',
+        '</span>',
+      ].join(''),
+      legend: 'V_th = V_GS(th) · k process / geometry factor · V_GS > V_th',
+    },
+    mosfetRdsOn: {
+      id: 'mosfet-rds-on',
+      tag: 'Electrical formula',
+      title: 'MOSFET on-resistance drop',
+      html: [
+        '<span class="eq-inline" aria-label="V sub DS equals I sub D times R sub DS on">',
+        '<span class="eq-term"><i class="eq-var">V</i><sub>DS</sub></span>',
+        '<span class="eq-op">=</span>',
+        '<span class="eq-term"><i class="eq-var">I</i><sub>D</sub></span>',
+        '<span class="eq-term"><i class="eq-var">R</i><sub>DS(on)</sub></span>',
+        '</span>',
+      ].join(''),
+      legend: 'Triode / switched-on region · R_DS(on) from datasheet',
+    },
     inductiveReactance: {
       id: 'inductive-reactance',
       tag: 'Electrical formula',
@@ -3067,28 +3443,7 @@
       builtin: true,
       needsGrounding: true,
       valueFields: ['coilWinds', 'impedance', 'inductance'],
-      placeLabel: 'HB',
-      bodyX: 0,
-      bodyY: 0,
-      bodyW: 120,
-      bodyH: 48,
-      cssClass: 'dualcoil',
-      layout: 'absolute',
-      hideStateLabel: true,
-      states: [
-        { id: 0, terminalActive: [true, true, true, true, true] },
-      ],
-      terminals: dualCoilTerminals(0, 0, 120, 48),
-    },
-    {
-      id: '4conductor',
-      name: '4 Conductor HB',
-      category: 'pickup',
-      subtype: '4conductor',
-      builtin: true,
-      needsGrounding: true,
-      valueFields: ['coilWinds', 'impedance', 'inductance'],
-      placeLabel: '4C',
+      placeLabel: 'DC',
       bodyX: 0,
       bodyY: 0,
       bodyW: 120,
@@ -3109,7 +3464,7 @@
       typeGroup: '3way',
       switchThrow: 'on-on-on',
       builtin: true,
-      needsGrounding: true,
+      needsGrounding: false,
       placeLabel: '3WAY',
       bodyW: 48,
       bodyH: 56,
@@ -3121,7 +3476,8 @@
        *   T3 T4   →  2 5  (commons)
        *   T5 T6   →  3 6
        * T7 = chassis / case ground under the grid (NA / IEEE §3.9.2).
-       * Default throw: ON-ON-ON (all three positions conduct).
+       * Real 3-way ON-ON-ON: each pole only joins same-side terminals.
+       * Type 1/2 differ only in Middle (one pole up, other down).
        * Primary names: Up (1), Middle (2), Down (3).
        */
       states: [
@@ -3129,19 +3485,20 @@
           id: 1,
           label: 'Up (1)',
           terminalActive: [false, false, true, true, true, true, false],
-          bridges: [[2, 4], [3, 5]], // 2-3, 5-6
+          bridges: [[2, 4], [3, 5]], // T3–T5, T4–T6 (both poles down)
         },
         {
           id: 2,
           label: 'Middle (2)',
-          terminalActive: [true, true, true, true, true, true, false], // all closed-contact poles
-          bridges: [[2, 0], [2, 4], [3, 1], [3, 5]], // 2-1, 2-3, 5-4, 5-6
+          // Type 1 default: left up (T3–T1), right down (T4–T6)
+          terminalActive: [true, false, true, true, false, true, false],
+          bridges: [[2, 0], [3, 5]],
         },
         {
           id: 3,
           label: 'Down (3)',
           terminalActive: [true, true, true, true, false, false, false],
-          bridges: [[2, 0], [3, 1]], // 2-1, 5-4
+          bridges: [[2, 0], [3, 1]], // T3–T1, T4–T2 (both poles up)
         },
       ],
       terminals: switchTerminalsWithCaseGround(6),
@@ -3154,7 +3511,7 @@
       typeGroup: '3way',
       switchThrow: 'on-off-on',
       builtin: true,
-      needsGrounding: true,
+      needsGrounding: false,
       placeLabel: 'OFO',
       bodyW: 48,
       bodyH: 56,
@@ -3195,7 +3552,7 @@
       typeGroup: '1way',
       switchThrow: 'on-off',
       builtin: true,
-      needsGrounding: true,
+      needsGrounding: false,
       placeLabel: '1WAY',
       bodyW: 40,
       bodyH: 48,
@@ -3229,7 +3586,7 @@
       typeGroup: '2way',
       switchThrow: 'on-on',
       builtin: true,
-      needsGrounding: true,
+      needsGrounding: false,
       placeLabel: '2WAY',
       bodyW: 48,
       bodyH: 56,
@@ -3315,6 +3672,26 @@
       terminals: monoOutputTerminals(0, 0, 70, 40),
     },
     {
+      id: 'mono-input',
+      name: 'Mono Input',
+      category: 'jack',
+      subtype: 'monoinput',
+      builtin: true,
+      isInputJack: true,
+      placeLabel: 'IN',
+      bodyX: 0,
+      bodyY: 0,
+      bodyW: 70,
+      bodyH: 40,
+      cssClass: 'mono-output mono-input',
+      layout: 'absolute',
+      hideStateLabel: true,
+      states: [
+        { id: 0, terminalActive: [false, true] },
+      ],
+      terminals: monoOutputTerminals(0, 0, 70, 40),
+    },
+    {
       id: 'stereo-output',
       name: 'Stereo Output',
       category: 'jack',
@@ -3378,6 +3755,29 @@
         { id: 0, terminalActive: [false, true, false, false] },
       ],
       terminals: potentiometerTerminals(0, 0, 64, 48),
+    },
+    {
+      id: 'trimmer',
+      name: 'Trimmer',
+      category: 'component',
+      subtype: 'trimmer',
+      potFamily: 'potentiometer',
+      builtin: true,
+      needsGrounding: false,
+      valueFields: ['resistance'],
+      placeLabel: 'TRIM',
+      bodyX: 0,
+      bodyY: 0,
+      bodyW: 48,
+      bodyH: 36,
+      cssClass: 'potentiometer trimmer',
+      layout: 'absolute',
+      hideStateLabel: true,
+      /* PCB trimmer — track lugs only (no case G) */
+      states: [
+        { id: 0, terminalActive: [false, true, false] },
+      ],
+      terminals: potentiometerTrackTerminals(0, 0, 48, 36),
     },
     (() => {
       const parts = pushPotOnOnParts(0, 0);
@@ -3508,7 +3908,7 @@
       const parts = transistorParts(0, 0);
       return {
         id: 'transistor',
-        name: 'Transistor',
+        name: 'BJT Transistor',
         category: 'component',
         subtype: 'transistor',
         builtin: true,
@@ -3523,6 +3923,84 @@
         layout: 'absolute',
         hideStateLabel: true,
         /* Open between E/B/C — not a hard short */
+        states: [
+          { id: 0, terminalActive: [false, false, false] },
+        ],
+        terminals: parts.terminals,
+      };
+    })(),
+    (() => {
+      const parts = fetParts(0, 0);
+      return {
+        id: 'jfet',
+        name: 'JFET',
+        category: 'component',
+        subtype: 'jfet',
+        transistorFamily: 'fet',
+        builtin: true,
+        needsGrounding: false,
+        valueFields: ['idss', 'vgsOff'],
+        placeLabel: '',
+        bodyX: parts.bodyX,
+        bodyY: parts.bodyY,
+        bodyW: parts.bodyW,
+        bodyH: parts.bodyH,
+        cssClass: 'transistor jfet',
+        layout: 'absolute',
+        hideStateLabel: true,
+        defaultValues: { idss: '0.005', vgsOff: '-1.5' },
+        states: [
+          { id: 0, terminalActive: [false, false, false] },
+        ],
+        terminals: parts.terminals,
+      };
+    })(),
+    (() => {
+      const parts = fetParts(0, 0);
+      return {
+        id: 'mosfet-n',
+        name: 'N-MOSFET',
+        category: 'component',
+        subtype: 'mosfet-n',
+        transistorFamily: 'fet',
+        builtin: true,
+        needsGrounding: false,
+        valueFields: ['vgsTh', 'rdsOn'],
+        placeLabel: '',
+        bodyX: parts.bodyX,
+        bodyY: parts.bodyY,
+        bodyW: parts.bodyW,
+        bodyH: parts.bodyH,
+        cssClass: 'transistor mosfet mosfet-n',
+        layout: 'absolute',
+        hideStateLabel: true,
+        defaultValues: { vgsTh: '2.5', rdsOn: '0.05' },
+        states: [
+          { id: 0, terminalActive: [false, false, false] },
+        ],
+        terminals: parts.terminals,
+      };
+    })(),
+    (() => {
+      const parts = fetParts(0, 0);
+      return {
+        id: 'mosfet-p',
+        name: 'P-MOSFET',
+        category: 'component',
+        subtype: 'mosfet-p',
+        transistorFamily: 'fet',
+        builtin: true,
+        needsGrounding: false,
+        valueFields: ['vgsTh', 'rdsOn'],
+        placeLabel: '',
+        bodyX: parts.bodyX,
+        bodyY: parts.bodyY,
+        bodyW: parts.bodyW,
+        bodyH: parts.bodyH,
+        cssClass: 'transistor mosfet mosfet-p',
+        layout: 'absolute',
+        hideStateLabel: true,
+        defaultValues: { vgsTh: '-2.5', rdsOn: '0.08' },
         states: [
           { id: 0, terminalActive: [false, false, false] },
         ],
@@ -3801,7 +4279,7 @@
       category: 'switch',
       subtype: 'footswitch',
       builtin: true,
-      needsGrounding: true,
+      needsGrounding: false,
       placeLabel: 'FSW',
       bodyX: 0,
       bodyY: 0,
@@ -4225,6 +4703,8 @@
       'tube-generic': 'vacuum-tube',
       'tube-12ax7': 'vacuum-tube',
       'tube-6v6': 'vacuum-tube',
+      /* Legacy 4-conductor HB asset → generic dual coil */
+      '4conductor': 'dualcoil',
     };
     const resolved = legacy[id] || id;
     return getAllTemplates().find((t) => t.id === resolved) || null;
@@ -4242,6 +4722,9 @@
       return dualCoilTerminals(bx, by, bw, draft.bodyH, shape);
     }
     if (category === 'jack' && subtype === 'monooutput') {
+      return monoOutputTerminals(bx, by, bw, draft.bodyH);
+    }
+    if (category === 'jack' && subtype === 'monoinput') {
       return monoOutputTerminals(bx, by, bw, draft.bodyH);
     }
     if (category === 'jack' && subtype === 'stereooutput') {
@@ -4297,6 +4780,9 @@
     }
     if (category === 'component' && subtype === 'potentiometer') {
       return potentiometerTerminals(bx, by, bw, draft.bodyH);
+    }
+    if (category === 'component' && subtype === 'trimmer') {
+      return potentiometerTrackTerminals(bx, by, bw, draft.bodyH);
     }
     if (category === 'component' && subtype === 'push-pot-on-on') {
       const parts = pushPotOnOnParts(bx, by);
@@ -4417,6 +4903,14 @@
         h: tip,
       }));
     }
+    if (category === 'component' && (subtype === 'jfet' || subtype === 'mosfet-n' || subtype === 'mosfet-p')) {
+      const parts = fetParts(bx, by);
+      draft.bodyX = parts.bodyX;
+      draft.bodyY = parts.bodyY;
+      draft.bodyW = parts.bodyW;
+      draft.bodyH = parts.bodyH;
+      return parts.terminals;
+    }
     if (category === 'component' && subtype === 'opamp') {
       const parts = opampParts(bx, by);
       draft.bodyX = parts.bodyX;
@@ -4450,14 +4944,23 @@
       let i = 0;
       for (let row = 0; row < 3; row++) {
         for (let col = 0; col < 2; col++) {
+          const pole = col === 0 ? 'A' : 'B';
+          let contactRole = 'throw-up';
+          if (row === 1) contactRole = 'common';
+          else if (row === 2) contactRole = 'throw-down';
           terms.push({
-            ...switchTerminalSpec(i),
+            ...switchTerminalSpec(i, { contactRole, pole }),
             x: startX + col * (tw + gap),
             y: startY + row * (th + gap),
           });
           i++;
         }
       }
+      terms.push({
+        ...switchCaseGroundSpec(),
+        x: startX + snapEditor((gridW - getTermSize(shape).w) / 2),
+        y: startY + 3 * (th + gap),
+      });
       return terms;
     }
     return singleCoilTerminalPair(bx, by, bw, draft.bodyH, shape);
@@ -4471,6 +4974,7 @@
     if (category === 'switch' && subtype === 'spst-on-off') return { bodyW: 40, bodyH: 48, placeLabel: '1WAY' };
     if (category === 'component' && subtype === 'chassis-ground') return { bodyW: 36, bodyH: 28, placeLabel: 'GND' };
     if (category === 'jack' && subtype === 'monooutput') return { bodyW: 70, bodyH: 40, placeLabel: 'OUT' };
+    if (category === 'jack' && subtype === 'monoinput') return { bodyW: 70, bodyH: 40, placeLabel: 'IN' };
     if (category === 'jack' && subtype === 'stereooutput') return { bodyW: 90, bodyH: 40, placeLabel: 'STR' };
     if (category === 'power' && subtype === 'ninevolt') return { bodyW: 56, bodyH: 72, placeLabel: 'PSU' };
     if (category === 'power' && subtype === 'dc-jack') return { bodyW: 56, bodyH: 40, placeLabel: 'DC' };
@@ -4503,6 +5007,7 @@
       return { bodyW: 56, bodyH: 40, placeLabel: 'FSW' };
     }
     if (category === 'component' && subtype === 'potentiometer') return { bodyW: 64, bodyH: 48, placeLabel: 'POT' };
+    if (category === 'component' && subtype === 'trimmer') return { bodyW: 48, bodyH: 36, placeLabel: 'TRIM' };
     if (category === 'component' && subtype === 'push-pot-on-on') {
       const parts = pushPotOnOnParts(0, 0);
       return {
@@ -4545,6 +5050,14 @@
         placeLabel: '',
       };
     }
+    if (category === 'component' && (subtype === 'jfet' || subtype === 'mosfet-n' || subtype === 'mosfet-p')) {
+      const parts = fetParts(0, 0);
+      return {
+        bodyW: parts.bodyW,
+        bodyH: parts.bodyH,
+        placeLabel: '',
+      };
+    }
     if (category === 'component' && subtype === 'opamp') {
       const parts = opampParts(0, 0);
       return {
@@ -4565,7 +5078,7 @@
       };
     }
     if (category === 'pickup' && (subtype === 'dualcoil' || subtype === '4conductor')) {
-      return { bodyW: 120, bodyH: 48, placeLabel: subtype === '4conductor' ? '4C' : 'HB' };
+      return { bodyW: 120, bodyH: 48, placeLabel: 'DC' };
     }
     return { bodyW: 70, bodyH: 48, placeLabel: 'PU' };
   }
@@ -4627,8 +5140,10 @@
     if (!text) return '';
     const isPot = editorDraft
       && (editorDraft.subtype === 'potentiometer'
+        || editorDraft.subtype === 'trimmer'
         || editorDraft.potFamily === 'potentiometer'
-        || editorDraft.electricalPreset === 'potentiometer');
+        || editorDraft.electricalPreset === 'potentiometer'
+        || editorDraft.electricalPreset === 'trimmer');
     if (def.key === 'resistance' && isPot) {
       const n = parseFloat(String(text).replace(/[^\d.]/g, ''));
       if (Number.isFinite(n) && n > 0) {
@@ -4925,38 +5440,41 @@
     }
     const termEls = el.querySelectorAll('.terminal');
     const termEl = termEls[termIndex];
-    const isSwitchPole = !!termEl?.classList?.contains('switch-term');
+    const isSwitchPole = isSwitchContactTermEl(termEl);
     const bridges = states[stateIndex].bridges;
     // Throw-matrix switches: poles follow bridges — toggling a pole edits the bridge set
-    if (isSwitchPole && Array.isArray(bridges) && (bridges.length > 0 || template.switchThrow)) {
+    if (isSwitchPole && Array.isArray(bridges) && (bridges.length > 0 || template.switchThrow || template.pushPull
+      || template.subtype === 'footswitch' || template.subtype === 'relay'
+      || template.id === 'footswitch' || template.id === 'relay')) {
       if (!states[stateIndex].bridges) states[stateIndex].bridges = [];
       if (!active) {
         states[stateIndex].bridges = states[stateIndex].bridges.filter(
           (pair) => !Array.isArray(pair) || (pair[0] !== termIndex && pair[1] !== termIndex)
         );
       } else if (!states[stateIndex].bridges.some((pair) => pair[0] === termIndex || pair[1] === termIndex)) {
-        const switchIndices = [];
-        termEls.forEach((t, i) => {
-          if (t?.classList?.contains('switch-term')) switchIndices.push(i);
-        });
+        const contactRole = getSwitchContactRole(template, termIndex, termEl);
+        const commons = getSwitchCommonIndices(template);
         let pairWith = null;
-        // SPST / few-pole: close to the other pole (never case-ground commons)
-        if (template.switchThrow === 'on-off' || switchIndices.length <= 2) {
-          pairWith = switchIndices.find((i) => i !== termIndex);
+        // Commons are hubs — don't invent common↔common or common↔random bridges
+        if (contactRole === 'common' || commons.includes(termIndex)) {
+          pairWith = null;
+        } else if (template.switchThrow === 'on-off' || (commons.length === 0 && [...termEls].filter(isSwitchContactTermEl).length <= 2)) {
+          // SPST: close the other contact pole (never case ground)
+          pairWith = [...termEls].findIndex((t, i) => i !== termIndex && isSwitchContactTermEl(t));
+          if (pairWith < 0) pairWith = null;
         } else {
-          // DPDT grid: pair with nearest common (T3/T4 = idx 2/3)
-          const commons = [2, 3].filter((c) => c !== termIndex && c < (states[stateIndex].terminalActive?.length || 0));
-          pairWith = commons.find((c) => Math.abs(c - termIndex) <= 2) ?? commons[0];
+          // Throw / NO / NC → pair only with this pole's common
+          pairWith = getPoleCommonIndexForTerm(template, termIndex);
         }
-        if (pairWith != null) {
+        if (pairWith != null && pairWith !== termIndex) {
           states[stateIndex].bridges.push([Math.min(termIndex, pairWith), Math.max(termIndex, pairWith)]);
         }
       }
       // Re-derive all switch-pole actives from bridges for this state
       const n = states[stateIndex].terminalActive.length;
       for (let i = 0; i < n; i++) {
-        const t = el.querySelectorAll('.terminal')[i];
-        if (t?.classList?.contains('switch-term')) {
+        const t = termEls[i];
+        if (isSwitchContactTermEl(t)) {
           states[stateIndex].terminalActive[i] = terminalActiveForState(states[stateIndex], i, t);
         }
       }
@@ -5095,6 +5613,94 @@
     return CATEGORIES
       .filter((c) => !c.hidden)
       .map((c) => ({ id: c.id, label: c.label }));
+  }
+
+  /**
+   * Flatten placeable electronics assets with Finder-style menu paths for Spotlight search.
+   * Includes menuHidden parts that still appear under typed groups (e.g. Push/Pull).
+   */
+  function listSpotlightPartEntries() {
+    const out = [];
+    const seen = new Set();
+    const templates = getAllTemplates();
+
+    function pushEntry(asset, pathParts) {
+      if (!asset?.id || seen.has(asset.id)) return;
+      seen.add(asset.id);
+      const cat = CATEGORIES.find((c) => c.id === asset.category);
+      const path = (pathParts && pathParts.length)
+        ? pathParts.join(' › ')
+        : (cat?.label || asset.category || 'Parts');
+      const aliases = [
+        asset.name,
+        asset.id,
+        asset.subtype,
+        asset.placeLabel,
+        asset.cssClass,
+        ...(pathParts || []),
+      ].filter(Boolean).map((s) => String(s));
+      out.push({
+        id: asset.id,
+        name: String(asset.name || asset.id),
+        path,
+        aliases,
+        category: asset.category || '',
+        subtype: asset.subtype || '',
+        placeLabel: asset.placeLabel || '',
+      });
+    }
+
+    function walkType(typeDef, pool, pathParts) {
+      const matched = pool.filter((a) => {
+        try { return !!typeDef.match?.(a); } catch (_) { return false; }
+      });
+      if (typeDef.children?.length) {
+        const claimed = new Set();
+        typeDef.children.forEach((child) => {
+          const childMatched = matched.filter((a) => {
+            try { return !!child.match?.(a); } catch (_) { return false; }
+          });
+          childMatched.forEach((a) => claimed.add(a.id));
+          const nextPath = [...pathParts, typeDef.label];
+          if (child.direct) {
+            childMatched.forEach((asset) => pushEntry(asset, nextPath));
+          } else {
+            walkType(child, childMatched, nextPath);
+          }
+        });
+        matched.filter((a) => !claimed.has(a.id)).forEach((asset) => {
+          pushEntry(asset, [...pathParts, typeDef.label]);
+        });
+        return;
+      }
+      matched.forEach((asset) => pushEntry(asset, [...pathParts, typeDef.label]));
+    }
+
+    CATEGORIES.filter((c) => !c.hidden).forEach((category) => {
+      const pool = templates.filter((t) => t.category === category.id && t.id !== '4conductor');
+      const typeDefs = CATEGORY_TYPES[category.id] || [];
+      const claimed = new Set();
+      typeDefs.forEach((typeDef) => {
+        const typed = pool.filter((a) => {
+          try { return !!typeDef.match?.(a); } catch (_) { return false; }
+        });
+        typed.forEach((a) => claimed.add(a.id));
+        walkType(typeDef, typed, [category.label]);
+      });
+      pool.filter((a) => !claimed.has(a.id) && !a.menuHidden).forEach((asset) => {
+        pushEntry(asset, [category.label]);
+      });
+    });
+
+    // Catch-all: any remaining placable template (new custom assets, etc.)
+    templates.forEach((asset) => {
+      if (asset.id === '4conductor' || asset.menuHidden) return;
+      if (seen.has(asset.id)) return;
+      const cat = CATEGORIES.find((c) => c.id === asset.category);
+      pushEntry(asset, [cat?.label || asset.category || 'User']);
+    });
+
+    return out;
   }
 
   function createAssetMenuRow(asset) {
@@ -5342,8 +5948,8 @@
         powerBtn.setAttribute('aria-pressed', deps.getPanelSnapMode?.() ? 'true' : 'false');
       } else {
         powerBtn.innerHTML = CONTEXT_FOCUS_ICON_ACTIVE;
-        powerBtn.title = 'Focus: Active — show live signal path only';
-        powerBtn.setAttribute('aria-label', 'Focus: Active signal path');
+        powerBtn.title = 'Focus: Active — wires on injector→output path (follows switch throws)';
+        powerBtn.setAttribute('aria-label', 'Focus: Active live signal path');
         powerBtn.classList.remove('panel-snap-active');
         syncContextMenuPowerButton();
       }
@@ -5356,7 +5962,7 @@
         groundBtn.setAttribute('aria-pressed', 'false');
       } else {
         groundBtn.innerHTML = CONTEXT_FOCUS_ICON_GROUND;
-        groundBtn.title = 'Focus: Ground — highlight ungrounded YESGROUND assets';
+        groundBtn.title = 'Focus: Ground — grounding net on, dim other wires';
         groundBtn.setAttribute('aria-label', 'Focus: Ground check');
         syncContextMenuGroundButton();
       }
@@ -7064,13 +7670,106 @@
       if (bridges.length) {
         const onBridge = bridges.some((pair) => pair[0] === idx || pair[1] === idx);
         if (onBridge) return true;
-        if (termEl?.classList?.contains('switch-term')) return false;
+        if (isSwitchContactTermEl(termEl)) return false;
         return !!state?.terminalActive?.[idx];
       }
       // Empty bridges = open / OFF throw — switch poles are inactive
-      if (termEl?.classList?.contains('switch-term')) return false;
+      if (isSwitchContactTermEl(termEl)) return false;
     }
     return !!state?.terminalActive?.[idx];
+  }
+
+  /**
+   * Draw same-side closed-contact bars on the switch body (matches real ON-ON-ON photos).
+   * Uses the terminal grid geometry so bars stay aligned under workspace zoom.
+   */
+  function syncSwitchBridgeOverlay(el, state) {
+    const terminals = el?.querySelector?.('.terminals');
+    if (!terminals) return;
+    let layer = terminals.querySelector('.switch-bridge-layer');
+    const bridges = Array.isArray(state?.bridges) ? state.bridges : [];
+    const termEls = [...el.querySelectorAll('.terminal')];
+    const pairs = bridges.filter((pair) => {
+      const a = Number(pair?.[0]);
+      const b = Number(pair?.[1]);
+      return Number.isFinite(a) && Number.isFinite(b) && termEls[a] && termEls[b]
+        && isSwitchContactTermEl(termEls[a])
+        && isSwitchContactTermEl(termEls[b]);
+    });
+    if (!pairs.length) {
+      layer?.remove();
+      return;
+    }
+    const NS = 'http://www.w3.org/2000/svg';
+    if (!layer) {
+      layer = document.createElementNS(NS, 'svg');
+      layer.classList.add('switch-bridge-layer');
+      layer.setAttribute('aria-hidden', 'true');
+      terminals.insertBefore(layer, terminals.firstChild);
+    }
+
+    const isGrid3x2 = terminals.classList.contains('grid-3x2')
+      || (el.classList.contains('dpdt') && termEls.filter((t) => t.classList.contains('switch-term')).length >= 6);
+
+    while (layer.firstChild) layer.removeChild(layer.firstChild);
+
+    if (isGrid3x2) {
+      // Match .terminals.grid-3x2 / .dpdt .terminals cell metrics
+      const cellW = 22;
+      const cellH = 18;
+      const gap = 4;
+      const cols = 2;
+      const rows = 3;
+      const vbW = cols * cellW + (cols - 1) * gap;
+      const vbH = rows * cellH + (rows - 1) * gap;
+      layer.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
+      layer.setAttribute('preserveAspectRatio', 'none');
+      pairs.forEach((pair) => {
+        const a = Number(pair[0]);
+        const b = Number(pair[1]);
+        if (a > 5 || b > 5) return;
+        const center = (idx) => {
+          const col = idx % 2;
+          const row = Math.floor(idx / 2);
+          return {
+            x: col * (cellW + gap) + cellW / 2,
+            y: row * (cellH + gap) + cellH / 2,
+          };
+        };
+        const p0 = center(a);
+        const p1 = center(b);
+        const line = document.createElementNS(NS, 'line');
+        line.setAttribute('class', 'switch-bridge-bar');
+        line.setAttribute('x1', String(p0.x));
+        line.setAttribute('y1', String(p0.y));
+        line.setAttribute('x2', String(p1.x));
+        line.setAttribute('y2', String(p1.y));
+        layer.appendChild(line);
+      });
+      return;
+    }
+
+    // Absolute / SPST / custom layouts — measure terminal centers in host space
+    const w = Math.max(1, terminals.offsetWidth || 1);
+    const h = Math.max(1, terminals.offsetHeight || 1);
+    layer.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    layer.setAttribute('preserveAspectRatio', 'none');
+    const hr = terminals.getBoundingClientRect();
+    const sx = hr.width / w || 1;
+    const sy = hr.height / h || 1;
+    pairs.forEach((pair) => {
+      const ta = termEls[Number(pair[0])];
+      const tb = termEls[Number(pair[1])];
+      const ar = ta.getBoundingClientRect();
+      const br = tb.getBoundingClientRect();
+      const line = document.createElementNS(NS, 'line');
+      line.setAttribute('class', 'switch-bridge-bar');
+      line.setAttribute('x1', String((ar.left + ar.width / 2 - hr.left) / sx));
+      line.setAttribute('y1', String((ar.top + ar.height / 2 - hr.top) / sy));
+      line.setAttribute('x2', String((br.left + br.width / 2 - hr.left) / sx));
+      line.setAttribute('y2', String((br.top + br.height / 2 - hr.top) / sy));
+      layer.appendChild(line);
+    });
   }
 
   function applyComponentStateVisuals(el, template, stateIndex) {
@@ -7082,9 +7781,9 @@
     if (Array.isArray(state.bridges) && state.terminalActive) {
       for (let i = 0; i < state.terminalActive.length; i++) {
         const term = termEls[i];
-        if (term?.classList?.contains('switch-term') || (template.switchThrow && !template.pushPull)) {
+        if (isSwitchContactTermEl(term) || (template.switchThrow && !template.pushPull && term?.classList?.contains('switch-term'))) {
           state.terminalActive[i] = terminalActiveForState(state, i, term);
-        } else if (template.pushPull && term?.classList?.contains('switch-term')) {
+        } else if (template.pushPull && isSwitchContactTermEl(term)) {
           state.terminalActive[i] = terminalActiveForState(state, i, term);
         }
       }
@@ -7098,12 +7797,24 @@
       if (Number.isFinite(a)) jumpered.add(a);
       if (Number.isFinite(b)) jumpered.add(b);
     });
+    const commons = new Set(getSwitchCommonIndices(template));
     template.terminals.forEach((spec, idx) => {
       const term = termEls[idx];
       if (!term) return;
-      const isT = term.classList.contains('switch-term')
+      const isT = isSwitchContactTermEl(term)
         || /^T\d+/i.test(String(spec.label || term.dataset.terminalLabel || term.textContent || '').trim());
       term.classList.toggle('internal-jumper', isT && jumpered.has(idx));
+      const isCommon = commons.has(idx) || spec.contactRole === 'common'
+        || String(spec.className || '').includes('switch-common');
+      term.classList.toggle('switch-common', !!isCommon && isSwitchContactTermEl(term));
+      if (spec.contactRole) term.dataset.contactRole = spec.contactRole;
+      else if (isCommon) term.dataset.contactRole = 'common';
+      else if (term.dataset.contactRole === 'common' && !isCommon) delete term.dataset.contactRole;
+      // Drop legacy stacked “C” under commons — gold inset marks them without squashing T
+      if (term.dataset.signalMark === 'common' || (isCommon && term.classList.contains('has-signal-mark')
+        && term.querySelector('.terminal-signal-mark.is-common'))) {
+        clearTerminalSignalMarkDom(term);
+      }
       if (spec.isGround || term.dataset.isGround === 'true' || term.dataset.tag === 'ISGROUND') {
         if (term.classList.contains('hb-tip')) {
           const active = terminalActiveForState(state, idx, term);
@@ -7145,6 +7856,7 @@
         term.classList.remove('state-active', 'keep-base-color');
       }
     });
+    syncSwitchBridgeOverlay(el, state);
     el.dataset.assetStateIndex = String(stateIndex);
     el.dataset.assetStateId = String(state.id);
     updateComponentStateLabel(el);
@@ -7291,11 +8003,12 @@
     return { minX, minY, maxX, maxY };
   }
 
-  /** Capacitor / transistor / op-amp keep dedicated value shells; all other assets use label chips. */
+  /** Capacitor / transistor / FET / op-amp keep dedicated value shells; all other assets use label chips. */
   function templateUsesPartsShell(template) {
     if (!template || template.forceLabelBox) return false;
     const sub = template.subtype || template.id;
-    return sub === 'capacitor' || sub === 'transistor' || sub === 'opamp';
+    return sub === 'capacitor' || sub === 'transistor' || sub === 'jfet'
+      || sub === 'mosfet-n' || sub === 'mosfet-p' || sub === 'opamp';
   }
 
   function placeLabelText(template) {
@@ -7317,7 +8030,7 @@
     const usePartsShell = templateUsesPartsShell(template);
     el.classList.toggle('asset-shell-parts', usePartsShell);
     el.classList.toggle('asset-shell-label', !usePartsShell);
-    if (template.isOutputJack) {
+    if (template.isOutputJack || template.isInputJack) {
       el.dataset.groundFlash = 'true';
     }
 
@@ -7415,6 +8128,8 @@
         || (spec.label === '+' ? 'P+' : null)
         || (spec.label === '−' || spec.label === '-' ? 'P-' : null);
       if (role) term.dataset.role = role;
+      if (spec.contactRole) term.dataset.contactRole = spec.contactRole;
+      else if (String(spec.className || '').includes('switch-common')) term.dataset.contactRole = 'common';
       const identity = resolveTerminalIdentity(spec, { template });
       const tooltip = terminalTooltipForSpec(spec, { template });
       term.dataset.termName = identity.name;
@@ -7543,7 +8258,7 @@
       applyComponentStateVisuals(el, template, 0);
     }
     if (deps.applyComponentGroundTag) {
-      const isJack = template.category === 'jack' || !!template.isOutputJack;
+      const isJack = template.category === 'jack' || !!template.isOutputJack || !!template.isInputJack;
       deps.applyComponentGroundTag(el, isJack ? false : !!template.needsGrounding);
     }
     if (template.defaultValues && deps.applyComponentElectricalValues) {
@@ -7626,6 +8341,7 @@
     fillFloatLabelWithSignalMark,
     terminalTooltipForSpec,
     listPlacementMenuCategories,
+    listSpotlightPartEntries,
     ensureInstanceStates,
     setInstanceStates,
     addInstanceState,
@@ -7633,5 +8349,8 @@
     setInstanceTerminalActive,
     setInstanceStateSecondaryLabel,
     setInstanceStateLabel,
+    getSwitchCommonIndices,
+    getPoleCommonIndexForTerm,
+    isSwitchContactTermEl,
   };
 })(window);

@@ -7,8 +7,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Endo Audio Schematic Editor</title>
   <link rel="icon" type="image/png" href="assets/app-icon.png">
-  <link rel="stylesheet" id="app-gate-style" href="gate.css?v=573">
-  <link rel="stylesheet" href="styles.css?v=573">
+  <link rel="stylesheet" id="app-gate-style" href="gate.css?v=659">
+  <link rel="stylesheet" href="styles.css?v=659">
 </head>
 <body>
   <div
@@ -37,7 +37,7 @@
         aria-label="Click to record bugs"
       >
         <span class="bugtest-badge__title" data-bugtest-title>Bugtest Ver.</span>
-        <span class="bugtest-badge__build" data-bugtest-build>573</span>
+        <span class="bugtest-badge__build" data-bugtest-build>587</span>
       </button>
       <button
         type="button"
@@ -317,17 +317,17 @@
             </label>
             <label class="app-settings-field">
               <span class="app-settings-field-label">
-                UI text size <span id="settings-ui-text-val" class="app-settings-val">100%</span>
+                UI text size <span id="settings-ui-text-val" class="app-settings-val">115%</span>
                 <button type="button" id="settings-ui-text-reset" class="app-settings-reset" title="Reset text size">Reset</button>
               </span>
-              <input type="range" id="settings-ui-text" class="app-settings-slider" min="85" max="140" step="5" value="100" aria-label="UI text size">
+              <input type="range" id="settings-ui-text" class="app-settings-slider" min="85" max="140" step="5" value="115" aria-label="UI text size">
             </label>
             <label class="app-settings-field">
               <span class="app-settings-field-label">
-                UI element size <span id="settings-ui-element-val" class="app-settings-val">100%</span>
+                UI element size <span id="settings-ui-element-val" class="app-settings-val">120%</span>
                 <button type="button" id="settings-ui-element-reset" class="app-settings-reset" title="Reset element size">Reset</button>
               </span>
-              <input type="range" id="settings-ui-element" class="app-settings-slider" min="85" max="140" step="5" value="100" aria-label="UI element size">
+              <input type="range" id="settings-ui-element" class="app-settings-slider" min="85" max="140" step="5" value="120" aria-label="UI element size">
             </label>
           </div>
         </details>
@@ -702,11 +702,11 @@
 
   <div class="workspace-layer-rail" role="group" aria-label="Wire layers">
     <div class="workspace-layer-stack" role="group" aria-label="Layer stack">
-      <button type="button" id="btn-layer-front" class="workspace-layer-stack-btn" title="Active layer above components" aria-label="Front">
+      <button type="button" id="btn-layer-front" class="workspace-layer-stack-btn" title="Wire layer in front of assets andcomponents" aria-label="Front">
         <span class="workspace-layer-stack-mark" aria-hidden="true">↑</span>
         <span class="workspace-layer-stack-label">Front</span>
       </button>
-      <button type="button" id="btn-layer-back" class="workspace-layer-stack-btn" title="Active layer behind components" aria-label="Back">
+      <button type="button" id="btn-layer-back" class="workspace-layer-stack-btn" title="Wire layer behind assets and components" aria-label="Back">
         <span class="workspace-layer-stack-mark" aria-hidden="true">↓</span>
         <span class="workspace-layer-stack-label">Back</span>
       </button>
@@ -800,18 +800,42 @@
     <span id="text-command-hint" class="text-command-hint" aria-hidden="true"></span>
   </div>
 
+  <div id="part-spotlight" class="part-spotlight hidden" aria-hidden="true">
+    <div class="part-spotlight-scrim" data-spotlight-dismiss></div>
+    <div class="part-spotlight-panel" role="dialog" aria-modal="true" aria-label="Find part">
+      <div class="part-spotlight-bar">
+        <svg class="part-spotlight-search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M15.2 15.2L20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <input
+          id="part-spotlight-input"
+          class="part-spotlight-input"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Search parts"
+          aria-label="Search parts"
+          aria-autocomplete="list"
+          aria-controls="part-spotlight-results"
+        >
+      </div>
+      <ul id="part-spotlight-results" class="part-spotlight-results" role="listbox" aria-label="Matching parts"></ul>
+    </div>
+  </div>
+
   <div id="wire-place-cursor-mark" class="wire-place-cursor-mark hidden" aria-hidden="true"></div>
 
   <div id="asset-context-menu" class="context-menu hidden" role="menu" aria-label="Place asset">
     <div class="context-menu-power-row" role="group" aria-label="Focus modes">
       <span class="context-menu-focus-modes-label">Focus modes</span>
       <div class="context-menu-focus-modes-btns">
-        <button type="button" id="context-menu-power" class="context-menu-power-btn" title="Focus: Active — show live signal path only" aria-pressed="false" aria-label="Focus: Active signal path">
+        <button type="button" id="context-menu-power" class="context-menu-power-btn" title="Focus: Active — wires on injector→output path (follows switch throws)" aria-pressed="false" aria-label="Focus: Active live signal path">
           <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M13 2L4 14h7l-1 8 10-14h-7l1-6z" fill="currentColor"/>
           </svg>
         </button>
-        <button type="button" id="context-menu-ground" class="context-menu-power-btn" title="Focus: Ground — ungrounded YESGROUND; with Wire focus, chase the grounding net into ISGROUND" aria-pressed="false" aria-label="Focus: Ground check">
+        <button type="button" id="context-menu-ground" class="context-menu-power-btn" title="Focus: Ground — grounding net on, dim other wires; with Wire focus, chase into ISGROUND" aria-pressed="false" aria-label="Focus: Ground check">
           <svg class="context-menu-focus-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <path d="M12 3v8M5 11h14M7.5 14.5h9M9.5 18h5M11 21h2" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
           </svg>
@@ -1486,6 +1510,18 @@
                   <circle cx="12" cy="15.5" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/>
                 </svg>
               </button>
+              <button
+                type="button"
+                id="schematic-peek-labels"
+                class="schematic-peek-labels"
+                title="Show schematic labels"
+                aria-label="Show schematic labels"
+                aria-pressed="false"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M5 6.5h14M7.5 6.5v11M16.5 6.5v11M9.5 17.5h5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
               <div class="schematic-peek-heading">
                 <span class="schematic-peek-title">Circuit</span>
                 <label class="schematic-circuit-select-wrap hidden" hidden>
@@ -1579,6 +1615,7 @@
       <span id="snap-info"></span>
       <div class="bugtest-dock" id="bugtest-dock">
         <div id="workspace-idle-chrome" class="workspace-idle-chrome" aria-live="polite">
+          <div id="parts-search-help-label" class="pan-help-label parts-search-help-label" hidden></div>
           <div id="pan-help-label" class="pan-help-label" hidden></div>
         </div>
         <div class="bugtest-dock-row">
@@ -1600,7 +1637,7 @@
             aria-label="Bugtest — click to record (silent)"
           >
             <span class="bugtest-badge__title" data-bugtest-title>Bugtest Ver.</span>
-            <span class="bugtest-badge__build" data-bugtest-build>573</span>
+            <span class="bugtest-badge__build" data-bugtest-build>587</span>
           </button>
         </div>
         <div
@@ -1711,13 +1748,13 @@
     </div>
   </div>
 
-  <script src="gate.js?v=573"></script>
-  <script src="curves.js?v=573"></script>
-  <script src="cad.js?v=573"></script>
-  <script src="assets.js?v=573"></script>
-  <script src="engines.js?v=573"></script>
-  <script src="errorreporting.js?v=573"></script>
-  <script src="materials.js?v=573"></script>
-  <script src="app.js?v=573"></script>
+  <script src="gate.js?v=659"></script>
+  <script src="curves.js?v=659"></script>
+  <script src="cad.js?v=659"></script>
+  <script src="assets.js?v=659"></script>
+  <script src="engines.js?v=659"></script>
+  <script src="errorreporting.js?v=659"></script>
+  <script src="materials.js?v=659"></script>
+  <script src="app.js?v=659"></script>
 </body>
 </html>

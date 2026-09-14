@@ -68,6 +68,8 @@
   const ZOOM_MAX = 4;
   const ZOOM_STEP = 0.05;
   const ZOOM_SENS = 0.0012;
+  /** Shift+wheel multiplies zoom step / smooth sensitivity (CAD-style fast zoom). */
+  const ZOOM_SHIFT_MULT = 2.5;
 
   const canvas = document.getElementById('canvas');
   const workspace = document.getElementById('workspace');
@@ -154,12 +156,16 @@
   let eraseStrokeDeleted = 0;
   const eraseStrokeSeen = new Set();
   let colorblindMode = 'off';
-  let uiTextScalePct = 100;
-  let uiElementScalePct = 100;
+  let uiTextScalePct = 115;
+  let uiElementScalePct = 120;
+  const UI_TEXT_SCALE_DEFAULT = 115;
+  const UI_ELEMENT_SCALE_DEFAULT = 120;
   let headerDitherEnabled = false;
   let lightGridEnabled = false;
   /** Schematic wire strokes: monochrome by default; colour toggle re-enables WIRE_COLORS. */
   let schematicWireColourEnabled = false;
+  /** Pin / title / value labels on schematic — off by default for a clean signal path. */
+  let schematicLabelsEnabled = false;
   const HEADER_DITHER_LAYER_COUNT = 7;
   const headerDitherLayerTimers = Array(HEADER_DITHER_LAYER_COUNT + 1).fill(0);
   const wireGaugeBar = document.getElementById('wire-gauge-bar');
@@ -233,6 +239,12 @@
   const textCommandBox = document.getElementById('text-command-box');
   const textCommandInput = document.getElementById('text-command-input');
   const textCommandHint = document.getElementById('text-command-hint');
+  const partSpotlight = document.getElementById('part-spotlight');
+  const partSpotlightInput = document.getElementById('part-spotlight-input');
+  const partSpotlightResults = document.getElementById('part-spotlight-results');
+  let partSpotlightOpen = false;
+  let partSpotlightActiveIndex = 0;
+  let partSpotlightMatches = [];
   const dimLayer = document.getElementById('dim-layer');
   const dimLine = dimLayer?.querySelector('.dim-line');
   const dimMarkA = dimLayer?.querySelector('.dim-mark-a');
@@ -624,6 +636,22 @@
     return e.deltaMode === WheelEvent.DOM_DELTA_LINE;
   }
 
+  /**
+   * Dominant wheel axis for zoom. Shift+wheel is remapped to deltaX on macOS/Windows,
+   * so reading only deltaY makes zoom appear broken.
+   */
+  function wheelZoomAxisDelta(e) {
+    if (!e) return 0;
+    const absX = Math.abs(e.deltaX || 0);
+    const absY = Math.abs(e.deltaY || 0);
+    if (absY >= absX) return e.deltaY || 0;
+    return e.deltaX || 0;
+  }
+
+  function wheelZoomMultiplier(e) {
+    return e?.shiftKey ? ZOOM_SHIFT_MULT : 1;
+  }
+
   function setZoomAt(clientX, clientY, nextZoom) {
     cancelViewportResetAnim();
     const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nextZoom));
@@ -651,13 +679,14 @@
     }
   }
 
-  function zoomAtSmooth(clientX, clientY, deltaY) {
-    const factor = Math.exp(-deltaY * ZOOM_SENS);
+  function zoomAtSmooth(clientX, clientY, deltaY, mult = 1) {
+    const factor = Math.exp(-deltaY * ZOOM_SENS * (mult || 1));
     setZoomAt(clientX, clientY, zoom * factor);
   }
 
-  function zoomAtStep(clientX, clientY, direction) {
-    const stepped = Math.round(zoom / ZOOM_STEP) * ZOOM_STEP + direction * ZOOM_STEP;
+  function zoomAtStep(clientX, clientY, direction, mult = 1) {
+    const step = ZOOM_STEP * (mult || 1);
+    const stepped = Math.round(zoom / ZOOM_STEP) * ZOOM_STEP + direction * step;
     setZoomAt(clientX, clientY, stepped);
   }
 
@@ -789,12 +818,9 @@
   let shortCheckMode = false;
 
   /**
-   * Focus: Active — highlight the live signal path only.
-   * Seeds = signal injectors (pickup coil ends / jack tip H with terminalActive).
-   * Switch poles and pot lugs join via buildWireNets() expansion — seeding them
-   * also lit the ground bus whenever an active pole sat on a grounded net.
-   * Nets that reach chassis / circuit ground are excluded so phase-reverse (or any
-   * hot↔ground short) does not light the entire return bus.
+   * Focus: Active — highlight wires on a live injector → output path.
+   * Closed switch bridges (current throw) conduct; open throws are spurs and stay muted
+   * (e.g. Br On Down leaves T5↔vol off the Bridge→jack path even when vol is live).
    */
   function isLightningSeedTerminal(term) {
     if (!term) return false;
@@ -812,9 +838,10 @@
     return true;
   }
 
-  /** True signal sources — not every terminalActive lug on the board. */
+  /** True signal sources — pickups / hot injectors; output jack tip is a sink, not a seed. */
   function isLightningSignalInjector(term, comp) {
     if (!term || !comp || !isLightningSeedTerminal(term)) return false;
+    if (isOutputJackComponent(comp)) return false;
     const role = getTerminalRole(term);
     const label = (term.dataset.terminalLabel || '').trim().toUpperCase();
     if (isPickupComponent(comp)) {
@@ -831,6 +858,163 @@
       return true;
     }
     return false;
+  }
+
+  /** Output tip(s) — sinks for Focus: Active path tracing. */
+  function isLightningSignalSink(term, comp) {
+    if (!term || !comp || !isOutputJackComponent(comp)) return false;
+    if (comp.classList.contains('workspace-page-hidden')) return false;
+    if (comp.classList.contains('is-subgroup-disabled')) return false;
+    if (isOutputJackGroundTerminal(term)) return false;
+    const role = getTerminalRole(term);
+    const label = (term.dataset.terminalLabel || '').trim().toUpperCase();
+    return role === 'H' || label === 'H' || label === 'TIP';
+  }
+
+  /**
+   * Undirected signal graph for Focus: Active.
+   * Edges: wires, tip docks, closed switch bridges, pot hot↔wiper, R/L, HB windings.
+   * Chassis / sleeve / case G terminals are omitted so the return bus stays muted.
+   * Caps stay non-series (shunt attachments to G are dropped with ground terminals).
+   */
+  function isSignalPathGroundTerminal(term) {
+    if (!term) return true;
+    if (isOutputJackGroundTerminal(term)) return true;
+    if (term.dataset?.isGround === 'true' || term.dataset?.tag === 'ISGROUND') return true;
+    const faultRole = getFaultAnalysisRole(term);
+    if (faultRole === 'G' || faultRole === 'SUP-' || faultRole === 'HEAT') return true;
+    const host = term.closest?.('.component');
+    // Pickup coil "G" is a winding end (may be hot when phase-reversed) — keep it
+    if (host && isPickupComponent(host) && getTerminalRole(term) === 'G') return false;
+    if (getTerminalRole(term) === 'G') return true;
+    return false;
+  }
+
+  function buildSignalPathGraph() {
+    const edges = []; // { a, b, wire? }
+    const adj = new Map(); // term -> [{ to, edgeIdx }]
+
+    function addEdge(a, b, wire = null) {
+      if (!a || !b || a === b) return;
+      if (isSignalPathGroundTerminal(a) || isSignalPathGroundTerminal(b)) return;
+      const edgeIdx = edges.length;
+      edges.push({ a, b, wire });
+      if (!adj.has(a)) adj.set(a, []);
+      if (!adj.has(b)) adj.set(b, []);
+      adj.get(a).push({ to: b, edgeIdx });
+      adj.get(b).push({ to: a, edgeIdx });
+    }
+
+    function termHostOk(term) {
+      const host = term?.closest?.('.component');
+      return !!(host && !host.classList.contains('is-subgroup-disabled')
+        && !host.classList.contains('workspace-page-hidden'));
+    }
+
+    wires.forEach((wire) => {
+      if (wire.group?.classList.contains('is-subgroup-disabled')) return;
+      if (wire.group?.classList.contains('workspace-page-hidden')) return;
+      addEdge(wire.start?.terminal, wire.end?.terminal, wire);
+    });
+    eachCapTipAttachmentPair((a, b) => {
+      if (termHostOk(a) && termHostOk(b)) addEdge(a, b);
+    });
+    eachHbTipAttachmentPair((a, b) => {
+      if (termHostOk(a) && termHostOk(b)) addEdge(a, b);
+    });
+    eachAssetWireTipAttachmentPair((a, b) => {
+      if (termHostOk(a) && termHostOk(b)) addEdge(a, b);
+    });
+
+    components.forEach((comp) => {
+      if (comp.classList.contains('is-subgroup-disabled')) return;
+      if (comp.classList.contains('workspace-page-hidden')) return;
+      const template = GuitarAssets.getTemplate(comp.dataset.assetId);
+      if (!template) return;
+      const terms = [...comp.querySelectorAll('.terminal')];
+      if (terms.length < 2) return;
+
+      const states = GuitarAssets.getEffectiveStates(comp);
+      const state = states[GuitarAssets.getComponentStateIndex(comp)];
+      state?.bridges?.forEach((pair) => {
+        const a = terms[pair[0]];
+        const b = terms[pair[1]];
+        if (a && b) addEdge(a, b);
+      });
+
+      if (isResistorComponent(comp) || isInductorComponent(comp)) {
+        addEdge(terms[0], terms[1]);
+        return;
+      }
+      if (isPotentiometerComponent(comp)) {
+        // Hot path only (lug3↔wiper). Linking lug1 would merge signal into chassis
+        // via the NA lug1↔case bond and light the entire return bus.
+        const track = getPotentiometerTrackTerms(comp);
+        if (track?.wiper && track?.lug3) addEdge(track.wiper, track.lug3);
+        return;
+      }
+      if (isDualCoilComponent(comp)) {
+        const tips = getHbCoilTipTerms(comp);
+        if (tips?.h && tips?.n) addEdge(tips.h, tips.n);
+        if (tips?.r && tips?.s) addEdge(tips.r, tips.s);
+        if (usesHbStockSeriesWiring(comp)) {
+          if (tips?.n && tips?.r) addEdge(tips.n, tips.r);
+          // S↔G is shield/start — skip (G is ground-ish)
+        }
+      }
+      // Do not hard-link SC H↔G — that merges hot with chassis.
+    });
+
+    return { edges, adj };
+  }
+
+  /** Multi-source BFS; optional blockedEdgeIdx is skipped (for s–t path edge test). */
+  function signalPathReachable(adj, starts, blockedEdgeIdx = -1) {
+    const seen = new Set();
+    const queue = [];
+    starts.forEach((t) => {
+      if (!t || seen.has(t)) return;
+      seen.add(t);
+      queue.push(t);
+    });
+    for (let qi = 0; qi < queue.length; qi++) {
+      const cur = queue[qi];
+      const nbrs = adj.get(cur);
+      if (!nbrs) continue;
+      for (let i = 0; i < nbrs.length; i++) {
+        const { to, edgeIdx } = nbrs[i];
+        if (edgeIdx === blockedEdgeIdx) continue;
+        if (seen.has(to)) continue;
+        seen.add(to);
+        queue.push(to);
+      }
+    }
+    return seen;
+  }
+
+  /**
+   * Edge uv lies on some simple seed→sink path iff, with uv removed,
+   * some seed still reaches one end and some sink the other.
+   * Dead-end switch throws (open Br T5↔vol) fail this test.
+   */
+  function collectSignalPathLiveEdges(graph, seeds, sinks) {
+    const live = new Set();
+    const { edges, adj } = graph;
+    if (!edges.length || !seeds.size || !sinks.size) return live;
+    const seedList = [...seeds];
+    const sinkList = [...sinks];
+    for (let i = 0; i < edges.length; i++) {
+      const { a, b } = edges[i];
+      const fromSeed = signalPathReachable(adj, seedList, i);
+      const fromSink = signalPathReachable(adj, sinkList, i);
+      if (
+        (fromSeed.has(a) && fromSink.has(b))
+        || (fromSeed.has(b) && fromSink.has(a))
+      ) {
+        live.add(i);
+      }
+    }
+    return live;
   }
 
   function clearSignalPathFocusClasses() {
@@ -852,6 +1036,7 @@
       if (!lightningMode) return;
 
       const seedTerms = new Set();
+      const sinkTerms = new Set();
       components.forEach((comp) => {
         if (comp.classList.contains('workspace-page-hidden')) return;
         if (comp.classList.contains('is-subgroup-disabled')) return;
@@ -859,10 +1044,14 @@
         if (!template) return;
         const states = GuitarAssets.getEffectiveStates(comp);
         const state = states[GuitarAssets.getComponentStateIndex(comp)];
-        if (!state?.terminalActive) return;
         const terms = [...comp.querySelectorAll('.terminal')];
         terms.forEach((term, idx) => {
-          if (!state.terminalActive[idx]) return;
+          // Sinks do not require terminalActive (jack tip is always the outlet)
+          if (isLightningSignalSink(term, comp)) {
+            sinkTerms.add(term);
+            return;
+          }
+          if (!state?.terminalActive?.[idx]) return;
           if (!isLightningSignalInjector(term, comp)) return;
           seedTerms.add(term);
         });
@@ -877,25 +1066,39 @@
 
       document.body.classList.add('signal-path-focus');
 
-      const { groundTerms } = collectGroundNetMembership();
+      const graph = buildSignalPathGraph();
       const liveTerms = new Set();
-      buildWireNets().forEach((net) => {
-        let seeded = false;
-        for (const t of seedTerms) {
-          if (net.has(t)) {
-            seeded = true;
-            break;
-          }
-        }
-        if (!seeded) return;
-        // Skip chassis / return bus — e.g. mid-phase reverse parks a coil end on ground
-        if (groundTerms?.size) {
-          for (const t of net) {
-            if (groundTerms.has(t)) return;
-          }
-        }
-        net.forEach((t) => liveTerms.add(t));
-      });
+      const liveWireIds = new Set();
+
+      if (sinkTerms.size) {
+        const liveEdgeIdx = collectSignalPathLiveEdges(graph, seedTerms, sinkTerms);
+        liveEdgeIdx.forEach((idx) => {
+          const e = graph.edges[idx];
+          if (!e) return;
+          liveTerms.add(e.a);
+          liveTerms.add(e.b);
+          if (e.wire?.id != null) liveWireIds.add(e.wire.id);
+        });
+      } else {
+        // No output jack yet — fall back to “reachable from injectors”, still
+        // excluding chassis/return so open throw spurs on a live bus stay muted
+        // only when a sink exists; without a sink, show the energized island.
+        const reached = signalPathReachable(graph.adj, [...seedTerms]);
+        const { groundTerms } = collectGroundNetMembership();
+        reached.forEach((t) => {
+          if (groundTerms?.size && groundTerms.has(t)) return;
+          liveTerms.add(t);
+        });
+        // Drop purely-ground islands: if a seed only reaches ground, skip its terms
+        seedTerms.forEach((seed) => {
+          if (!groundTerms?.size || !groundTerms.has(seed)) return;
+          // keep seed marked below; strip other ground-only terms already skipped
+        });
+        graph.edges.forEach((e) => {
+          if (!e.wire?.id) return;
+          if (liveTerms.has(e.a) && liveTerms.has(e.b)) liveWireIds.add(e.wire.id);
+        });
+      }
 
       // Always mark injectors so unwired sources still read as the path origin
       seedTerms.forEach((t) => {
@@ -910,6 +1113,12 @@
         const host = t.closest?.('.component');
         if (host) host.classList.add('signal-path-active');
       });
+      sinkTerms.forEach((t) => {
+        if (!liveTerms.has(t)) return;
+        t.classList.add('signal-path-live');
+        const host = t.closest?.('.component');
+        if (host) host.classList.add('signal-path-active');
+      });
 
       let pathWireCount = 0;
       wires.forEach((wire) => {
@@ -918,10 +1127,13 @@
         if (wire.group.classList.contains('is-subgroup-disabled')) return;
         const a = wire.start?.terminal;
         const b = wire.end?.terminal;
-        const aLive = !!(a && liveTerms.has(a));
-        const bLive = !!(b && liveTerms.has(b));
-        // Path wire: both ends live, or one live + free end (open spur still carrying signal)
-        const onPath = (aLive && bLive) || (aLive && !b) || (bLive && !a);
+        let onPath = liveWireIds.has(wire.id);
+        // Free-end spur still carrying signal from an injector (incomplete run)
+        if (!onPath) {
+          const aLive = !!(a && (liveTerms.has(a) || seedTerms.has(a)));
+          const bLive = !!(b && (liveTerms.has(b) || seedTerms.has(b)));
+          onPath = (aLive && !b) || (bLive && !a);
+        }
         if (!onPath) return;
         wire.group.classList.add('lightning-glow', 'signal-path-wire');
         pathWireCount += 1;
@@ -931,8 +1143,8 @@
         const srcN = seedTerms.size;
         setStatus(
           pathWireCount > 0
-            ? `Focus: Active — ${pathWireCount} wire${pathWireCount === 1 ? '' : 's'} on signal path · ${srcN} source${srcN === 1 ? '' : 's'}`
-            : `Focus: Active — ${srcN} source${srcN === 1 ? '' : 's'}, no wired path yet`
+            ? `Focus: Active — ${pathWireCount} wire${pathWireCount === 1 ? '' : 's'} on live path · ${srcN} source${srcN === 1 ? '' : 's'}`
+            : `Focus: Active — ${srcN} source${srcN === 1 ? '' : 's'}, no path to output yet`
         );
         delete document.body.dataset.signalPathStatus;
       }
@@ -1142,13 +1354,146 @@
 
   function clearGroundNetChase() {
     stopGroundChaseAnim();
-    document.body.classList.remove('ground-net-chase-active');
-    wires.forEach((wire) => wire.group?.classList.remove('ground-net-glow'));
-    document.querySelectorAll('.terminal.ground-chase-sink').forEach((el) => {
-      el.classList.remove('ground-chase-sink');
+    document.body.classList.remove('ground-net-chase-active', 'ground-path-focus');
+    wires.forEach((wire) => {
+      wire.group?.classList.remove('ground-net-glow', 'ground-path-wire');
+    });
+    components.forEach((comp) => {
+      comp.classList.remove('ground-path-active');
+      comp.querySelectorAll('.terminal.ground-path-live, .terminal.ground-chase-sink').forEach((t) => {
+        t.classList.remove('ground-path-live', 'ground-chase-sink');
+      });
+    });
+    document.querySelectorAll('.terminal.ground-chase-sink, .terminal.ground-path-live').forEach((el) => {
+      el.classList.remove('ground-chase-sink', 'ground-path-live');
     });
     const layer = document.getElementById('ground-chase-layer');
     if (layer) layer.replaceChildren();
+  }
+
+  /**
+   * Ground focus: dim non-ground wires; keep the grounding net readable.
+   * Optional chase animation still requires Wire focus + Ground focus together.
+   */
+  function refreshGroundPathFocus() {
+    wires.forEach((wire) => {
+      wire.group?.classList.remove('ground-net-glow', 'ground-path-wire');
+    });
+    components.forEach((comp) => {
+      comp.classList.remove('ground-path-active');
+      comp.querySelectorAll('.terminal.ground-path-live').forEach((t) => {
+        t.classList.remove('ground-path-live');
+      });
+    });
+    document.body.classList.remove('ground-path-focus');
+    if (!groundCheckMode) return;
+
+    const membership = collectGroundNetMembership();
+    document.body.classList.add('ground-path-focus');
+    membership.groundWires.forEach((wire) => {
+      wire.group?.classList.add('ground-net-glow', 'ground-path-wire');
+    });
+    membership.groundTerms.forEach((term) => {
+      if (!term?.classList) return;
+      term.classList.add('ground-path-live');
+      const host = term.closest?.('.component');
+      if (host) host.classList.add('ground-path-active');
+    });
+    return membership;
+  }
+
+  /**
+   * Wire-focus + ground-focus: highlight the grounding net and chase a white
+   * solid segment along each chain into the output jack ISGROUND (G).
+   * Meeting segments merge (combined length; front stays, grows only in the back).
+   * Ground-only focus still dims non-ground wires via refreshGroundPathFocus().
+   */
+  function refreshGroundNetChase() {
+    clearGroundNetChase();
+    if (!groundCheckMode) return;
+
+    const membership = refreshGroundPathFocus() || collectGroundNetMembership();
+    if (!wireEditFocusMode) return;
+    if (!membership.groundSources.size || !membership.groundWires.length) return;
+
+    document.body.classList.add('ground-net-chase-active');
+    membership.groundSources.forEach((term) => {
+      term.classList.add('ground-chase-sink');
+    });
+
+    const chains = buildGroundChaseChains(membership);
+    if (!chains.length) return;
+
+    const layer = ensureGroundChaseLayer();
+    const measure = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    measure.setAttribute('fill', 'none');
+    layer.appendChild(measure);
+
+    // Unique directed edges toward G (wire may appear on multiple chains — share one edge)
+    const edges = [];
+    const edgeKeyToIdx = new Map();
+
+    function polylineLen(pts) {
+      let l = 0;
+      for (let i = 1; i < pts.length; i++) {
+        l += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+      }
+      return l;
+    }
+
+    function ensureEdge(step) {
+      const key = `${step.wire.id}>${step.to?.dataset?.terminalIndex ?? ''}:${step.to?.closest?.('.component')?.dataset?.id ?? ''}`;
+      if (edgeKeyToIdx.has(key)) return edgeKeyToIdx.get(key);
+      const oriented = sampleOrientedWirePathD(measure, step.wire, step.from, step.to);
+      if (!oriented) return null;
+      const idx = edges.length;
+      const length = Math.max(oriented.length, polylineLen(oriented.points));
+      edges.push({
+        key,
+        wire: step.wire,
+        from: step.from,
+        to: step.to,
+        d: oriented.d,
+        points: oriented.points,
+        length,
+        nextIdx: null,
+      });
+      edgeKeyToIdx.set(key, idx);
+      return idx;
+    }
+
+    const chainStartEdges = [];
+    chains.forEach((steps) => {
+      const idxs = [];
+      steps.forEach((step) => {
+        const idx = ensureEdge(step);
+        if (idx != null) idxs.push(idx);
+      });
+      for (let i = 0; i < idxs.length - 1; i++) {
+        edges[idxs[i]].nextIdx = idxs[i + 1];
+      }
+      if (idxs.length) chainStartEdges.push(idxs[0]);
+    });
+
+    // Trails
+    edges.forEach((edge) => {
+      const trail = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      trail.setAttribute('class', 'ground-chase-trail');
+      trail.setAttribute('d', edge.d);
+      trail.setAttribute('fill', 'none');
+      layer.appendChild(trail);
+    });
+
+    measure.remove();
+
+    const blobs = chainStartEdges.map((spawnEdgeIdx) => ({
+      edgeIdx: spawnEdgeIdx,
+      head: 0,
+      length: GROUND_CHASE_BASE_LEN,
+      spawnEdgeIdx,
+    }));
+
+    startGroundChaseAnim(edges, blobs, layer);
   }
 
   function ensureGroundChaseLayer() {
@@ -1423,101 +1768,6 @@
       groundChaseAnim.raf = requestAnimationFrame(frame);
     }
     groundChaseAnim.raf = requestAnimationFrame(frame);
-  }
-
-  /**
-   * Wire-focus + ground-focus: highlight the grounding net and chase a white
-   * solid segment along each chain into the output jack ISGROUND (G).
-   * Meeting segments merge (combined length; front stays, grows only in the back).
-   */
-  function refreshGroundNetChase() {
-    clearGroundNetChase();
-    if (!wireEditFocusMode || !groundCheckMode) return;
-
-    const membership = collectGroundNetMembership();
-    if (!membership.groundSources.size || !membership.groundWires.length) return;
-
-    document.body.classList.add('ground-net-chase-active');
-    membership.groundWires.forEach((wire) => {
-      wire.group?.classList.add('ground-net-glow');
-    });
-    membership.groundSources.forEach((term) => {
-      term.classList.add('ground-chase-sink');
-    });
-
-    const chains = buildGroundChaseChains(membership);
-    if (!chains.length) return;
-
-    const layer = ensureGroundChaseLayer();
-    const measure = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-    measure.setAttribute('fill', 'none');
-    layer.appendChild(measure);
-
-    // Unique directed edges toward G (wire may appear on multiple chains — share one edge)
-    const edges = [];
-    const edgeKeyToIdx = new Map();
-
-    function polylineLen(pts) {
-      let l = 0;
-      for (let i = 1; i < pts.length; i++) {
-        l += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-      }
-      return l;
-    }
-
-    function ensureEdge(step) {
-      const key = `${step.wire.id}>${step.to?.dataset?.terminalIndex ?? ''}:${step.to?.closest?.('.component')?.dataset?.id ?? ''}`;
-      if (edgeKeyToIdx.has(key)) return edgeKeyToIdx.get(key);
-      const oriented = sampleOrientedWirePathD(measure, step.wire, step.from, step.to);
-      if (!oriented) return null;
-      const idx = edges.length;
-      const length = Math.max(oriented.length, polylineLen(oriented.points));
-      edges.push({
-        key,
-        wire: step.wire,
-        from: step.from,
-        to: step.to,
-        d: oriented.d,
-        points: oriented.points,
-        length,
-        nextIdx: null,
-      });
-      edgeKeyToIdx.set(key, idx);
-      return idx;
-    }
-
-    const chainStartEdges = [];
-    chains.forEach((steps) => {
-      const idxs = [];
-      steps.forEach((step) => {
-        const idx = ensureEdge(step);
-        if (idx != null) idxs.push(idx);
-      });
-      for (let i = 0; i < idxs.length - 1; i++) {
-        edges[idxs[i]].nextIdx = idxs[i + 1];
-      }
-      if (idxs.length) chainStartEdges.push(idxs[0]);
-    });
-
-    // Trails
-    edges.forEach((edge) => {
-      const trail = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      trail.setAttribute('class', 'ground-chase-trail');
-      trail.setAttribute('d', edge.d);
-      trail.setAttribute('fill', 'none');
-      layer.appendChild(trail);
-    });
-
-    measure.remove();
-
-    const blobs = chainStartEdges.map((spawnEdgeIdx) => ({
-      edgeIdx: spawnEdgeIdx,
-      head: 0,
-      length: GROUND_CHASE_BASE_LEN,
-      spawnEdgeIdx,
-    }));
-
-    startGroundChaseAnim(edges, blobs, layer);
   }
 
   const MOODLE_ISSUE = {
@@ -2190,11 +2440,11 @@
         shorts.push({ reason, terminals: [...netTerms] });
       }
 
-      /** True when this net joins both named pins on some output jack. */
-      function netHasOutputJackPair(net, roleA, roleB) {
+      /** True when this net joins both named pins on some jack (in or out). */
+      function netHasJackPair(net, roleA, roleB) {
         let hit = false;
         components.forEach((comp) => {
-          if (!isOutputJackComponent(comp)) return;
+          if (!isJackComponent(comp)) return;
           const terms = [...comp.querySelectorAll('.terminal')];
           const a = terms.find((t) => getTerminalRole(t) === roleA);
           const b = terms.find((t) => getTerminalRole(t) === roleB);
@@ -2214,15 +2464,15 @@
         });
 
         // H↔G / R↔G / H↔R only when jack tip/ring/sleeve roles are present on the net
-        if (buckets.H.length && buckets.G.length && netHasOutputJackPair(net, 'H', 'G')) {
-          flagNet(net, 'Output tip–sleeve short (H↔G)');
+        if (buckets.H.length && buckets.G.length && netHasJackPair(net, 'H', 'G')) {
+          flagNet(net, 'Jack tip–sleeve short (H↔G)');
         }
 
-        if (buckets.R.length && buckets.G.length && netHasOutputJackPair(net, 'R', 'G')) {
-          flagNet(net, 'Output ring–sleeve short (R↔G)');
+        if (buckets.R.length && buckets.G.length && netHasJackPair(net, 'R', 'G')) {
+          flagNet(net, 'Jack ring–sleeve short (R↔G)');
         }
 
-        if (buckets.H.length && buckets.R.length && netHasOutputJackPair(net, 'H', 'R')) {
+        if (buckets.H.length && buckets.R.length && netHasJackPair(net, 'H', 'R')) {
           flagNet(net, 'Output tip–ring short (H↔R)');
         }
 
@@ -2637,9 +2887,11 @@
           : `Ground focus — ${ungrounded.length} YESGROUND asset(s) not linked · net chase on connected chains`
       );
     } else if (ungrounded.length === 0) {
-      setStatus('All YESGROUND assets reach circuit ground');
+      setStatus('Ground focus — grounding net on · non-ground wires dimmed');
     } else {
-      setStatus(`${ungrounded.length} YESGROUND asset(s) not linked to circuit ground`);
+      setStatus(
+        `Ground focus — ${ungrounded.length} YESGROUND asset(s) not linked · non-ground wires dimmed`
+      );
     }
   }
 
@@ -2758,7 +3010,7 @@
 
   /** Q/E state cycle — never steal keys from text fields (labels, hover, state menu). */
   function canUseAssetStateHotkeys() {
-    if (textCommandOpen || isEditorOpen()) return false;
+    if (textCommandOpen || partSpotlightOpen || isEditorOpen()) return false;
     if (isTypingTarget()) return false;
     return true;
   }
@@ -2993,10 +3245,19 @@
     );
   }
 
-  function setSchematicWireColourEnabled(enabled) {
-    schematicWireColourEnabled = !!enabled;
-    syncSchematicColourButtonState();
-    saveUiPrefs();
+  function syncSchematicLabelsButtonState() {
+    const btn = document.getElementById('schematic-peek-labels');
+    if (!btn) return;
+    btn.classList.toggle('is-active', schematicLabelsEnabled);
+    btn.setAttribute('aria-pressed', schematicLabelsEnabled ? 'true' : 'false');
+    btn.title = schematicLabelsEnabled ? 'Hide schematic labels' : 'Show schematic labels';
+    btn.setAttribute(
+      'aria-label',
+      schematicLabelsEnabled ? 'Hide schematic labels' : 'Show schematic labels'
+    );
+  }
+
+  function refreshAllSchematicViews() {
     refreshSchematicPeek();
     schematicPinWindows.forEach((pin) => {
       refreshSchematicInto({
@@ -3007,6 +3268,20 @@
       });
       pin.snapshot = captureSchematicPinSnapshot(pin);
     });
+  }
+
+  function setSchematicWireColourEnabled(enabled) {
+    schematicWireColourEnabled = !!enabled;
+    syncSchematicColourButtonState();
+    saveUiPrefs();
+    refreshAllSchematicViews();
+  }
+
+  function setSchematicLabelsEnabled(enabled) {
+    schematicLabelsEnabled = !!enabled;
+    syncSchematicLabelsButtonState();
+    saveUiPrefs();
+    refreshAllSchematicViews();
   }
 
   function clearAllSchematicPinWindows() {
@@ -4663,11 +4938,15 @@
       const absX = Math.abs(e.deltaX);
       const absY = Math.abs(e.deltaY);
       const pinch = e.ctrlKey || e.metaKey;
-      if (!pinch && absX > absY * 1.2) return;
-      const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
-      const step = pinch ? SCHEMATIC_ZOOM_STEP * 0.85 : SCHEMATIC_ZOOM_STEP;
+      const fast = e.shiftKey;
+      // Shift+wheel is remapped to deltaX — still zoom (CAD fast-zoom), don't treat as pan
+      if (!pinch && !fast && absX > absY * 1.2) return;
+      const delta = wheelZoomAxisDelta(e);
+      if (delta === 0) return;
+      const step = (pinch ? SCHEMATIC_ZOOM_STEP * 0.85 : SCHEMATIC_ZOOM_STEP)
+        * (fast ? ZOOM_SHIFT_MULT : 1);
       if (delta > 0) setSchematicPinZoom(pin, (pin.zoom || 1) - step);
-      else if (delta < 0) setSchematicPinZoom(pin, (pin.zoom || 1) + step);
+      else setSchematicPinZoom(pin, (pin.zoom || 1) + step);
     }, { passive: false });
 
     // Persist size when the user finishes a CSS resize drag
@@ -7502,6 +7781,274 @@
     match.run?.();
   }
 
+  /* ── Part Spotlight (Tab) — macOS Spotlight / Finder-bar style part search ── */
+
+  function scoreSpotlightQuery(entry, qRaw) {
+    const q = String(qRaw || '').trim().toLowerCase();
+    if (!q) return 0;
+    const name = String(entry.name || '').toLowerCase();
+    const id = String(entry.id || '').toLowerCase();
+    const path = String(entry.path || '').toLowerCase();
+    const keys = [
+      name,
+      id,
+      String(entry.subtype || '').toLowerCase(),
+      String(entry.placeLabel || '').toLowerCase(),
+      ...(entry.aliases || []).map((a) => String(a).toLowerCase()),
+    ].filter(Boolean);
+    let best = Infinity;
+    keys.forEach((k) => {
+      if (k === q) best = Math.min(best, 0);
+      else if (k.startsWith(q)) best = Math.min(best, 1 + (k.length - q.length) * 0.05);
+      else if (k.includes(q)) best = Math.min(best, 20 + k.indexOf(q) * 0.1);
+      else {
+        const tokens = k.split(/[\s_\-/›>]+/).filter(Boolean);
+        tokens.forEach((tok) => {
+          if (tok.startsWith(q)) best = Math.min(best, 8 + (tok.length - q.length) * 0.05);
+        });
+        let qi = 0;
+        for (let i = 0; i < k.length && qi < q.length; i++) {
+          if (k[i] === q[qi]) qi += 1;
+        }
+        if (qi === q.length) best = Math.min(best, 55 + (k.length - q.length) * 0.2);
+      }
+    });
+    if (path.includes(q)) best = Math.min(best, 35 + path.indexOf(q) * 0.05);
+    return best;
+  }
+
+  function searchSpotlightParts(query) {
+    const catalog = (GuitarAssets.listSpotlightPartEntries?.() || [])
+      .filter((entry) => entry.id !== '4conductor');
+    const q = String(query || '').trim();
+    if (!q) {
+      return [...catalog].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+    }
+    return catalog
+      .map((entry) => ({ entry, score: scoreSpotlightQuery(entry, q) }))
+      .filter((row) => Number.isFinite(row.score) && row.score < 500)
+      .sort((a, b) => a.score - b.score || a.entry.name.localeCompare(b.entry.name))
+      .slice(0, 16)
+      .map((row) => row.entry);
+  }
+
+  function schematicKindFromElectricalPreset(presetId) {
+    const map = {
+      pickup: 'pickup-sc',
+      potentiometer: 'pot',
+      trimmer: 'trimmer',
+      'push-pot': 'push-pot',
+      switch: 'switch',
+      power: 'battery',
+      'dc-jack': 'dc-jack',
+      'heater-supply': 'heater-supply',
+      'hv-supply': 'hv-supply',
+      'dual-rail': 'dual-rail',
+      'power-transformer': 'power-transformer',
+      capacitor: 'capacitor',
+      resistor: 'resistor',
+      diode: 'diode',
+      'led-indicator': 'led',
+      inductor: 'inductor',
+      'audio-transformer': 'audio-transformer',
+      relay: 'relay',
+      transistor: 'transistor',
+      jfet: 'jfet',
+      'mosfet-n': 'mosfet-n',
+      'mosfet-p': 'mosfet-p',
+      opamp: 'opamp',
+      'vacuum-tube': 'tube-dual',
+    };
+    return map[String(presetId || '').trim()] || null;
+  }
+
+  function getSchematicSymbolKindForTemplate(template) {
+    if (!template) return 'generic';
+    const fake = { dataset: { assetId: template.id } };
+    let kind = getSchematicSymbolKind(fake);
+    if (kind && kind !== 'generic') return kind;
+    const fromPreset = schematicKindFromElectricalPreset(template.electricalPreset);
+    if (fromPreset) return fromPreset;
+    const sub = template.subtype || '';
+    if (sub === 'singlecoil') return 'pickup-sc';
+    if (sub === 'dualcoil' || sub === '4conductor') return 'pickup-hb';
+    if (sub === 'monoinput') return 'jack-in';
+    if (sub === 'monooutput') return 'jack';
+    if (sub === 'stereooutput') return 'jack-stereo';
+    if (sub === 'trimmer') return 'trimmer';
+    if (sub === 'jfet') return 'jfet';
+    if (sub === 'mosfet-n') return 'mosfet-n';
+    if (sub === 'mosfet-p') return 'mosfet-p';
+    return kind || 'generic';
+  }
+
+  function buildSpotlightSymbolIcon(assetId) {
+    const template = GuitarAssets.getTemplate(assetId);
+    const kind = getSchematicSymbolKindForTemplate(template);
+    const wrap = document.createElement('span');
+    wrap.className = 'part-spotlight-item-symbol';
+    wrap.setAttribute('aria-hidden', 'true');
+    try {
+      const { g } = buildSchematicSymbol(kind, template?.name || '', {
+        terms: (template?.terminals || []).map((spec, idx) => ({
+          idx,
+          role: spec.role || '',
+          label: spec.label || spec.symbol || '',
+          active: true,
+          isGround: !!spec.isGround,
+        })),
+      });
+      // Strip pin dots / labels for a clean glyph chip
+      g.querySelectorAll('circle').forEach((c) => {
+        const r = parseFloat(c.getAttribute('r'));
+        if (Number.isFinite(r) && r <= 2.5) c.remove();
+      });
+      g.querySelector('.schematic-labels')?.remove();
+      const svg = document.createElementNS(SCHEMATIC_NS, 'svg');
+      svg.setAttribute('viewBox', '-26 -26 52 52');
+      svg.setAttribute('focusable', 'false');
+      // Force black strokes on white chip
+      g.querySelectorAll('[stroke]').forEach((el) => {
+        el.setAttribute('stroke', '#111');
+      });
+      g.querySelectorAll('[fill="#111"], [fill="#000"], [fill="black"]').forEach((el) => {
+        /* keep filled arrowheads black */
+      });
+      svg.appendChild(g);
+      wrap.appendChild(svg);
+    } catch (_) {
+      wrap.textContent = '·';
+    }
+    return wrap;
+  }
+
+  function renderPartSpotlightResults() {
+    if (!partSpotlightResults) return;
+    partSpotlightResults.replaceChildren();
+    if (!partSpotlightMatches.length) {
+      const empty = document.createElement('li');
+      empty.className = 'part-spotlight-empty';
+      empty.textContent = partSpotlightInput?.value?.trim()
+        ? 'No matching parts'
+        : 'No parts available';
+      partSpotlightResults.appendChild(empty);
+      return;
+    }
+    partSpotlightMatches.forEach((entry, idx) => {
+      const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.id = `part-spotlight-opt-${idx}`;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `part-spotlight-item${idx === partSpotlightActiveIndex ? ' is-active' : ''}`;
+      btn.dataset.index = String(idx);
+      btn.setAttribute('role', 'option');
+      btn.setAttribute('aria-selected', idx === partSpotlightActiveIndex ? 'true' : 'false');
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'part-spotlight-item-name';
+      nameEl.textContent = entry.name;
+
+      const pathEl = document.createElement('span');
+      pathEl.className = 'part-spotlight-item-path';
+      pathEl.textContent = entry.path;
+
+      btn.appendChild(nameEl);
+      btn.appendChild(pathEl);
+      btn.appendChild(buildSpotlightSymbolIcon(entry.id));
+      btn.addEventListener('mouseenter', () => {
+        partSpotlightActiveIndex = idx;
+        syncPartSpotlightActive();
+      });
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        confirmPartSpotlightSelection(idx);
+      });
+      li.appendChild(btn);
+      partSpotlightResults.appendChild(li);
+    });
+    partSpotlightInput?.setAttribute(
+      'aria-activedescendant',
+      partSpotlightMatches.length ? `part-spotlight-opt-${partSpotlightActiveIndex}` : ''
+    );
+  }
+
+  function syncPartSpotlightActive() {
+    if (!partSpotlightResults) return;
+    partSpotlightResults.querySelectorAll('.part-spotlight-item').forEach((el, idx) => {
+      const on = idx === partSpotlightActiveIndex;
+      el.classList.toggle('is-active', on);
+      el.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    const active = partSpotlightResults.querySelector('.part-spotlight-item.is-active');
+    active?.scrollIntoView({ block: 'nearest' });
+    partSpotlightInput?.setAttribute(
+      'aria-activedescendant',
+      partSpotlightMatches.length ? `part-spotlight-opt-${partSpotlightActiveIndex}` : ''
+    );
+  }
+
+  function refreshPartSpotlightResults() {
+    partSpotlightMatches = searchSpotlightParts(partSpotlightInput?.value || '');
+    partSpotlightActiveIndex = 0;
+    renderPartSpotlightResults();
+  }
+
+  function positionPartSpotlight() {
+    if (!partSpotlight || partSpotlight.classList.contains('hidden')) return;
+    const header = document.querySelector('.app-header');
+    const status = document.querySelector('.status-bar');
+    const top = Math.round(header?.getBoundingClientRect().bottom ?? 0);
+    const bottomEdge = Math.round(status?.getBoundingClientRect().top ?? window.innerHeight);
+    const bottom = Math.max(0, window.innerHeight - bottomEdge);
+    partSpotlight.style.top = `${top}px`;
+    partSpotlight.style.bottom = `${bottom}px`;
+  }
+
+  function openPartSpotlight() {
+    if (!partSpotlight || !partSpotlightInput) return;
+    if (isEditorOpen()) return;
+    if (textCommandOpen) closeTextCommandBox();
+    GuitarAssets.hideContextMenu?.();
+    partSpotlightOpen = true;
+    partSpotlight.classList.remove('hidden');
+    partSpotlight.setAttribute('aria-hidden', 'false');
+    positionPartSpotlight();
+    partSpotlightInput.value = '';
+    refreshPartSpotlightResults();
+    requestAnimationFrame(() => {
+      positionPartSpotlight();
+      partSpotlightInput.focus();
+      partSpotlightInput.select();
+    });
+    setStatus('Find part — type to search, Enter to place');
+  }
+
+  function closePartSpotlight() {
+    if (!partSpotlight) return;
+    partSpotlightOpen = false;
+    partSpotlight.classList.add('hidden');
+    partSpotlight.setAttribute('aria-hidden', 'true');
+    partSpotlightMatches = [];
+    partSpotlightActiveIndex = 0;
+    if (partSpotlightInput) partSpotlightInput.value = '';
+    if (partSpotlightResults) partSpotlightResults.replaceChildren();
+    if (document.activeElement === partSpotlightInput) partSpotlightInput.blur();
+    canvas?.focus?.({ preventScroll: true });
+  }
+
+  function confirmPartSpotlightSelection(index = partSpotlightActiveIndex) {
+    const entry = partSpotlightMatches[index];
+    closePartSpotlight();
+    if (!entry?.id) {
+      setStatus('No matching part');
+      return;
+    }
+    if (activeWorkspacePage === 'panel') setActiveWorkspacePage('electronics');
+    setAssetPlacement(entry.id);
+    setStatus(`Click canvas to place ${entry.name}`);
+  }
+
   function formatDimensionValue(distPx) {
     const grid = getWorkspaceGrid();
     const units = distPx / grid;
@@ -8793,6 +9340,13 @@
 
   let panelCursorSnapActive = false;
 
+  function resetSnapIndicatorToDot() {
+    if (!snapIndicator) return;
+    snapIndicator.style.width = '';
+    snapIndicator.style.height = '';
+    snapIndicator.style.removeProperty('--cad-cross-size');
+  }
+
   function clearPanelCursorSnap() {
     if (!panelCursorSnapActive) {
       document.body.classList.remove('panel-cursor-snapping');
@@ -8800,6 +9354,7 @@
     }
     panelCursorSnapActive = false;
     document.body.classList.remove('panel-cursor-snapping');
+    resetSnapIndicatorToDot();
     if (
       !snappedTerminal
       && !placementMode
@@ -10123,7 +10678,9 @@
         if (!pathHitContainsClient(hit, clientX, clientY)) return;
         const name = isDiodeComponent(comp) ? 'Diode'
           : (isResistorComponent(comp) ? 'Resistor'
-            : (isTransistorComponent(comp) ? 'Transistor' : 'Cap'));
+            : (isJfetComponent(comp) ? 'JFET'
+              : (isMosfetComponent(comp) ? 'MOSFET'
+                : (isTransistorComponent(comp) ? 'Transistor' : 'Cap'))));
         list.push({
           kind: 'cap-lead',
           el: comp,
@@ -10445,7 +11002,10 @@
       panelSnapPoints.forEach(({ el }) => el.classList.remove('is-placement-hover'));
       placementSnapHoverId = null;
     }
-    if (!snappedTerminal) snapIndicator.classList.add('hidden');
+    if (!snappedTerminal) {
+      snapIndicator.classList.add('hidden');
+      resetSnapIndicatorToDot();
+    }
   }
 
   function updatePlacementSnapHover(clientX, clientY) {
@@ -10461,11 +11021,11 @@
     const id = nearest?.el?.dataset.id || null;
     if (id !== placementSnapHoverId) {
       placementSnapHoverId = id;
-      if (nearest) {
-        const screen = worldToClient(nearest.x, nearest.y);
-        showSnapIndicator(screen.x, screen.y);
-      } else if (!snappedTerminal) {
+      // Use panel-snap-point hover chrome only — the filled snap-indicator can inherit
+      // CAD cursor size and read as a large red circle while placing.
+      if (!snappedTerminal) {
         snapIndicator.classList.add('hidden');
+        resetSnapIndicatorToDot();
       }
     }
     return nearest;
@@ -10839,8 +11399,8 @@
   }
 
   function applyUiScalePrefs() {
-    const text = Math.max(0.85, Math.min(1.4, (uiTextScalePct || 100) / 100));
-    const el = Math.max(0.85, Math.min(1.4, (uiElementScalePct || 100) / 100));
+    const text = Math.max(0.85, Math.min(1.4, (uiTextScalePct || UI_TEXT_SCALE_DEFAULT) / 100));
+    const el = Math.max(0.85, Math.min(1.4, (uiElementScalePct || UI_ELEMENT_SCALE_DEFAULT) / 100));
     document.documentElement.style.setProperty('--ui-text-scale', String(text));
     document.documentElement.style.setProperty('--ui-element-scale', String(el));
     if (settingsUiText) settingsUiText.value = String(Math.round(text * 100));
@@ -10951,6 +11511,7 @@
         headerDitherEnabled,
         lightGridEnabled,
         schematicWireColourEnabled,
+        schematicLabelsEnabled,
         wireAutoDelete,
         wirePersist,
       }));
@@ -10973,6 +11534,9 @@
       if (typeof raw.lightGridEnabled === 'boolean') lightGridEnabled = raw.lightGridEnabled;
       if (typeof raw.schematicWireColourEnabled === 'boolean') {
         schematicWireColourEnabled = raw.schematicWireColourEnabled;
+      }
+      if (typeof raw.schematicLabelsEnabled === 'boolean') {
+        schematicLabelsEnabled = raw.schematicLabelsEnabled;
       }
       if (typeof raw.wireAutoDelete === 'boolean') wireAutoDelete = raw.wireAutoDelete;
       if (typeof raw.wirePersist === 'boolean') wirePersist = raw.wirePersist;
@@ -11222,6 +11786,9 @@
       const name = document.createElement('span');
       name.className = 'asset-state-term-label';
       name.textContent = spec.menuLabel || spec.tipLabel || spec.label || `T${termIndex + 1}`;
+      if (spec.contactRole === 'common' || String(spec.className || '').includes('switch-common')) {
+        label.classList.add('is-common');
+      }
       const toggle = document.createElement('input');
       toggle.type = 'checkbox';
       toggle.className = 'asset-state-term-toggle';
@@ -11367,10 +11934,12 @@
     return isToggleSwitchComponent(comp) && getToggleSwitchThrow(comp) === 'on-off';
   }
 
-  /** ON-ON-ON middle: A closes all six poles via commons; B is Type-2 mirror.
-   *  applyComponentStateVisuals syncs terminalActive from bridges after Type wiring. */
-  const TOGGLE_BRIDGES_A = [[2, 0], [2, 4], [3, 1], [3, 5]];
-  const TOGGLE_BRIDGES_B = [[2, 1], [2, 5], [3, 0], [3, 4]];
+  /** ON-ON-ON middle: same-side commons only (real 3-way ON-ON-ON).
+   *  Type 1: left up (T3–T1) + right down (T4–T6).
+   *  Type 2: left down (T3–T5) + right up (T4–T2).
+   *  Up/Down are identical for both types. Actives sync from bridges on apply. */
+  const TOGGLE_BRIDGES_A = [[2, 0], [3, 5]];
+  const TOGGLE_BRIDGES_B = [[2, 4], [3, 1]];
 
   /** Type 1 middle bridges A — Type 2 mirrored B (actives derived from bridges on apply) */
   const TOGGLE_MIDDLE_BRIDGES = {
@@ -11515,6 +12084,11 @@
     marker.hidden = true;
     marker.dataset.tag = tag;
     marker.textContent = tag;
+    // Toggle switches: case G lug only when grounding is on (push-pull pots keep pot case G).
+    el.querySelectorAll('.terminal.switch-case-ground').forEach((term) => {
+      term.hidden = !needsGrounding;
+      term.setAttribute('aria-hidden', needsGrounding ? 'false' : 'true');
+    });
     validateYesGroundConnections();
   }
 
@@ -11522,17 +12096,9 @@
     return el?.dataset?.groundTag === 'YESGROUND';
   }
 
-  /** True only for sleeve/G on an output jack — not HB tip ISGROUND. */
-  function isOutputJackGroundTerminal(term) {
-    if (!term) return false;
-    const host = term.closest?.('.component');
-    if (!isOutputJackComponent(host)) return false;
-    return term.dataset.tag === 'ISGROUND' || getTerminalRole(term) === 'G';
-  }
-
   /**
    * Circuit ground references YESGROUND assets must reach:
-   * output-jack sleeve, DC-jack sleeve, dual-rail G, HV/B+ supply G.
+   * jack sleeve (in/out), DC-jack sleeve, dual-rail G, HV/B+ supply G.
    * HB loom tips marked ISGROUND are not references.
    */
   function isCircuitGroundSourceTerminal(term) {
@@ -11564,7 +12130,7 @@
   function collectOutputJackGroundTerminals() {
     const grounds = new Set();
     components.forEach((comp) => {
-      if (!isOutputJackComponent(comp)) return;
+      if (!isJackComponent(comp)) return;
       comp.querySelectorAll('.terminal').forEach((term) => {
         if (isOutputJackGroundTerminal(term)) grounds.add(term);
       });
@@ -11654,11 +12220,37 @@
     if (!comp) return false;
     if (comp.dataset.assetId === 'mono-output' || comp.dataset.assetId === 'stereo-output') return true;
     const template = GuitarAssets.getTemplate(comp.dataset.assetId);
-    return !!template?.isOutputJack || template?.category === 'jack';
+    if (!template) return false;
+    if (template.isInputJack || template.subtype === 'monoinput' || template.id === 'mono-input') {
+      return false;
+    }
+    return !!template.isOutputJack
+      || template.subtype === 'monooutput'
+      || template.subtype === 'stereooutput'
+      || template.id === 'mono-output'
+      || template.id === 'stereo-output';
+  }
+
+  function isInputJackComponent(comp) {
+    if (!comp) return false;
+    if (comp.dataset.assetId === 'mono-input') return true;
+    const template = GuitarAssets.getTemplate(comp.dataset.assetId);
+    if (!template) return false;
+    return !!template.isInputJack
+      || template.subtype === 'monoinput'
+      || template.id === 'mono-input';
   }
 
   function isJackComponent(comp) {
-    return isOutputJackComponent(comp);
+    return isOutputJackComponent(comp) || isInputJackComponent(comp);
+  }
+
+  /** True only for sleeve/G on a TS/TRS jack — not HB tip ISGROUND. */
+  function isOutputJackGroundTerminal(term) {
+    if (!term) return false;
+    const host = term.closest?.('.component');
+    if (!isJackComponent(host)) return false;
+    return term.dataset.tag === 'ISGROUND' || getTerminalRole(term) === 'G';
   }
 
   /** Ensure jack G terminals always carry ISGROUND. */
@@ -11696,7 +12288,7 @@
     const template = GuitarAssets.getTemplate(comp.dataset.assetId);
     if (!template) return false;
     if (template.category === 'pickup') return true;
-    // 4-conductor loom asset is electrically a humbucker (legacy category: wire)
+    // 4-conductor loom asset (legacy) is electrically a dual-coil pickup
     return template.subtype === '4conductor' || template.id === '4conductor';
   }
 
@@ -11707,7 +12299,7 @@
     return template.subtype === 'singlecoil' || template.id === 'singlecoil';
   }
 
-  /** Electromagnet dimensional config — single-coil and dual-coil pickups (not 4-conductor wire). */
+  /** Electromagnet dimensional config — single-coil and dual-coil pickups. */
   function supportsBobbinDimensionalConfig(comp) {
     return isSingleCoilComponent(comp)
       || (isDualCoilComponent(comp) && isPickupComponent(comp));
@@ -17448,7 +18040,40 @@
     if (!comp) return false;
     const template = GuitarAssets.getTemplate(comp.dataset.assetId);
     if (!template) return false;
+    const sub = template.subtype || template.id;
+    return sub === 'transistor' || sub === 'jfet' || sub === 'mosfet-n' || sub === 'mosfet-p'
+      || template.transistorFamily === 'fet'
+      || template.id === 'transistor' || template.id === 'jfet'
+      || template.id === 'mosfet-n' || template.id === 'mosfet-p';
+  }
+
+  function isBjtComponent(comp) {
+    if (!comp) return false;
+    const template = GuitarAssets.getTemplate(comp.dataset.assetId);
+    if (!template) return false;
     return template.subtype === 'transistor' || template.id === 'transistor';
+  }
+
+  function isFetComponent(comp) {
+    if (!comp) return false;
+    const template = GuitarAssets.getTemplate(comp.dataset.assetId);
+    if (!template) return false;
+    const sub = template.subtype || template.id;
+    return sub === 'jfet' || sub === 'mosfet-n' || sub === 'mosfet-p'
+      || template.transistorFamily === 'fet';
+  }
+
+  function isJfetComponent(comp) {
+    if (!comp) return false;
+    const template = GuitarAssets.getTemplate(comp.dataset.assetId);
+    return template?.subtype === 'jfet' || template?.id === 'jfet';
+  }
+
+  function isMosfetComponent(comp) {
+    if (!comp) return false;
+    const template = GuitarAssets.getTemplate(comp.dataset.assetId);
+    const sub = template?.subtype || template?.id;
+    return sub === 'mosfet-n' || sub === 'mosfet-p';
   }
 
   function isDiodeComponent(comp) {
@@ -17571,6 +18196,8 @@
   function getFlexibleLeadPartName(el) {
     if (isDiodeComponent(el)) return 'Diode';
     if (isResistorComponent(el)) return 'Resistor';
+    if (isJfetComponent(el)) return 'JFET';
+    if (isMosfetComponent(el)) return 'MOSFET';
     if (isTransistorComponent(el)) return 'Transistor';
     return 'Capacitor';
   }
@@ -17782,7 +18409,9 @@
     if (next) el.dataset[def.dataset] = next;
     else delete el.dataset[def.dataset];
     if (key === 'capacitance') updateCapacitorValueLabel(el);
-    if (key === 'hfe') updateTransistorValueLabel(el);
+    if (key === 'hfe' || key === 'idss' || key === 'vgsOff' || key === 'vgsTh' || key === 'rdsOn') {
+      updateTransistorValueLabel(el);
+    }
     if (key === 'resistance' || key === 'powerRating' || key === 'tolerance') {
       if (isResistorComponent(el)) updateResistorValueLabel(el);
     }
@@ -17873,6 +18502,28 @@
     if (el && isPotentiometerComponent(el)) {
       const pct = Math.round(getPotPositionPct(el));
       return `${base} ${getPotTaperCode(el)} · ${pct}%`;
+    }
+    return base;
+  }
+
+  /** Schematic wiring label: value + taper only (no shaft % — that’s analysis UI). */
+  function formatPotResistanceSchematicLabel(raw, el = null) {
+    const n = parseResistanceOhms(raw);
+    let base;
+    if (!Number.isFinite(n) || n < 0) {
+      const fallback = normalizeResistanceOhmsStorage(raw);
+      if (!fallback) return '';
+      const again = parseResistanceOhms(fallback);
+      if (Number.isFinite(again) && again >= 0) {
+        base = formatOhmsAsPotKilohms(again);
+      } else {
+        base = /[ΩΩ]/.test(fallback) ? fallback : `${fallback}Ω`;
+      }
+    } else {
+      base = formatOhmsAsPotKilohms(n);
+    }
+    if (el && isPotentiometerComponent(el)) {
+      return `${base} ${getPotTaperCode(el)}`;
     }
     return base;
   }
@@ -18232,8 +18883,8 @@
     });
   }
 
-  /** Default shaft position: 100% (“10”) — full up / tone open for useful circuit readouts. */
-  const POT_DIAL_DEFAULT_PCT = 100;
+  /** Default shaft position: 50% — mid travel for a neutral schematic read. */
+  const POT_DIAL_DEFAULT_PCT = 50;
   const POT_DIAL_TRAVEL_DEG = 270; // typical pot rotation span
   const POT_DIAL_START_DEG = -135; // 0% at lower-left
 
@@ -18455,7 +19106,7 @@
     if (!text || !def) return '';
 
     if (def.key === 'resistance' && el && isPotentiometerComponent(el)) {
-      return formatPotResistanceVisualLabel(text, el);
+      return formatPotResistanceSchematicLabel(text, el);
     }
 
     if (def.key === 'capacitance') {
@@ -18496,7 +19147,8 @@
     }
     if (!template || template.forceLabelBox) return false;
     const sub = template.subtype || template.id;
-    return sub === 'capacitor' || sub === 'transistor' || sub === 'opamp';
+    return sub === 'capacitor' || sub === 'transistor' || sub === 'jfet'
+      || sub === 'mosfet-n' || sub === 'mosfet-p' || sub === 'opamp';
   }
 
   /** Components menu parts keep dedicated shells; everything else uses the label box. */
@@ -18505,7 +19157,8 @@
     const template = GuitarAssets.getTemplate(comp.dataset.assetId);
     if (template) return templateUsesPartsShell(template);
     const type = comp.dataset.type || '';
-    return type === 'capacitor' || type === 'transistor' || type === 'opamp'
+    return type === 'capacitor' || type === 'transistor' || type === 'jfet'
+      || type === 'mosfet-n' || type === 'mosfet-p' || type === 'opamp'
       || comp.classList.contains('capacitor')
       || comp.classList.contains('transistor')
       || comp.classList.contains('opamp');
@@ -18776,17 +19429,44 @@
       body.textContent = '';
       body.appendChild(label);
     }
-    const { num, unit } = formatHfeParts(getComponentHfe(el));
+    let num = '';
+    let unit = '';
+    let title = '';
+    if (isJfetComponent(el)) {
+      const idss = formatElectricalValueForSchematic(
+        GuitarAssets.ELECTRICAL_VALUE_DEFS.idss,
+        getComponentElectricalValue(el, 'idss'),
+        el,
+      );
+      num = idss || '—';
+      unit = '';
+      title = idss ? `Idss ${idss}` : 'Set Idss / Vp in config';
+    } else if (isMosfetComponent(el)) {
+      const vth = formatElectricalValueForSchematic(
+        GuitarAssets.ELECTRICAL_VALUE_DEFS.vgsTh,
+        getComponentElectricalValue(el, 'vgsTh'),
+        el,
+      );
+      num = vth || '—';
+      unit = '';
+      title = vth ? `Vth ${vth}` : 'Set Vth / Rds(on) in config';
+    } else {
+      ({ num, unit } = formatHfeParts(getComponentHfe(el)));
+      title = num ? `hFE ${num}` : 'Set hFE / β in config';
+      num = num || '—';
+    }
     label.innerHTML = '';
     const numEl = document.createElement('span');
     numEl.className = 'cap-value-num';
-    numEl.textContent = num || '—';
-    const unitEl = document.createElement('span');
-    unitEl.className = 'cap-value-unit';
-    unitEl.textContent = unit;
+    numEl.textContent = num;
     label.appendChild(numEl);
-    label.appendChild(unitEl);
-    label.title = num ? `hFE ${num}` : 'Set hFE / β in config';
+    if (unit) {
+      const unitEl = document.createElement('span');
+      unitEl.className = 'cap-value-unit';
+      unitEl.textContent = unit;
+      label.appendChild(unitEl);
+    }
+    label.title = title;
   }
 
   function formatDiodeVoltageParts(raw, unit = 'V') {
@@ -19430,6 +20110,9 @@
     if (isCapacitorComponent(comp)) ids = ['capacitiveReactance'];
     else if (isOpAmpComponent(comp)) ids = ['nonInvertingGain'];
     else if (isPotentiometerComponent(comp)) ids = ['voltageDivider', 'ohmLaw'];
+    else if (isJfetComponent(comp)) ids = ['jfetSquareLaw', 'ohmLaw'];
+    else if (isMosfetComponent(comp)) ids = ['mosfetSaturation', 'mosfetRdsOn', 'ohmLaw'];
+    else if (isBjtComponent(comp)) ids = ['transistorGain', 'ohmLaw'];
     else if (isInductorComponent(comp)) ids = ['inductiveReactance'];
     else if (supportsBobbinDimensionalConfig(comp)) {
       ids = ['pickupCoilResistance', 'pickupCoilInductance', 'inductiveReactance', 'conductorResistance'];
@@ -19632,10 +20315,12 @@
   const CAP_LEAD_SLACK_MAX = 48;
   const CAP_LEAD_SIDES = ['top', 'bottom'];
   const TRANSISTOR_LEAD_KEYS = ['e', 'b', 'c'];
+  const FET_LEAD_KEYS = ['s', 'g', 'd'];
   /** Screen-px radius to dock a capacitor lead tip onto another terminal. */
   const CAP_TIP_ATTACH_SCREEN_PX = 16;
 
   function getFlexibleLeadKeys(el) {
+    if (isFetComponent(el)) return FET_LEAD_KEYS;
     if (isTransistorComponent(el)) return TRANSISTOR_LEAD_KEYS;
     return CAP_LEAD_SIDES;
   }
@@ -19645,8 +20330,8 @@
   }
 
   function getFlexibleLeadBowSide(which) {
-    if (which === 'top' || which === 'e') return 1;
-    if (which === 'c') return -1;
+    if (which === 'top' || which === 'e' || which === 's') return 1;
+    if (which === 'c' || which === 'd') return -1;
     return -1;
   }
 
@@ -19766,7 +20451,7 @@
     if (compData.capLeadSlackBottom || compData.capLeadSlackRight) {
       setCapLeadSlack(el, 'bottom', compData.capLeadSlackBottom || compData.capLeadSlackRight);
     }
-    ['e', 'b', 'c'].forEach((which) => {
+    ['e', 'b', 'c', 's', 'g', 'd'].forEach((which) => {
       const key = capLeadSlackDatasetKey(which);
       const slack = compData[key];
       if (slack) setCapLeadSlack(el, which, slack);
@@ -22117,18 +22802,19 @@
     const hbWiringRow = document.getElementById('asset-config-hb-wiring-row');
     const hbWiringSelect = document.getElementById('asset-config-hb-wiring');
     const valueHost = ensureAssetConfigValueFields();
-    const isOutput = isOutputJackComponent(comp);
+    const isJack = isJackComponent(comp);
     const isToggle = isToggleSwitchComponent(comp);
     const isPot = isPotentiometerComponent(comp);
     const potTemplate = isPot ? GuitarAssets.getTemplate(comp?.dataset?.assetId) : null;
-    const showPotVariant = !!(isPot && potTemplate?.builtin);
+    const showPotVariant = !!(isPot && potTemplate?.builtin
+      && potTemplate.subtype !== 'trimmer' && potTemplate.id !== 'trimmer');
     const isTubePins = isTubePinConfigComponent(comp);
     const isDiode = isDiodeComponent(comp);
     const isResistor = isResistorComponent(comp);
     const isHb = isDualCoilComponent(comp);
     const valueKeys = new Set(getTemplateValueFieldDefs(comp).map((d) => d.key));
 
-    if (groundRow) groundRow.classList.toggle('hidden', isOutput || !comp);
+    if (groundRow) groundRow.classList.toggle('hidden', isJack || !comp);
     if (switchThrowRow) switchThrowRow.classList.toggle('hidden', !isToggle || !comp);
     if (switchTypeRow) switchTypeRow.classList.toggle('hidden', !isToggle || !comp || isOnOffToggle(comp));
     if (potVariantRow) potVariantRow.classList.toggle('hidden', !showPotVariant || !comp);
@@ -22159,7 +22845,7 @@
     if (tubePinsRow) tubePinsRow.classList.toggle('hidden', !isTubePins || !comp);
     if (diodeMaterialRow) diodeMaterialRow.classList.toggle('hidden', !isDiode || !comp);
     if (resistorTypeRow) resistorTypeRow.classList.toggle('hidden', !isResistor || !comp);
-    if (flashRow) flashRow.classList.toggle('hidden', !isOutput);
+    if (flashRow) flashRow.classList.toggle('hidden', !isJack);
     if (hbWiringRow) hbWiringRow.classList.toggle('hidden', !isHb || !comp);
     if (hbWiringSelect && isHb && comp && document.activeElement !== hbWiringSelect) {
       hbWiringSelect.value = usesHbStockSeriesWiring(comp) ? 'series' : 'leads';
@@ -22183,7 +22869,7 @@
       }
     });
 
-    if (!isOutput && groundToggle && comp) {
+    if (!isJack && groundToggle && comp) {
       groundToggle.checked = componentNeedsGrounding(comp);
     }
     if (isToggle && switchThrowEl && comp) {
@@ -22241,7 +22927,7 @@
       renderResistorTypeInfo(typeId);
     }
     syncAssetConfigFormulaHost(comp);
-    if (isOutput && flashToggle && comp) {
+    if (isJack && flashToggle && comp) {
       flashToggle.checked = componentGroundFlashEnabled(comp);
     }
   }
@@ -22450,7 +23136,7 @@
       if (wire) {
         const stack = layerState[wire.layer].above ? 'front' : 'back';
         const slackHint = wire.slack ? `, slack ${wire.slack}px` : '';
-        const kindHint = wire.wireKind === '4conductor' ? ', 4 Conductor' : '';
+        const kindHint = wire.wireKind === '4conductor' ? ', dual-coil lead' : '';
         setStatus(`Wire L${wire.layer} (${stack}, ${wire.color}${slackHint}${kindHint}) — drag to move · double-click sleeve to bend · tip to re-route · +/- / wheel · Delete`);
       }
       updateAlignBar();
@@ -25511,18 +26197,21 @@
   function showSnapIndicator(x, y, opts = {}) {
     const pulse = opts.pulse !== false;
     const inWorkspace = !!opts.world;
+    const cadCursor = opts.cadCursor === true
+      || (panelCursorSnapActive && activeWorkspacePage === 'panel');
     setSnapIndicatorHost(inWorkspace);
     snapIndicator.classList.remove('hidden');
-    if (pulse) {
+    if (pulse && !cadCursor) {
       snapIndicator.classList.remove('pulse');
       void snapIndicator.offsetWidth;
       snapIndicator.classList.add('pulse');
     } else {
       snapIndicator.classList.remove('pulse');
     }
-    if (!inWorkspace && !(activeWorkspacePage === 'panel' && panelCursorGridSnap)) {
-      snapIndicator.style.width = '';
-      snapIndicator.style.height = '';
+    if (cadCursor) {
+      syncPanelCadCursorSize();
+    } else {
+      resetSnapIndicatorToDot();
     }
     snapIndicator.style.transform = '';
     snapIndicator.style.left = `${x}px`;
@@ -25532,7 +26221,7 @@
   /** Show snap mark at a world pick — measure via DOM so zoom/pan stay grid-true. */
   function showSnapAtWorldPick(pick, opts = {}) {
     if (!pick) return;
-    if (activeWorkspacePage === 'panel' && panelCursorGridSnap) {
+    if (activeWorkspacePage === 'panel' && (panelCursorGridSnap || panelCursorSnapActive)) {
       syncPanelCadCursorSize();
       // CSS grid lines fill [n, n+1] in world px — visual center is n+0.5 (gap grows with zoom)
       let wx = pick.x;
@@ -25543,7 +26232,12 @@
       }
       const screen = worldPointToClient(wx, wy);
       setSnapIndicatorHost(false);
-      showSnapIndicator(screen.x, screen.y, { ...opts, world: false, pulse: opts.pulse === true });
+      showSnapIndicator(screen.x, screen.y, {
+        ...opts,
+        world: false,
+        pulse: opts.pulse === true,
+        cadCursor: true,
+      });
       return;
     }
     const screen = worldToClient(pick.x, pick.y);
@@ -26629,13 +27323,13 @@
   });
 
   settingsUiText?.addEventListener('input', () => {
-    uiTextScalePct = Number(settingsUiText.value) || 100;
+    uiTextScalePct = Number(settingsUiText.value) || UI_TEXT_SCALE_DEFAULT;
     applyUiScalePrefs();
     saveUiPrefs();
   });
 
   settingsUiElement?.addEventListener('input', () => {
-    uiElementScalePct = Number(settingsUiElement.value) || 100;
+    uiElementScalePct = Number(settingsUiElement.value) || UI_ELEMENT_SCALE_DEFAULT;
     applyUiScalePrefs();
     saveUiPrefs();
   });
@@ -26643,7 +27337,7 @@
   document.getElementById('settings-ui-text-reset')?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    uiTextScalePct = 100;
+    uiTextScalePct = UI_TEXT_SCALE_DEFAULT;
     applyUiScalePrefs();
     saveUiPrefs();
   });
@@ -26651,7 +27345,7 @@
   document.getElementById('settings-ui-element-reset')?.addEventListener('click', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    uiElementScalePct = 100;
+    uiElementScalePct = UI_ELEMENT_SCALE_DEFAULT;
     applyUiScalePrefs();
     saveUiPrefs();
   });
@@ -27065,7 +27759,7 @@
 
   document.getElementById('asset-config-grounding')?.addEventListener('change', (e) => {
     const comp = getSingleSelectedComponent();
-    if (!comp || isOutputJackComponent(comp)) return;
+    if (!comp || isJackComponent(comp)) return;
     setComponentGroundTag(comp, !!e.target.checked);
     markProjectDirty();
     if (e.target.checked) {
@@ -28147,7 +28841,7 @@
 
   document.getElementById('asset-config-flashing')?.addEventListener('change', (e) => {
     const comp = getSingleSelectedComponent();
-    if (!comp || !isOutputJackComponent(comp)) return;
+    if (!comp || !isJackComponent(comp)) return;
     setComponentGroundFlash(comp, !!e.target.checked);
     markProjectDirty();
     setStatus(
@@ -28586,8 +29280,11 @@
 
   canvas.addEventListener('wheel', (e) => {
     if (qWheelOpen) return;
-    if (isMouseWheel(e)) {
-      const slackDelta = e.deltaY < 0 ? SLACK_STEP : -SLACK_STEP;
+    const zoomDelta = wheelZoomAxisDelta(e);
+    const zoomMult = wheelZoomMultiplier(e);
+    // Shift = fast zoom — skip slack / rotate so axis remap can't stall the camera
+    if (!e.shiftKey && isMouseWheel(e)) {
+      const slackDelta = (e.deltaY || zoomDelta) < 0 ? SLACK_STEP : -SLACK_STEP;
       if (heldWireId || heldHbConductor || selectedWireGroups.size > 0) {
         if (adjustWireSlackAtPointer(e.clientX, e.clientY, slackDelta)) {
           e.preventDefault();
@@ -28596,7 +29293,7 @@
       }
       if (selectedComponents.size > 0 && canRotateDualCoilWithPointer(e.clientX, e.clientY)) {
         e.preventDefault();
-        const delta = e.deltaY < 0 ? ROT_STEP : -ROT_STEP;
+        const delta = (e.deltaY || zoomDelta) < 0 ? ROT_STEP : -ROT_STEP;
         rotateSelected(delta);
         return;
       }
@@ -28606,10 +29303,11 @@
       }
     }
     e.preventDefault();
+    if (zoomDelta === 0) return;
     if (isMouseWheel(e)) {
-      zoomAtSmooth(e.clientX, e.clientY, e.deltaY);
+      zoomAtSmooth(e.clientX, e.clientY, zoomDelta, zoomMult);
     } else {
-      zoomAtStep(e.clientX, e.clientY, e.deltaY > 0 ? -1 : 1);
+      zoomAtStep(e.clientX, e.clientY, zoomDelta > 0 ? -1 : 1, zoomMult);
     }
   }, { passive: false });
 
@@ -28643,17 +29341,36 @@
 
   document.addEventListener('mousedown', () => { window.__panelShiftSnapArmed = false; }, true);
 
+  // Capture phase: kill OS key-repeat chirps before other handlers return early.
   document.addEventListener('keydown', (e) => {
+    if (!e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (isTypingTarget() || textCommandOpen || partSpotlightOpen || isEditorOpen()) return;
+    e.preventDefault();
+  }, true);
+
+  document.addEventListener('keydown', (e) => {
+    const workspaceKeyUiBlocked = isTypingTarget()
+      || textCommandOpen
+      || partSpotlightOpen
+      || isEditorOpen();
     if (e.key === ' ' || e.code === 'Space') {
-      if (isTypingTarget() || textCommandOpen || isEditorOpen()) return;
-      // Always swallow Space in the workspace so held-key OS beep does not fire
+      if (workspaceKeyUiBlocked) return;
+      // Pan path: always swallow (incl. first press) so Space never scrolls/beeps
       if (canEngageSpacePan(e) || spacePanHeld || spacePanDragging) {
         e.preventDefault();
         if (!e.repeat && canEngageSpacePan(e)) setSpacePanHeld(true);
         return;
       }
+      // Over buttons/chrome: allow first Space to activate; swallow repeats only
+      if (e.repeat) e.preventDefault();
+      return;
     }
     if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (partSpotlightOpen) {
+        e.preventDefault();
+        confirmPartSpotlightSelection();
+        return;
+      }
       if (textCommandOpen) {
         e.preventDefault();
         runMatchedTextCommand();
@@ -28699,6 +29416,11 @@
       openTextCommandBox(lastPointerX, lastPointerY);
       return;
     }
+    if (e.key === 'Tab' && partSpotlightOpen) {
+      e.preventDefault();
+      confirmPartSpotlightSelection();
+      return;
+    }
     if (e.key === 'Tab' && textCommandOpen) {
       e.preventDefault();
       const match = findNearestTextCommand(textCommandInput?.value || '');
@@ -28714,12 +29436,12 @@
       && !e.metaKey
       && !e.altKey
       && !textCommandOpen
+      && !partSpotlightOpen
       && !isTypingTarget()
       && !isEditorOpen()
-      && activeWorkspacePage === 'panel'
     ) {
       e.preventDefault();
-      togglePanelCursorGridSnap();
+      openPartSpotlight();
       return;
     }
     // Shift toggles panel grid snap (Rhino-style); Shift+digit still switches layers above
@@ -28731,6 +29453,7 @@
         && !e.metaKey
         && !e.altKey
         && !textCommandOpen
+        && !partSpotlightOpen
         && !isTypingTarget()
         && !isEditorOpen()
         && activeWorkspacePage === 'panel'
@@ -28741,7 +29464,7 @@
     }
 
     const mod = e.ctrlKey || e.metaKey;
-    if (!isTypingTarget() && !textCommandOpen && !isEditorOpen()) {
+    if (!isTypingTarget() && !textCommandOpen && !partSpotlightOpen && !isEditorOpen()) {
       if (mod && (e.key === 's' || e.key === 'S')) {
         e.preventDefault();
         handleProjectSaveClick();
@@ -28787,6 +29510,7 @@
 
     if (e.key === 'q' || e.key === 'Q') {
       if (!canUseAssetStateHotkeys()) return;
+      e.preventDefault();
       if (e.repeat) return;
       qKeyHeld = true;
       qOpenedWheel = false;
@@ -28795,8 +29519,9 @@
       return;
     }
     if ((e.key === 'e' || e.key === 'E') && canUseAssetStateHotkeys()) {
+      e.preventDefault();
       if (e.repeat) return;
-      if (tryCycleSelectedAssetState(1)) e.preventDefault();
+      tryCycleSelectedAssetState(1);
       return;
     }
     if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -28894,7 +29619,8 @@
       && !e.ctrlKey && !e.metaKey && !e.altKey
       && !isTypingTarget()
       && !isEditorOpen()
-      && !textCommandOpen) {
+      && !textCommandOpen
+      && !partSpotlightOpen) {
       // Pot dial (and similar) keep their own arrow handling when focused
       if (document.activeElement?.closest?.('.pot-dial, [role="slider"]')) return;
       if (activeWorkspacePage === 'panel') {
@@ -28918,6 +29644,12 @@
       if (marqueeStart) {
         e.preventDefault();
         cancelMarqueeInteraction();
+        return;
+      }
+      if (partSpotlightOpen) {
+        e.preventDefault();
+        closePartSpotlight();
+        setStatus('Ready');
         return;
       }
       if (textCommandOpen) {
@@ -29046,6 +29778,20 @@
   const DEMO_SSS_PROJECT_NAME = 'SSS Demo';
   const DEMO_SSS2_PROJECT_ID = 'demo-sss-2';
   const DEMO_SSS2_PROJECT_NAME = 'HSS Demo';
+  const DEMO_STEP1_PROJECT_ID = 'demo-step1';
+  const DEMO_STEP1_PROJECT_NAME = 'Step 1 · SC + Out';
+  const DEMO_STEP2_PROJECT_ID = 'demo-step2';
+  const DEMO_STEP2_PROJECT_NAME = 'Step 2 · SC + Vol + Out';
+  const DEMO_STEP3_PROJECT_ID = 'demo-step3';
+  const DEMO_STEP3_PROJECT_NAME = 'Step 3 · 2× SC + Vol + Out';
+  const DEMO_STEP4_PROJECT_ID = 'demo-step4';
+  const DEMO_STEP4_PROJECT_NAME = 'Step 4 · 2× SC + Vol + Tone + Out';
+  const DEMO_STEP5_PROJECT_ID = 'demo-step5';
+  const DEMO_STEP5_PROJECT_NAME = 'Step 5 · 3× SC · 3-way N/M/B · Vol + Tone + Out';
+  const DEMO_STEP6_PROJECT_ID = 'demo-step6';
+  const DEMO_STEP6_PROJECT_NAME = 'Step 6 · 3× SC · 3-way + Bridge On · Vol + Tone + Out';
+  const DEMO_STRAT_PROJECT_ID = 'demo-strat';
+  const DEMO_STRAT_PROJECT_NAME = 'Strat · SSS · 3-way · 1V2T';
 
   let projectRecords = [];
   let activeProjectId = null;
@@ -29062,7 +29808,15 @@
   const projectDetailsNameEl = () => document.getElementById('project-details-name');
 
   function isDemoProjectId(id) {
-    return id === DEMO_SSS_PROJECT_ID || id === DEMO_SSS2_PROJECT_ID;
+    return id === DEMO_SSS_PROJECT_ID
+      || id === DEMO_SSS2_PROJECT_ID
+      || id === DEMO_STEP1_PROJECT_ID
+      || id === DEMO_STEP2_PROJECT_ID
+      || id === DEMO_STEP3_PROJECT_ID
+      || id === DEMO_STEP4_PROJECT_ID
+      || id === DEMO_STEP5_PROJECT_ID
+      || id === DEMO_STEP6_PROJECT_ID
+      || id === DEMO_STRAT_PROJECT_ID;
   }
 
   function isActiveDemoProject() {
@@ -29071,6 +29825,13 @@
 
   function demoProjectNameForId(id) {
     if (id === DEMO_SSS2_PROJECT_ID) return DEMO_SSS2_PROJECT_NAME;
+    if (id === DEMO_STEP1_PROJECT_ID) return DEMO_STEP1_PROJECT_NAME;
+    if (id === DEMO_STEP2_PROJECT_ID) return DEMO_STEP2_PROJECT_NAME;
+    if (id === DEMO_STEP3_PROJECT_ID) return DEMO_STEP3_PROJECT_NAME;
+    if (id === DEMO_STEP4_PROJECT_ID) return DEMO_STEP4_PROJECT_NAME;
+    if (id === DEMO_STEP5_PROJECT_ID) return DEMO_STEP5_PROJECT_NAME;
+    if (id === DEMO_STEP6_PROJECT_ID) return DEMO_STEP6_PROJECT_NAME;
+    if (id === DEMO_STRAT_PROJECT_ID) return DEMO_STRAT_PROJECT_NAME;
     return DEMO_SSS_PROJECT_NAME;
   }
 
@@ -29183,6 +29944,10 @@
         inductance: el.dataset.inductance || '',
         voltage: el.dataset.voltage || '',
         hfe: el.dataset.hfe || '',
+        idss: el.dataset.idss || '',
+        vgsOff: el.dataset.vgsOff || '',
+        vgsTh: el.dataset.vgsTh || '',
+        rdsOn: el.dataset.rdsOn || '',
         mu: el.dataset.mu || '',
         heaterVoltage: el.dataset.heaterVoltage || '',
         plateDissipation: el.dataset.plateDissipation || '',
@@ -29234,6 +29999,9 @@
       capLeadSlackE: parseFloat(el.dataset.capLeadSlackE) || 0,
       capLeadSlackB: parseFloat(el.dataset.capLeadSlackB) || 0,
       capLeadSlackC: parseFloat(el.dataset.capLeadSlackC) || 0,
+      capLeadSlackS: parseFloat(el.dataset.capLeadSlackS) || 0,
+      capLeadSlackG: parseFloat(el.dataset.capLeadSlackG) || 0,
+      capLeadSlackD: parseFloat(el.dataset.capLeadSlackD) || 0,
       capTip0Left: el.dataset.capTip0Left || '',
       capTip0Top: el.dataset.capTip0Top || '',
       capTip1Left: el.dataset.capTip1Left || '',
@@ -29449,7 +30217,10 @@
         applyBobbinGeometryFromRecord(el, compData);
         applyHbLeadData(el, compData);
         applyAssetWireData(el, compData);
-        if (template.isOutputJack || el.dataset.assetId === 'mono-output' || el.dataset.assetId === 'stereo-output') {
+        if (template.isOutputJack || template.isInputJack
+          || el.dataset.assetId === 'mono-output'
+          || el.dataset.assetId === 'mono-input'
+          || el.dataset.assetId === 'stereo-output') {
           setComponentGroundFlash(el, compData.groundFlash !== false);
         }
         if (compData.instanceStates?.length) {
@@ -29990,7 +30761,10 @@
       applyBobbinGeometryFromRecord(el, compData);
       applyHbLeadData(el, compData);
       applyAssetWireData(el, compData);
-      if (template.isOutputJack || el.dataset.assetId === 'mono-output' || el.dataset.assetId === 'stereo-output') {
+      if (template.isOutputJack || template.isInputJack
+        || el.dataset.assetId === 'mono-output'
+        || el.dataset.assetId === 'mono-input'
+        || el.dataset.assetId === 'stereo-output') {
         setComponentGroundFlash(el, compData.groundFlash !== false);
       }
       if (compData.instanceStates?.length) {
@@ -30165,6 +30939,78 @@
       itemsEl.appendChild(btn);
     });
 
+    // Temporary Strat SSS 1V2T renderer test
+    const stratBtn = document.createElement('button');
+    stratBtn.type = 'button';
+    stratBtn.className = 'project-switcher-item is-demo';
+    if (activeProjectId === DEMO_STRAT_PROJECT_ID) stratBtn.classList.add('is-active');
+    stratBtn.textContent = DEMO_STRAT_PROJECT_NAME;
+    stratBtn.title = 'Temporary Strat SSS: 3× SC · blade · 1 vol · neck+mid tones (not permanently saved)';
+    stratBtn.setAttribute('role', 'listitem');
+    stratBtn.addEventListener('click', () => switchToProject(DEMO_STRAT_PROJECT_ID));
+    itemsEl.appendChild(stratBtn);
+
+    // Temporary Step demos (schematic ladder)
+    const step6Btn = document.createElement('button');
+    step6Btn.type = 'button';
+    step6Btn.className = 'project-switcher-item is-demo';
+    if (activeProjectId === DEMO_STEP6_PROJECT_ID) step6Btn.classList.add('is-active');
+    step6Btn.textContent = DEMO_STEP6_PROJECT_NAME;
+    step6Btn.title = 'Temporary Step 6: 3-way N/M/B · bridge always-on · 1V1T (not permanently saved)';
+    step6Btn.setAttribute('role', 'listitem');
+    step6Btn.addEventListener('click', () => switchToProject(DEMO_STEP6_PROJECT_ID));
+    itemsEl.appendChild(step6Btn);
+
+    const step5Btn = document.createElement('button');
+    step5Btn.type = 'button';
+    step5Btn.className = 'project-switcher-item is-demo';
+    if (activeProjectId === DEMO_STEP5_PROJECT_ID) step5Btn.classList.add('is-active');
+    step5Btn.textContent = DEMO_STEP5_PROJECT_NAME;
+    step5Btn.title = 'Temporary Step 5: three SC · 3-way N/M/B · vol + tone · mono out (not permanently saved)';
+    step5Btn.setAttribute('role', 'listitem');
+    step5Btn.addEventListener('click', () => switchToProject(DEMO_STEP5_PROJECT_ID));
+    itemsEl.appendChild(step5Btn);
+
+    const step4Btn = document.createElement('button');
+    step4Btn.type = 'button';
+    step4Btn.className = 'project-switcher-item is-demo';
+    if (activeProjectId === DEMO_STEP4_PROJECT_ID) step4Btn.classList.add('is-active');
+    step4Btn.textContent = DEMO_STEP4_PROJECT_NAME;
+    step4Btn.title = 'Temporary Step 4: two SC + volume + tone + mono out (not permanently saved)';
+    step4Btn.setAttribute('role', 'listitem');
+    step4Btn.addEventListener('click', () => switchToProject(DEMO_STEP4_PROJECT_ID));
+    itemsEl.appendChild(step4Btn);
+
+    const step3Btn = document.createElement('button');
+    step3Btn.type = 'button';
+    step3Btn.className = 'project-switcher-item is-demo';
+    if (activeProjectId === DEMO_STEP3_PROJECT_ID) step3Btn.classList.add('is-active');
+    step3Btn.textContent = DEMO_STEP3_PROJECT_NAME;
+    step3Btn.title = 'Temporary Step 3: two single coils + volume + mono out (not permanently saved)';
+    step3Btn.setAttribute('role', 'listitem');
+    step3Btn.addEventListener('click', () => switchToProject(DEMO_STEP3_PROJECT_ID));
+    itemsEl.appendChild(step3Btn);
+
+    const step2Btn = document.createElement('button');
+    step2Btn.type = 'button';
+    step2Btn.className = 'project-switcher-item is-demo';
+    if (activeProjectId === DEMO_STEP2_PROJECT_ID) step2Btn.classList.add('is-active');
+    step2Btn.textContent = DEMO_STEP2_PROJECT_NAME;
+    step2Btn.title = 'Temporary Step 2: SC + volume + mono out (not permanently saved)';
+    step2Btn.setAttribute('role', 'listitem');
+    step2Btn.addEventListener('click', () => switchToProject(DEMO_STEP2_PROJECT_ID));
+    itemsEl.appendChild(step2Btn);
+
+    const step1Btn = document.createElement('button');
+    step1Btn.type = 'button';
+    step1Btn.className = 'project-switcher-item is-demo';
+    if (activeProjectId === DEMO_STEP1_PROJECT_ID) step1Btn.classList.add('is-active');
+    step1Btn.textContent = DEMO_STEP1_PROJECT_NAME;
+    step1Btn.title = 'Temporary Step 1: one single coil + mono out (not permanently saved)';
+    step1Btn.setAttribute('role', 'listitem');
+    step1Btn.addEventListener('click', () => switchToProject(DEMO_STEP1_PROJECT_ID));
+    itemsEl.appendChild(step1Btn);
+
     // Temporary SSS demo sits under saved projects
     const demoBtn = document.createElement('button');
     demoBtn.type = 'button';
@@ -30175,6 +31021,23 @@
     demoBtn.setAttribute('role', 'listitem');
     demoBtn.addEventListener('click', () => switchToProject(DEMO_SSS_PROJECT_ID));
     itemsEl.appendChild(demoBtn);
+
+    // Rebuild / open the commons-aware SSS as saved project “froge”
+    const frogeBtn = document.createElement('button');
+    frogeBtn.type = 'button';
+    frogeBtn.className = 'project-switcher-item';
+    const frogeRec = projectRecords.find((p) => p && p.name === 'froge');
+    if (frogeRec && frogeRec.id === activeProjectId) frogeBtn.classList.add('is-active');
+    frogeBtn.textContent = frogeRec ? 'froge' : 'froge (create SSS)';
+    frogeBtn.title = frogeRec
+      ? 'Open saved commons-aware SSS project “froge” (Shift-click to recreate)'
+      : 'Create saved SSS project “froge” (commons-aware wiring)';
+    frogeBtn.setAttribute('role', 'listitem');
+    frogeBtn.addEventListener('click', (e) => {
+      if (e.shiftKey || !frogeRec) createFrogeSssProject();
+      else switchToProject(frogeRec.id);
+    });
+    itemsEl.appendChild(frogeBtn);
   }
 
   function beginBugtestRecordingQuiet() {
@@ -30202,6 +31065,83 @@
     projectDirty = false;
     updateProjectSwitcherUI();
     setStatus(`Opened temporary “${DEMO_SSS_PROJECT_NAME}”`);
+  }
+
+  function openStep1DemoProject() {
+    activeProjectId = DEMO_STEP1_PROJECT_ID;
+    projectName = DEMO_STEP1_PROJECT_NAME;
+    projectDirty = false;
+    persistProjectRecords();
+    seedStep1Demo({ temporary: true });
+    projectDirty = false;
+    updateProjectSwitcherUI();
+    setStatus(`Opened temporary “${DEMO_STEP1_PROJECT_NAME}”`);
+  }
+
+  function openStep2DemoProject() {
+    activeProjectId = DEMO_STEP2_PROJECT_ID;
+    projectName = DEMO_STEP2_PROJECT_NAME;
+    projectDirty = false;
+    persistProjectRecords();
+    seedStep2Demo({ temporary: true });
+    projectDirty = false;
+    updateProjectSwitcherUI();
+    setStatus(`Opened temporary “${DEMO_STEP2_PROJECT_NAME}”`);
+  }
+
+  function openStep3DemoProject() {
+    activeProjectId = DEMO_STEP3_PROJECT_ID;
+    projectName = DEMO_STEP3_PROJECT_NAME;
+    projectDirty = false;
+    persistProjectRecords();
+    seedStep3Demo({ temporary: true });
+    projectDirty = false;
+    updateProjectSwitcherUI();
+    setStatus(`Opened temporary “${DEMO_STEP3_PROJECT_NAME}”`);
+  }
+
+  function openStep4DemoProject() {
+    activeProjectId = DEMO_STEP4_PROJECT_ID;
+    projectName = DEMO_STEP4_PROJECT_NAME;
+    projectDirty = false;
+    persistProjectRecords();
+    seedStep4Demo({ temporary: true });
+    projectDirty = false;
+    updateProjectSwitcherUI();
+    setStatus(`Opened temporary “${DEMO_STEP4_PROJECT_NAME}”`);
+  }
+
+  function openStep5DemoProject() {
+    activeProjectId = DEMO_STEP5_PROJECT_ID;
+    projectName = DEMO_STEP5_PROJECT_NAME;
+    projectDirty = false;
+    persistProjectRecords();
+    seedStep5Demo({ temporary: true });
+    projectDirty = false;
+    updateProjectSwitcherUI();
+    setStatus(`Opened temporary “${DEMO_STEP5_PROJECT_NAME}”`);
+  }
+
+  function openStratDemoProject() {
+    activeProjectId = DEMO_STRAT_PROJECT_ID;
+    projectName = DEMO_STRAT_PROJECT_NAME;
+    projectDirty = false;
+    persistProjectRecords();
+    seedStratSssDemo({ temporary: true });
+    projectDirty = false;
+    updateProjectSwitcherUI();
+    setStatus(`Opened temporary “${DEMO_STRAT_PROJECT_NAME}”`);
+  }
+
+  function openStep6DemoProject() {
+    activeProjectId = DEMO_STEP6_PROJECT_ID;
+    projectName = DEMO_STEP6_PROJECT_NAME;
+    projectDirty = false;
+    persistProjectRecords();
+    seedStep6Demo({ temporary: true });
+    projectDirty = false;
+    updateProjectSwitcherUI();
+    setStatus(`Opened temporary “${DEMO_STEP6_PROJECT_NAME}”`);
   }
 
   function waitMs(ms) {
@@ -30433,6 +31373,62 @@
         writeActiveProjectSnapshot();
       }
       openSssDemoProject();
+      return;
+    }
+
+    if (projectId === DEMO_STRAT_PROJECT_ID) {
+      if (projectDirty && activeProjectId && projectName.trim() && !isActiveDemoProject()) {
+        writeActiveProjectSnapshot();
+      }
+      openStratDemoProject();
+      return;
+    }
+
+    if (projectId === DEMO_STEP1_PROJECT_ID) {
+      if (projectDirty && activeProjectId && projectName.trim() && !isActiveDemoProject()) {
+        writeActiveProjectSnapshot();
+      }
+      openStep1DemoProject();
+      return;
+    }
+
+    if (projectId === DEMO_STEP2_PROJECT_ID) {
+      if (projectDirty && activeProjectId && projectName.trim() && !isActiveDemoProject()) {
+        writeActiveProjectSnapshot();
+      }
+      openStep2DemoProject();
+      return;
+    }
+
+    if (projectId === DEMO_STEP3_PROJECT_ID) {
+      if (projectDirty && activeProjectId && projectName.trim() && !isActiveDemoProject()) {
+        writeActiveProjectSnapshot();
+      }
+      openStep3DemoProject();
+      return;
+    }
+
+    if (projectId === DEMO_STEP4_PROJECT_ID) {
+      if (projectDirty && activeProjectId && projectName.trim() && !isActiveDemoProject()) {
+        writeActiveProjectSnapshot();
+      }
+      openStep4DemoProject();
+      return;
+    }
+
+    if (projectId === DEMO_STEP5_PROJECT_ID) {
+      if (projectDirty && activeProjectId && projectName.trim() && !isActiveDemoProject()) {
+        writeActiveProjectSnapshot();
+      }
+      openStep5DemoProject();
+      return;
+    }
+
+    if (projectId === DEMO_STEP6_PROJECT_ID) {
+      if (projectDirty && activeProjectId && projectName.trim() && !isActiveDemoProject()) {
+        writeActiveProjectSnapshot();
+      }
+      openStep6DemoProject();
       return;
     }
 
@@ -30958,27 +31954,169 @@
     }
   }
 
+  /**
+   * Schematic symbol catalog — IEEE 315 / ANSI Y32.2 oriented for guitar,
+   * pedal, and amp electronics. Includes forward kinds not yet placed as assets
+   * so the renderer stays ahead of the parts library.
+   */
+  const SCHEMATIC_SYMBOL_CATALOG = {
+    // Sources / pickups
+    'pickup-sc': { family: 'guitar', label: 'Single-coil pickup' },
+    'pickup-hb': { family: 'guitar', label: 'Dual-coil pickup' },
+    'pickup-4c': { family: 'guitar', label: 'Dual-coil pickup (legacy)' },
+    battery: { family: 'pedal', label: 'Battery / 9 V cell' },
+    'dc-jack': { family: 'pedal', label: 'DC barrel jack' },
+    'heater-supply': { family: 'amp', label: 'Heater secondary' },
+    'hv-supply': { family: 'amp', label: 'B+ supply' },
+    'dual-rail': { family: 'pedal', label: 'Dual-rail supply' },
+    'power-transformer': { family: 'amp', label: 'Power transformer' },
+    // Selectors
+    switch: { family: 'guitar', label: 'DPDT toggle' },
+    'switch-spst': { family: 'guitar', label: 'SPST toggle' },
+    footswitch: { family: 'pedal', label: 'SPDT footswitch' },
+    'footswitch-3pdt': { family: 'pedal', label: '3PDT footswitch (true bypass)' },
+    'rotary-switch': { family: 'guitar', label: 'Rotary switch' },
+    // Controls
+    pot: { family: 'guitar', label: 'Potentiometer' },
+    'push-pot': { family: 'guitar', label: 'Push/pull pot' },
+    trimmer: { family: 'pedal', label: 'Trimmer potentiometer' },
+    // Passives
+    capacitor: { family: 'shared', label: 'Capacitor (non-polar)' },
+    'capacitor-polar': { family: 'pedal', label: 'Electrolytic capacitor' },
+    resistor: { family: 'shared', label: 'Resistor' },
+    inductor: { family: 'shared', label: 'Inductor' },
+    choke: { family: 'amp', label: 'Filter choke' },
+    fuse: { family: 'amp', label: 'Fuse' },
+    // Semiconductors
+    diode: { family: 'shared', label: 'Diode' },
+    led: { family: 'pedal', label: 'LED' },
+    'bridge-rectifier': { family: 'amp', label: 'Bridge rectifier' },
+    transistor: { family: 'pedal', label: 'BJT' },
+    jfet: { family: 'pedal', label: 'JFET' },
+    'mosfet-n': { family: 'pedal', label: 'N-channel MOSFET' },
+    'mosfet-p': { family: 'pedal', label: 'P-channel MOSFET' },
+    opamp: { family: 'pedal', label: 'Op-amp' },
+    optocoupler: { family: 'pedal', label: 'Optocoupler' },
+    ldr: { family: 'pedal', label: 'LDR / photocell' },
+    neon: { family: 'amp', label: 'Neon lamp' },
+    // Tubes / transformers / transducers
+    'tube-dual': { family: 'amp', label: 'Dual triode' },
+    'tube-power': { family: 'amp', label: 'Power pentode / beam' },
+    'tube-rectifier': { family: 'amp', label: 'Rectifier tube' },
+    'audio-transformer': { family: 'amp', label: 'Audio / output transformer' },
+    speaker: { family: 'amp', label: 'Loudspeaker' },
+    piezo: { family: 'guitar', label: 'Piezo transducer' },
+    relay: { family: 'pedal', label: 'Relay' },
+    // Jacks / grounds
+    jack: { family: 'shared', label: 'Output jack (TS)' },
+    'jack-in': { family: 'pedal', label: 'Input jack (TS)' },
+    'jack-stereo': { family: 'shared', label: 'TRS jack' },
+    'chassis-ground': { family: 'shared', label: 'Chassis / frame ground' },
+    'earth-ground': { family: 'amp', label: 'Earth / safety ground' },
+    generic: { family: 'shared', label: 'Generic block' },
+  };
+
+  /**
+   * Layout profiles — same router/math, different density + switch conventions.
+   * Inferred from parts on the island (not a second engine).
+   */
+  const SCHEMATIC_CIRCUIT_PROFILES = {
+    guitar: {
+      id: 'guitar',
+      // Compact Strat/SSS spacing — readable without oversized SC↔Out gaps
+      colGap: 120,
+      rowGap: 48,
+      pickupRowGap: 40,
+      switchStubLen: 12,
+      switchLabelDx: 6,
+      switchLabelFont: 6.5,
+      switchCaseG: 'rail',
+      laneSep: 12,
+    },
+    pedal: {
+      id: 'pedal',
+      colGap: 160,
+      rowGap: 32,
+      pickupRowGap: 40,
+      switchStubLen: 10,
+      switchLabelDx: 5,
+      switchLabelFont: 6.5,
+      switchCaseG: 'rail',
+      laneSep: 10,
+    },
+    amp: {
+      id: 'amp',
+      colGap: 190,
+      rowGap: 40,
+      pickupRowGap: 48,
+      switchStubLen: 11,
+      switchLabelDx: 6,
+      switchLabelFont: 6.5,
+      switchCaseG: 'rail',
+      laneSep: 11,
+    },
+  };
+
+  function inferSchematicCircuitType(nodes) {
+    let guitar = 0;
+    let pedal = 0;
+    let amp = 0;
+    (nodes || []).forEach((n) => {
+      const fam = SCHEMATIC_SYMBOL_CATALOG[n.kind]?.family;
+      if (fam === 'guitar') guitar += 1;
+      else if (fam === 'pedal') pedal += 1;
+      else if (fam === 'amp') amp += 1;
+    });
+    if (amp && amp >= pedal && amp >= guitar) return 'amp';
+    if (pedal > guitar) return 'pedal';
+    return 'guitar';
+  }
+
+  function getSchematicCircuitProfile(nodesOrType) {
+    const id = typeof nodesOrType === 'string'
+      ? nodesOrType
+      : inferSchematicCircuitType(nodesOrType);
+    return SCHEMATIC_CIRCUIT_PROFILES[id] || SCHEMATIC_CIRCUIT_PROFILES.guitar;
+  }
+
   function getSchematicSymbolKind(comp) {
     const id = comp?.dataset?.assetId || '';
     const template = GuitarAssets.getTemplate(id);
     const subtype = template?.subtype || id;
     if (subtype === 'singlecoil' || id === 'singlecoil') return 'pickup-sc';
     if (subtype === 'dualcoil' || id === 'dualcoil') return 'pickup-hb';
-    if (subtype === '4conductor' || id === '4conductor') return 'pickup-4c';
+    if (subtype === '4conductor' || id === '4conductor') return 'pickup-hb';
     if (subtype === 'push-pot-on-on' || id === 'push-pot-on-on' || !!template?.pushPull) {
       return 'push-pot';
     }
     if (subtype === 'potentiometer' || id === 'potentiometer') return 'pot';
-    if (subtype === 'capacitor' || id === 'capacitor') return 'capacitor';
+    if (subtype === 'trimmer' || id === 'trimmer') return 'trimmer';
+    if (subtype === 'capacitor' || id === 'capacitor') {
+      const polar = comp?.dataset?.capPolarized === '1'
+        || /electrolytic|polar/i.test(String(comp?.dataset?.capType || template?.capType || ''));
+      return polar ? 'capacitor-polar' : 'capacitor';
+    }
     if (subtype === 'diode' || id === 'diode') return 'diode';
     if (subtype === 'resistor' || id === 'resistor') return 'resistor';
-    if (subtype === 'transistor' || id === 'transistor') return 'transistor';
+    if (subtype === 'jfet' || id === 'jfet') return 'jfet';
+    if (subtype === 'mosfet-n' || id === 'mosfet-n') return 'mosfet-n';
+    if (subtype === 'mosfet-p' || id === 'mosfet-p') return 'mosfet-p';
+    if (subtype === 'transistor' || id === 'transistor') {
+      const t = String(comp?.dataset?.transistorType || template?.transistorType || '').toLowerCase();
+      if (t === 'jfet' || t === 'njfet' || t === 'pjfet') return 'jfet';
+      if (t === 'nmos' || t === 'mosfet-n' || t === 'n-mosfet') return 'mosfet-n';
+      if (t === 'pmos' || t === 'mosfet-p' || t === 'p-mosfet') return 'mosfet-p';
+      return 'transistor';
+    }
     if (subtype === 'opamp' || id === 'opamp') return 'opamp';
     if (subtype === 'vacuum-tube' || id === 'vacuum-tube'
       || subtype === 'tube-generic' || id === 'tube-generic'
       || subtype === 'tube-12ax7' || id === 'tube-12ax7'
       || subtype === 'tube-6v6' || id === 'tube-6v6') {
       const pinout = comp?.dataset?.tubePinout;
+      if (pinout === '5y3' || pinout === 'gz34' || pinout === 'ez81' || pinout === 'rectifier') {
+        return 'tube-rectifier';
+      }
       if (pinout === '6v6' || pinout === '6v6gt' || pinout === '6l6gc'
         || pinout === 'el34' || pinout === 'kt88' || pinout === 'el84') {
         return 'tube-power';
@@ -30989,7 +32127,8 @@
       if (id === 'tube-6v6' || subtype === 'tube-6v6') return 'tube-power';
       return 'tube-dual';
     }
-    if (subtype === 'ninevolt' || id === 'ninevolt') return 'supply';
+    if (subtype === 'ninevolt' || id === 'ninevolt') return 'battery';
+    if (subtype === 'chassis-ground' || id === 'chassis-ground') return 'chassis-ground';
     if (subtype === 'dc-jack' || id === 'dc-jack') return 'dc-jack';
     if (subtype === 'heater-supply' || id === 'heater-supply') return 'heater-supply';
     if (subtype === 'hv-supply' || id === 'hv-supply') return 'hv-supply';
@@ -31001,10 +32140,11 @@
     if (subtype === 'relay' || id === 'relay') return 'relay';
     if (subtype === 'footswitch' || id === 'footswitch') return 'footswitch';
     if (subtype === 'monooutput' || id === 'mono-output') return 'jack';
+    if (subtype === 'monoinput' || id === 'mono-input') return 'jack-in';
     if (subtype === 'stereooutput' || id === 'stereo-output') return 'jack-stereo';
+    if (subtype === 'spst-on-off' || id === 'spst-on-off') return 'switch-spst';
     if (subtype === 'dpdt' || subtype === 'dpdt-on-off-on' || subtype === 'dpdt-on-on'
-      || subtype === 'spst-on-off'
-      || id === 'dpdt' || id === 'dpdt-on-off-on' || id === 'dpdt-on-on' || id === 'spst-on-off') {
+      || id === 'dpdt' || id === 'dpdt-on-off-on' || id === 'dpdt-on-on') {
       return 'switch';
     }
     return 'generic';
@@ -31021,22 +32161,42 @@
       'hv-supply': 1,
       'dual-rail': 1,
       'power-transformer': 1,
+      'chassis-ground': 1,
+      'earth-ground': 1,
       pot: 2,
       'push-pot': 2,
+      trimmer: 2,
       capacitor: 3,
+      'capacitor-polar': 3,
       diode: 3,
       led: 3,
       resistor: 3,
       inductor: 3,
+      choke: 3,
+      fuse: 3,
       'audio-transformer': 3,
       transistor: 3,
+      jfet: 3,
+      'mosfet-n': 3,
+      'mosfet-p': 3,
       opamp: 3,
+      optocoupler: 3,
+      ldr: 3,
+      neon: 3,
+      'bridge-rectifier': 3,
       relay: 3,
       'tube-dual': 3,
       'tube-power': 3,
-      switch: 4,
-      footswitch: 4,
+      'tube-rectifier': 3,
+      speaker: 4,
+      piezo: 4,
+      switch: 2,
+      'switch-spst': 2,
+      footswitch: 2,
+      'footswitch-3pdt': 2,
+      'rotary-switch': 2,
       jack: 5,
+      'jack-in': 0,
       'jack-stereo': 5,
       generic: 6,
     };
@@ -31044,10 +32204,10 @@
   }
 
   /**
-   * Components that share at least one wire with another electronics component.
-   * When `groupId` is set (circuit Src), only enabled subgroup members/wires count —
-   * disabled subgroups stay in the project for iterations but are excluded from
-   * schematic + analysis for that group diagram.
+   * Components that share at least one wire or tip-dock with another electronics
+   * component. When `groupId` is set (circuit Src), only enabled subgroup
+   * members/wires count — disabled subgroups stay in the project for iterations
+   * but are excluded from schematic + analysis for that group diagram.
    * Optional `componentIds` (Set) further scopes to one wired island.
    */
   function collectConnectedCircuitGraph(opts = {}) {
@@ -31055,7 +32215,9 @@
     const filterIds = opts.componentIds instanceof Set ? opts.componentIds : null;
     const adj = new Map(); // compId -> Set(compId)
     const compById = new Map();
-    const edges = []; // { wire, aId, bId, aTerm, bTerm }
+    const edges = []; // { wire, aId, bId, aTerm, bTerm, viaLead? }
+    // Same-component terminal↔terminal jumpers (e.g. Strat T3↔T4 commons)
+    const jumpers = [];
 
     function ensure(comp) {
       if (!comp) return null;
@@ -31072,6 +32234,32 @@
       return id;
     }
 
+    function linkTerminals(aTerm, bTerm, extra = {}) {
+      if (!aTerm || !bTerm) return;
+      const a = aTerm.closest?.('.component');
+      const b = bTerm.closest?.('.component');
+      const aId = ensure(a);
+      const bId = ensure(b);
+      if (!aId || !bId) return;
+      const payload = {
+        wire: null,
+        aId,
+        bId,
+        aTerm,
+        bTerm,
+        color: '#111',
+        dashed: false,
+        ...extra,
+      };
+      if (aId === bId) {
+        jumpers.push(payload);
+        return;
+      }
+      adj.get(aId).add(bId);
+      adj.get(bId).add(aId);
+      edges.push(payload);
+    }
+
     wires.forEach((wire) => {
       if (!wire?.start?.terminal || !wire?.end?.terminal) return;
       if (wire.group?.classList.contains('workspace-page-hidden')) return;
@@ -31081,10 +32269,8 @@
       const b = wire.end.terminal.closest?.('.component');
       const aId = ensure(a);
       const bId = ensure(b);
-      if (!aId || !bId || aId === bId) return;
-      adj.get(aId).add(bId);
-      adj.get(bId).add(aId);
-      edges.push({
+      if (!aId || !bId) return;
+      const payload = {
         wire,
         aId,
         bId,
@@ -31092,7 +32278,27 @@
         bTerm: wire.end.terminal,
         color: WIRE_COLORS[wire.color] || '#111',
         dashed: !!wire.dashed,
-      });
+      };
+      // Internal jumpers do not create inter-component adjacency
+      if (aId === bId) {
+        jumpers.push(payload);
+        return;
+      }
+      adj.get(aId).add(bId);
+      adj.get(bId).add(aId);
+      edges.push(payload);
+    });
+
+    // Flexible lead tips (cap / resistor / …) and HB / asset-wire tip docks
+    // count as connections so those parts still appear on the schematic.
+    eachCapTipAttachmentPair((tip, target) => {
+      linkTerminals(tip, target, { viaLead: true });
+    });
+    eachHbTipAttachmentPair((tip, target) => {
+      linkTerminals(tip, target, { viaLead: true });
+    });
+    eachAssetWireTipAttachmentPair((tip, target) => {
+      linkTerminals(tip, target, { viaLead: true });
     });
 
     // Group source: include every enabled member even if not yet wired together
@@ -31103,11 +32309,11 @@
       });
     }
 
-    // Default circuit: only wired nodes. Group source: all seeded members.
+    // Default circuit: only wired/docked nodes. Group source: all seeded members.
     const connectedIds = groupId && !filterIds
       ? [...adj.keys()]
       : [...adj.keys()].filter((id) => adj.get(id).size > 0);
-    return { adj, compById, edges, connectedIds, groupId };
+    return { adj, compById, edges, jumpers, connectedIds, groupId };
   }
 
   /** BFS partition of wired component ids into disjoint islands. */
@@ -31137,7 +32343,8 @@
 
   /**
    * Separate wired circuits in the current Src scope (workspace or group).
-   * Isolated unwired parts are ignored — only nets with at least one wire count.
+   * Isolated unwired parts are ignored — only nets with at least one wire or
+   * tip-dock edge count.
    */
   function collectSchematicCircuitIslands(opts = {}) {
     const graph = collectConnectedCircuitGraph({
@@ -31252,30 +32459,37 @@
   function schematicPinLabelPlacement(x, y) {
     const ax = Math.abs(x);
     const ay = Math.abs(y);
+    // Tall DPDT / push-pull side stacks — sit beside the pin (not above), clear of wires
+    if (ax >= 24 && ay <= 22) {
+      if (x < 0) return { dx: -11, dy: 3.5, anchor: 'end' };
+      if (x > 0) return { dx: 11, dy: 3.5, anchor: 'start' };
+    }
     if (ay >= ax - 1 && y <= -1) {
-      if (x <= -10) return { dx: -7, dy: -1, anchor: 'end' };
-      if (x >= 10) return { dx: 7, dy: -1, anchor: 'start' };
-      return { dx: 0, dy: -9, anchor: 'middle' };
+      if (x <= -10) return { dx: -9, dy: 3, anchor: 'end' };
+      if (x >= 10) return { dx: 9, dy: 3, anchor: 'start' };
+      return { dx: 0, dy: -11, anchor: 'middle' };
     }
     if (ay >= ax - 1 && y >= 1) {
-      return { dx: 0, dy: 12, anchor: 'middle' };
+      return { dx: 0, dy: 14, anchor: 'middle' };
     }
-    if (x < 0) return { dx: -8, dy: 3, anchor: 'end' };
-    if (x > 0) return { dx: 8, dy: 3, anchor: 'start' };
-    return { dx: 0, dy: -9, anchor: 'middle' };
+    // Side leads (SC H/G, etc.): beside the stub at pin height
+    if (x < 0) return { dx: -11, dy: 3.5, anchor: 'end' };
+    if (x > 0) return { dx: 11, dy: 3.5, anchor: 'start' };
+    return { dx: 0, dy: -11, anchor: 'middle' };
   }
 
-  function pinLabel(g, x, y, text, dx = 0, dy = -6, anchor = 'middle') {
-    if (!text) return;
+  function pinLabel(g, x, y, text, dx = 0, dy = -6, anchor = 'middle', fontSize = 8.25) {
+    if (!schematicLabelsEnabled || !text) return;
     const t = svgEl('text', {
       x: x + dx,
       y: y + dy,
       'text-anchor': anchor,
       'font-family': 'Consolas, Courier New, monospace',
-      'font-size': 7,
+      'font-size': fontSize,
+      'letter-spacing': '0.06em',
       fill: '#333',
       stroke: '#f7f4ef',
-      'stroke-width': 4,
+      'stroke-width': 1.65,
       'paint-order': 'stroke fill',
       'stroke-linejoin': 'round',
     });
@@ -31283,20 +32497,33 @@
     g.appendChild(t);
   }
 
-  function schematicTitleLabel(g, x, y, text, fontSize, fill) {
-    if (!text) return;
-    const t = svgEl('text', {
+  /**
+   * Part title / value. Optional rotate (deg) around (x,y) for sideways SC labels.
+   * @param {object} [opts]
+   * @param {string} [opts.anchor]
+   * @param {number} [opts.rotate]
+   * @param {string} [opts.baseline]
+   */
+  function schematicTitleLabel(g, x, y, text, fontSize, fill, opts = {}) {
+    if (!schematicLabelsEnabled || !text) return;
+    const attrs = {
       x,
       y,
-      'text-anchor': 'middle',
+      'text-anchor': opts.anchor || 'middle',
       'font-family': 'Consolas, Courier New, monospace',
       'font-size': fontSize,
+      'letter-spacing': '0.05em',
       fill,
       stroke: '#f7f4ef',
-      'stroke-width': 4.5,
+      'stroke-width': 1.85,
       'paint-order': 'stroke fill',
       'stroke-linejoin': 'round',
-    });
+    };
+    if (opts.baseline) attrs['dominant-baseline'] = opts.baseline;
+    if (Number.isFinite(opts.rotate)) {
+      attrs.transform = `rotate(${opts.rotate} ${x} ${y})`;
+    }
+    const t = svgEl('text', attrs);
     t.textContent = text;
     g.appendChild(t);
   }
@@ -31424,13 +32651,14 @@
   /**
    * For 2-lead parts (cap / diode / LED / resistor): which terminal index sits
    * only on the ground net (shunt-to-ground). Null if series or unknown.
+   * Counts both drawn wires and flexible-lead tip docks.
    */
   function computeLeadGroundEnd(comp) {
     const terms = [...comp.querySelectorAll('.terminal')];
     if (terms.length < 2 || terms.length > 3) return null;
     const grounded = [];
     terms.forEach((t, i) => {
-      const n = schematicWireNeighborTerminals(t);
+      const n = schematicNeighborTerminalsIncludingDocks(t);
       if (!n.length) return;
       if (n.every((x) => schematicTerminalLooksLikeGround(x))) grounded.push(i);
     });
@@ -31483,112 +32711,206 @@
    * IEC 60617 forms are used only where NA practice overlaps (e.g. earth).
    * Pin array order ALWAYS matches DOM `.terminal` order so wires map correctly.
    */
-  function buildSchematicSymbol(kind, title, meta) {
+  function buildSchematicSymbol(kind, title, meta, profile = null) {
     const g = svgEl('g');
     const labelsG = svgEl('g'); // painted last so text sits above body + local strokes
     labelsG.setAttribute('class', 'schematic-labels');
     const pins = [];
     const terms = meta?.terms || [];
+    const prof = profile || SCHEMATIC_CIRCUIT_PROFILES.guitar;
 
-    const addPin = (x, y, termMeta) => {
+    /*
+     * Shared “end” length: body extremity → pin (pot zigzag ends, coil wave
+     * ends, wiper tip→pin, jack tip leaf→pin). Keeps those leads proportionate
+     * and seats a shunt cap under the wiper with clearance = that wiper length.
+     */
+    const POT_TRACK_HALF = 14;
+    const SYMBOL_END = 10;
+
+    const addPin = (x, y, termMeta, opts = {}) => {
       const active = termMeta ? termMeta.active !== false : true;
-      pins.push({ x, y });
-      g.appendChild(svgEl('circle', {
-        cx: x,
-        cy: y,
-        r: active ? 2.1 : 2.0,
-        fill: active ? '#111' : '#fff',
-        stroke: '#111',
-        'stroke-width': 1.2,
-      }));
-      if (termMeta?.label) {
-        const place = schematicPinLabelPlacement(x, y);
-        pinLabel(labelsG, x, y, termMeta.label, place.dx, place.dy, place.anchor);
+      const pin = {
+        x,
+        y,
+        exit: opts.exit || null,
+        stubLen: Number.isFinite(opts.stubLen) ? opts.stubLen : null,
+      };
+      pins.push(pin);
+      if (!opts.silent) {
+        g.appendChild(svgEl('circle', {
+          cx: x,
+          cy: y,
+          r: active ? 1.7 : 1.55,
+          fill: active ? '#111' : '#fff',
+          stroke: '#111',
+          'stroke-width': 1.05,
+        }));
       }
+      if (termMeta?.label && !opts.hideLabel) {
+        const rawLabel = String(termMeta.label).trim();
+        // Rail / sleeve G is labeled under the earth glyph, not at the pin
+        const railGLabel = rawLabel === 'G' || termMeta.role === 'G' || termMeta.isGround;
+        if (railGLabel && (
+          kind === 'pickup-sc' || kind === 'pickup-hb' || kind === 'pickup-4c'
+          || kind === 'jack' || kind === 'jack-in' || kind === 'jack-stereo'
+          || kind === 'pot' || kind === 'push-pot' || kind === 'trimmer'
+          || kind === 'switch' || kind === 'switch-spst'
+          || kind === 'chassis-ground' || kind === 'earth-ground'
+        )) {
+          // skip — drawn with groundGlyphSites
+        } else {
+          const place = (opts.labelDx != null || opts.labelDy != null || opts.labelAnchor)
+            ? {
+              dx: opts.labelDx ?? 0,
+              dy: opts.labelDy ?? 3.5,
+              anchor: opts.labelAnchor || 'middle',
+            }
+            : schematicPinLabelPlacement(x, y);
+          pinLabel(
+            labelsG, x, y, termMeta.label, place.dx, place.dy, place.anchor,
+            opts.labelFont ?? 8.25,
+          );
+        }
+      }
+      return pin;
     };
 
-    const addEarth = (x, y) => {
+    const addEarth = (x, y, flip = false) => {
       // IEEE 315 §3.9.1 — earth / general ground (decreasing bars)
-      g.appendChild(svgEl('line', strokeAttrs({ x1: x - 5, y1: y, x2: x + 5, y2: y, 'stroke-width': 1.4 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: x - 3.2, y1: y + 3, x2: x + 3.2, y2: y + 3, 'stroke-width': 1.2 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: x - 1.4, y1: y + 6, x2: x + 1.4, y2: y + 6, 'stroke-width': 1 })));
+      const dir = flip ? -1 : 1;
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: x - 5, y1: y, x2: x + 5, y2: y, 'stroke-width': 1.4,
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: x - 3.2, y1: y + 3 * dir, x2: x + 3.2, y2: y + 3 * dir, 'stroke-width': 1.2,
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: x - 1.4, y1: y + 6 * dir, x2: x + 1.4, y2: y + 6 * dir, 'stroke-width': 1,
+      })));
     };
 
-    const addChassisGround = (x, y) => {
-      // IEEE 315 §3.9.2 — chassis / frame ground (bar + three angled strokes)
-      g.appendChild(svgEl('line', strokeAttrs({
-        x1: x - 5, y1: y, x2: x + 5, y2: y, 'stroke-width': 1.35,
-      })));
-      g.appendChild(svgEl('line', strokeAttrs({
-        x1: x - 4, y1: y, x2: x - 6, y2: y + 7, 'stroke-width': 1.15,
-      })));
-      g.appendChild(svgEl('line', strokeAttrs({
-        x1: x, y1: y, x2: x - 2, y2: y + 7, 'stroke-width': 1.15,
-      })));
-      g.appendChild(svgEl('line', strokeAttrs({
-        x1: x + 4, y1: y, x2: x + 2, y2: y + 7, 'stroke-width': 1.15,
-      })));
+    const addChassisGround = (x, y, flip = false) => {
+      // Prefer general ground (§3.9.1) in this editor — same glyph as earth.
+      addEarth(x, y, flip);
     };
 
     /**
-     * Enclosure / frame ground (IEEE 315 §3.9.2) for pots & toggle switches.
-     * Not part of the signal terminal matrix — chassis glyph + wire attach below.
+     * Enclosure / case ground for pots & toggle switches.
+     * Not part of the signal terminal matrix — general ground glyph + wire attach.
+     * opts: { fromY, exit, stubLen } — attach pin sits outside the glyph.
      */
-    const addFrameCaseGround = (cx, cy, caseTerm, { fromY = null } = {}) => {
+    const addFrameCaseGround = (cx, cy, caseTerm, {
+      fromY = null, exit = 'down', stubLen = 10, pinOffset = 8,
+    } = {}) => {
       if (!caseTerm) return;
+      // Pin only — IEEE ground bars come from groundGlyphSites (avoids a double glyph).
+      const pinY = exit === 'up' ? cy - pinOffset : cy + pinOffset;
       if (fromY != null && Number.isFinite(fromY)) {
         g.appendChild(svgEl('line', strokeAttrs({
-          x1: cx, y1: fromY, x2: cx, y2: cy,
+          x1: cx, y1: fromY, x2: cx, y2: pinY,
           'stroke-dasharray': '2 1.5', 'stroke-width': 1.1,
         })));
       }
-      addChassisGround(cx, cy);
-      addPin(cx, cy + 8, { ...caseTerm, label: '' });
+      addPin(cx, pinY, { ...caseTerm, label: '' }, { exit, stubLen, silent: true });
     };
 
     /**
-     * Pot case ground (NA guitar / IEEE practice):
-     * Pot symbol stays 3-terminal. Case is chassis/frame ground (§3.9.2), not a
+     * Pot case ground (NA guitar practice):
+     * Pot symbol stays 3-terminal. Case is a general ground drop, not a
      * fourth circuit lug. Volume pots typically bond lug 1 (cold) to the case;
      * when meta.potBondCaseToLug1 is set, case G shares lug-1’s node.
+     * Sideways pot: lug1 sits at bottom of vertical track — glyph drops below.
      */
-    const addPotCaseGround = (lug1X, lug1Y, caseTerm, bondToLug1, wiperY = 16, bodyCx = 0) => {
+    const addPotCaseGround = (lug1X, lug1Y, caseTerm, bondToLug1, wiperRef = 16, bodyCx = 0) => {
       if (!caseTerm) return;
       if (bondToLug1) {
-        // Cold lug soldered to case — one node; drop chassis glyph below the track.
-        const gndY = Math.max(lug1Y + 18, (wiperY || 16) + 10);
+        const gndY = lug1Y + 12;
         g.appendChild(svgEl('line', strokeAttrs({
-          x1: lug1X, y1: lug1Y + 3, x2: lug1X, y2: gndY,
-          'stroke-dasharray': '2 1.5', 'stroke-width': 1.1,
+          x1: lug1X, y1: lug1Y + 2, x2: lug1X, y2: gndY,
+          'stroke-dasharray': '2 1.5', 'stroke-width': 1.05,
         })));
         addChassisGround(lug1X, gndY);
         pins.push({ x: lug1X, y: lug1Y });
         return;
       }
-      // Independent case: keep clear of lug-1 tip for signal/cap leads.
-      const caseX = Math.min(lug1X, bodyCx) - 24;
-      const caseY = Math.max(lug1Y + 22, (wiperY || 16) + 16);
-      const stemTop = Math.max(lug1Y + 8, (wiperY || 16) * 0.4);
+      const caseX = Math.min(lug1X, bodyCx) - 14;
+      const caseY = lug1Y + 14;
       g.appendChild(svgEl('line', strokeAttrs({
-        x1: bodyCx, y1: stemTop, x2: bodyCx, y2: caseY,
-        'stroke-dasharray': '2 1.5', 'stroke-width': 1.1,
+        x1: lug1X, y1: lug1Y + 2, x2: lug1X, y2: caseY,
+        'stroke-dasharray': '2 1.5', 'stroke-width': 1.05,
       })));
       g.appendChild(svgEl('line', strokeAttrs({
-        x1: bodyCx, y1: caseY, x2: caseX, y2: caseY,
-        'stroke-dasharray': '2 1.5', 'stroke-width': 1.1,
+        x1: lug1X, y1: caseY, x2: caseX, y2: caseY,
+        'stroke-dasharray': '2 1.5', 'stroke-width': 1.05,
       })));
       addChassisGround(caseX, caseY);
-      addPin(caseX, caseY + 8, { ...caseTerm, label: '' });
+      addPin(caseX, caseY + 7, { ...caseTerm, label: '' }, { exit: 'down', stubLen: 8 });
     };
 
-    /** Zigzag pot track from −halfW…+halfW (IEEE adjustable resistor). */
-    const drawPotTrack = (cx, cy, halfW) => {
-      const z = halfW / 18; // scale classic 7-segment zigzag
+    /**
+     * Zigzag pot track (IEEE adjustable resistor).
+     * vertical=false: track along X (legacy). vertical=true: track along Y
+     * (sideways pot — wiper leaves to the side).
+     */
+    const drawPotTrack = (cx, cy, halfLen, vertical = false) => {
+      const z = halfLen / 18;
       const pts = [
         [-18, 0], [-13, -7], [-8, 7], [-3, -7], [2, 7], [7, -7], [12, 7], [18, 0],
-      ].map(([x, y]) => [cx + x * z, cy + y * z]);
+      ].map(([x, y]) => (vertical
+        ? [cx + y * z, cy + x * z]
+        : [cx + x * z, cy + y * z]));
       const d = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0]} ${p[1]}`).join(' ');
       g.appendChild(svgEl('path', strokeAttrs({ d })));
+      return { z, peakAmp: 7 * z };
+    };
+
+    /**
+     * Sideways-pot wiper lead: arrowhead stays horizontal into the track peaks.
+     * Near mid, one straight run tip→pin. Near 0%/100%, a short horizontal stub
+     * keeps the arrow visually straight, then a diagonal continues to the pin.
+     */
+    const drawPotWiperLead = (tipX, tapY, pinX, pinY, {
+      arrowLen = 3.6, arrowHalfH = 2.6,
+    } = {}) => {
+      const baseX = tipX + arrowLen;
+      const dy = pinY - tapY;
+      const dx = pinX - tipX;
+      // Kick in when the direct tip→pin slant is steep (dial near either end).
+      const needsStub = Math.abs(dy) > 3.5
+        && Math.atan2(Math.abs(dy), Math.max(0.01, dx)) > (16 * Math.PI / 180);
+      if (needsStub) {
+        const stubEndX = tipX + Math.min(7.5, Math.max(arrowLen + 2.2, dx * 0.38));
+        g.appendChild(svgEl('line', strokeAttrs({
+          x1: tipX, y1: tapY, x2: stubEndX, y2: tapY,
+        })));
+        g.appendChild(svgEl('line', strokeAttrs({
+          x1: stubEndX, y1: tapY, x2: pinX, y2: pinY,
+        })));
+      } else {
+        g.appendChild(svgEl('line', strokeAttrs({
+          x1: tipX, y1: tapY, x2: pinX, y2: pinY,
+        })));
+      }
+      g.appendChild(svgEl('path', {
+        d: `M${tipX} ${tapY} L${baseX} ${tapY - arrowHalfH} L${baseX} ${tapY + arrowHalfH} Z`,
+        fill: '#111',
+        stroke: 'none',
+      }));
+    };
+
+    /** Resolve which throw each DPDT common bridges to (pin indices 0/4 and 1/5). */
+    const dpdtPoleThrowTargets = (bridges) => {
+      let poleATo = [];
+      let poleBTo = [];
+      (bridges || []).forEach((pair) => {
+        const [a, b] = pair || [];
+        if (a == null || b == null) return;
+        const otherA = a === 2 ? b : b === 2 ? a : null;
+        const otherB = a === 3 ? b : b === 3 ? a : null;
+        if (otherA === 0 || otherA === 4) poleATo.push(otherA);
+        if (otherB === 1 || otherB === 5) poleBTo.push(otherB);
+      });
+      return { poleATo, poleBTo };
     };
 
     /**
@@ -31605,18 +32927,11 @@
         { x: poleAx, y: yDn },  // T5
         { x: poleBx, y: yDn },  // T6
       ];
-      let poleATo = [];
-      let poleBTo = [];
-      (bridges || []).forEach((pair) => {
-        const [a, b] = pair || [];
-        if (a == null || b == null) return;
-        const otherA = a === 2 ? b : b === 2 ? a : null;
-        const otherB = a === 3 ? b : b === 3 ? a : null;
-        if (otherA === 0 || otherA === 4) poleATo.push(otherA);
-        if (otherB === 1 || otherB === 5) poleBTo.push(otherB);
-      });
-      if (!poleATo.length) poleATo = [4];
-      if (!poleBTo.length) poleBTo = [5];
+      const { poleATo, poleBTo } = dpdtPoleThrowTargets(bridges);
+      // Empty bridges = open (ON-OFF-ON middle) — draw poles with no closed contacts.
+      // Do NOT invent a closed throw for a pole that has no bridge in this state
+      // (that made half-open / asymmetric states look like both poles slammed down).
+      const openThrow = !bridges?.length;
 
       const paintPole = (commonIdx, upIdx, dnIdx, toIdxs) => {
         [upIdx, commonIdx, dnIdx].forEach((idx) => {
@@ -31624,10 +32939,10 @@
           g.appendChild(svgEl('circle', {
             cx: p.x,
             cy: p.y,
-            r: 2.0,
+            r: 1.65,
             fill: terms[idx]?.active ? '#111' : '#fff',
             stroke: '#111',
-            'stroke-width': 1.15,
+            'stroke-width': 1.05,
           }));
         });
         const from = contacts[commonIdx];
@@ -31642,269 +32957,493 @@
       paintPole(3, 1, 5, poleBTo);
 
       // IEEE 14.1 mechanical connection / gang between poles
-      const aTip = contacts[poleATo[0]];
-      const bTip = contacts[poleBTo[0]];
-      g.appendChild(svgEl('line', strokeAttrs({
-        x1: poleAx + 3,
-        y1: (aTip.y + yMid) / 2,
-        x2: poleBx - 3,
-        y2: (bTip.y + yMid) / 2,
-        'stroke-dasharray': '2.5 2',
-        'stroke-width': 1.15,
-      })));
+      if (!openThrow && poleATo.length && poleBTo.length) {
+        const aTip = contacts[poleATo[0]];
+        const bTip = contacts[poleBTo[0]];
+        g.appendChild(svgEl('line', strokeAttrs({
+          x1: poleAx + 3,
+          y1: (aTip.y + yMid) / 2,
+          x2: poleBx - 3,
+          y2: (bTip.y + yMid) / 2,
+          'stroke-dasharray': '2.5 2',
+          'stroke-width': 1.15,
+        })));
+      }
       return contacts;
+    };
+
+    /**
+     * Lever / arrow DPDT (guitar ON-ON-ON 3-way style): common left → arrow wiper →
+     * throw column right, two poles ganged by a dashed actuator. Same T1–T6 map as ANSI.
+     */
+    const drawLeverDpdtPoles = (bridges) => {
+      const yUp = -14;
+      const yMid = 0;
+      const yDn = 14;
+      const cAx = -20;
+      const tAx = -4;
+      const cBx = 6;
+      const tBx = 22;
+      const contacts = [
+        { x: tAx, y: yUp },  // T1
+        { x: tBx, y: yUp },  // T2
+        { x: cAx, y: yMid }, // T3
+        { x: cBx, y: yMid }, // T4
+        { x: tAx, y: yDn },  // T5
+        { x: tBx, y: yDn },  // T6
+      ];
+      const { poleATo, poleBTo } = dpdtPoleThrowTargets(bridges);
+      const r = 2.05;
+
+      const paintContact = (idx, filled) => {
+        const p = contacts[idx];
+        g.appendChild(svgEl('circle', {
+          cx: p.x,
+          cy: p.y,
+          r,
+          fill: filled ? '#111' : '#fff',
+          stroke: '#111',
+          'stroke-width': 1.15,
+        }));
+      };
+
+      /** Shaft + filled arrowhead aimed at a throw (or mid gap when open). */
+      const paintWiper = (commonIdx, toIdxs, upIdx, dnIdx) => {
+        const from = contacts[commonIdx];
+        let aimX;
+        let aimY;
+        if (toIdxs.length) {
+          const to = contacts[toIdxs[0]];
+          aimX = to.x;
+          aimY = to.y;
+        } else {
+          aimX = contacts[upIdx].x;
+          aimY = yMid;
+        }
+        const dx = aimX - from.x;
+        const dy = aimY - from.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const ux = dx / len;
+        const uy = dy / len;
+        // Stop short of the throw circle so the tip reads as selecting it.
+        const tipReach = toIdxs.length ? Math.max(6, len - r - 1.1) : len * 0.72;
+        const tipX = from.x + ux * tipReach;
+        const tipY = from.y + uy * tipReach;
+        const arrowLen = 4.4;
+        const arrowHalfH = 2.55;
+        const baseX = tipX - ux * arrowLen;
+        const baseY = tipY - uy * arrowLen;
+        const px = -uy * arrowHalfH;
+        const py = ux * arrowHalfH;
+        g.appendChild(svgEl('line', strokeAttrs({
+          x1: from.x + ux * r,
+          y1: from.y + uy * r,
+          x2: baseX,
+          y2: baseY,
+          'stroke-width': 1.55,
+        })));
+        g.appendChild(svgEl('path', {
+          d: `M${tipX} ${tipY} L${baseX + px} ${baseY + py} L${baseX - px} ${baseY - py} Z`,
+          fill: '#111',
+          stroke: 'none',
+        }));
+        return tipY;
+      };
+
+      paintContact(0, false);
+      paintContact(4, false);
+      paintContact(2, false);
+      paintContact(1, false);
+      paintContact(5, false);
+      paintContact(3, false);
+
+      paintWiper(2, poleATo, 0, 4);
+      paintWiper(3, poleBTo, 1, 5);
+
+      // IEEE 14.1 mechanical gang between poles — centered in the inter-pole
+      // gap (not along the T1/T5 throw column, which reads as a false link).
+      const poleMidA = (cAx + tAx) / 2;
+      const poleMidB = (cBx + tBx) / 2;
+      const actX = (poleMidA + poleMidB) / 2;
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: actX,
+        y1: yUp + 1,
+        x2: actX,
+        y2: yDn - 1,
+        'stroke-dasharray': '2.4 2.1',
+        'stroke-width': 1.05,
+      })));
+
+      return { contacts, yUp, yMid, yDn, poleAx: cAx, poleBx: tBx };
     };
 
     const valueLabels = meta?.valueLabels || [];
     const valueCount = valueLabels.length;
-    // Keep part name / values above body geometry without floating too high.
-    // Pots need a bit more lift so long value text clears the ground stub/label.
-    const potLift = (kind === 'pot' || kind === 'push-pot') ? 12 : 0;
-    const capLift = (kind === 'capacitor' || kind === 'resistor') ? 6 : 0;
-    const nameY = -34 - potLift - capLift - Math.max(0, valueCount - 1) * 9;
-    schematicTitleLabel(labelsG, 0, nameY, title, 8, '#222');
-    valueLabels.forEach((text, i) => {
-      schematicTitleLabel(labelsG, 0, nameY + 10 + i * 9, text, 6.5, '#444');
-    });
+    // Compact title band — utilitarian density, still clear of bodies
+    const potLift = (kind === 'pot' || kind === 'push-pot' || kind === 'trimmer') ? 4 : 0;
+    const capLift = (kind === 'capacitor' || kind === 'capacitor-polar' || kind === 'resistor') ? 2 : 0;
+    // Blade titles sit above throw copper / pickup wings that skim the top row.
+    const swLift = (kind === 'switch' || kind === 'switch-spst' || kind === 'footswitch'
+      || kind === 'footswitch-3pdt') ? 16 : 0;
+    const nameY = -28 - potLift - capLift - swLift - Math.max(0, valueCount - 1) * 10;
+    // SC / sideways pot / shunt passives: titles sit in a side gutter (drawn with
+    // the symbol), not on the top band where they land on bodies or lead copper.
+    const shuntPassive = (kind === 'capacitor' || kind === 'capacitor-polar' || kind === 'resistor')
+      && (meta?.leadGroundEnd === 0 || meta?.leadGroundEnd === 1);
+    const sideGutterTitle = kind === 'pickup-sc'
+      || kind === 'pot'
+      || kind === 'trimmer'
+      || shuntPassive;
+    // Passives: value alone is enough (e.g. 0.022µF) — skip generic “Capacitor”/“Resistor”.
+    const skipGenericTitle = valueCount > 0
+      && (kind === 'capacitor' || kind === 'capacitor-polar' || kind === 'resistor')
+      && /^(capacitor|resistor)$/i.test(String(title || '').trim());
+    if (!sideGutterTitle) {
+      if (!skipGenericTitle) {
+        schematicTitleLabel(labelsG, 0, nameY, title, 7.5, '#222');
+      }
+      valueLabels.forEach((text, i) => {
+        const vy = skipGenericTitle ? nameY + i * 10 : nameY + 11 + i * 10;
+        schematicTitleLabel(labelsG, 0, vy, text, 6.5, '#444');
+      });
+    }
+
+    /** Name + values in an empty side gutter (rotated or flush). */
+    const paintSideGutterTitles = (baseX, opts = {}) => {
+      const rotate = opts.rotate;
+      const anchor = opts.anchor || 'middle';
+      const baseline = opts.baseline || (rotate != null ? 'middle' : undefined);
+      const step = opts.step != null ? opts.step : (rotate != null ? -9 : 10);
+      const lines = [];
+      if (title && !skipGenericTitle) {
+        lines.push({ text: title, size: 7.5, fill: '#222' });
+      }
+      valueLabels.forEach((text) => {
+        lines.push({ text, size: 6.5, fill: '#444' });
+      });
+      lines.forEach((line, i) => {
+        if (rotate != null) {
+          const lx = baseX + i * step;
+          schematicTitleLabel(labelsG, lx, opts.y ?? 0, line.text, line.size, line.fill, {
+            rotate, anchor, baseline,
+          });
+        } else {
+          const ly = (opts.y ?? -6) + i * step;
+          schematicTitleLabel(labelsG, baseX, ly, line.text, line.size, line.fill, {
+            anchor, baseline: baseline || 'middle',
+          });
+        }
+      });
+    };
+
+    /**
+     * DPDT lands on ANSI contacts. Default exits face outward (left/right poles);
+     * the router may override per-edge toward the peer for fewer bends.
+     */
+    const swStub = Math.max(9, Number(prof.switchStubLen) || 11);
+    const guitarDpdtPinOut = (poleAx, poleBx, yUp, yMid, yDn) => ([
+      { x: poleAx, y: yUp, exit: 'left', stubLen: swStub },
+      { x: poleBx, y: yUp, exit: 'right', stubLen: swStub },
+      { x: poleAx, y: yMid, exit: 'left', stubLen: swStub },
+      { x: poleBx, y: yMid, exit: 'right', stubLen: swStub },
+      { x: poleAx, y: yDn, exit: 'left', stubLen: swStub },
+      { x: poleBx, y: yDn, exit: 'right', stubLen: swStub },
+    ]);
+
+    /** T# beside its contact, off the leave-stub axis. */
+    const guitarDpdtLabelPlace = (i) => {
+      const leftPole = i % 2 === 0;
+      const dx = Math.max(6, Number(prof.switchLabelDx) || 8) * (leftPole ? -1 : 1);
+      const rowDy = i < 4 ? -4 : 5;
+      return {
+        dx,
+        dy: rowDy,
+        anchor: leftPole ? 'end' : 'start',
+        font: Number(prof.switchLabelFont) || 7,
+      };
+    };
+
+    const attachGuitarDpdtPins = (contacts, pinOut) => {
+      for (let i = 0; i < 6; i++) {
+        const o = pinOut[i] || contacts[i];
+        const place = guitarDpdtLabelPlace(i);
+        addPin(o.x, o.y, {
+          ...(terms[i] || {}),
+          label: `T${i + 1}`,
+          active: true,
+        }, {
+          silent: true,
+          exit: o.exit,
+          stubLen: o.stubLen,
+          labelDx: place.dx,
+          labelDy: place.dy,
+          labelAnchor: place.anchor,
+          labelFont: place.font,
+        });
+      }
+    };
+
+    const findSwitchCaseGroundTerm = () => (
+      terms.find((t) => (
+        t?.term?.classList?.contains('switch-case-ground')
+        || (t?.isGround && (t.role === 'G' || t.label === 'G'))
+      )) || terms[6] || null
+    );
+
+    /**
+     * Case G placement follows profile — default `rail` = bottom apron toward the
+     * shared chassis bus (shortest drop). `top-left` kept as an alternate.
+     */
+    const attachSwitchCaseGround = (poleAx, poleBx, yUp, yDn) => {
+      if (meta?.needsGrounding === false) return;
+      const caseTerm = findSwitchCaseGroundTerm();
+      if (!caseTerm) return;
+      if (!(caseTerm.isGround
+        || caseTerm.label === 'G'
+        || caseTerm.role === 'G'
+        || caseTerm.term?.classList?.contains('switch-case-ground'))) {
+        return;
+      }
+      const mode = prof.switchCaseG || 'rail';
+      if (mode === 'top-left') {
+        const cx = poleAx - 8;
+        const cy = yUp - 14;
+        addFrameCaseGround(cx, cy, caseTerm, {
+          fromY: yUp - 2, exit: 'up', stubLen: 10, pinOffset: 8,
+        });
+        return;
+      }
+      // rail: bottom, slightly left of mid — clear of T5/T6 stubs, short bus drop
+      const cx = (poleAx + poleBx) / 2 - 8;
+      const cy = yDn + 12;
+      addFrameCaseGround(cx, cy, caseTerm, {
+        fromY: yDn + 3, exit: 'down', stubLen: 8, pinOffset: 7,
+      });
+    };
 
     if (kind === 'pickup-sc') {
-      // IEEE 315 / ANSI Y32.2 air-core inductor (pickup coil) — H … G
-      g.appendChild(svgEl('path', strokeAttrs({
-        d: 'M-14 0 c0-7 7-7 7 0 s7 7 7 0 s7 -7 7 0 s7 7 7 0',
+      // Vertical IEEE coil: 1.5× pot track length, width = pot peak-to-peak.
+      // End stubs match pot lug / wiper tip→pin (SYMBOL_END).
+      const potHalfLen = POT_TRACK_HALF;
+      const potPeakAmp = 7 * (potHalfLen / 18);
+      const halfLen = potHalfLen * 1.5; // 21 → body 42 vs pot track 28
+      const endStub = SYMBOL_END;
+      const pinY = halfLen + endStub;
+      const loops = 6; // thinner sine segments along the 1.5× pot length
+      const loopH = (halfLen * 2) / loops;
+      const loopW = potPeakAmp;
+      let coilD = `M0 ${-halfLen} c${-loopW} 0 ${-loopW} ${loopH} 0 ${loopH}`;
+      for (let i = 1; i < loops; i++) {
+        const sign = i % 2 === 1 ? 1 : -1;
+        coilD += ` s${sign * loopW} ${loopH} 0 ${loopH}`;
+      }
+      g.appendChild(svgEl('path', strokeAttrs({ d: coilD })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: 0, y1: -pinY, x2: 0, y2: -halfLen,
       })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: 0, x2: -14, y2: 0 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: 14, y1: 0, x2: 22, y2: 0 })));
-      addPin(-22, 0, terms[0]);
-      addPin(22, 0, terms[1]);
-      // Chassis G joins the ideal ground rail — no local earth glyph (avoids double marks)
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: 0, y1: halfLen, x2: 0, y2: pinY,
+      })));
+      addPin(0, -pinY, terms[0], { exit: 'right', stubLen: 10 }); // H
+      addPin(0, pinY, terms[1], { exit: 'down', stubLen: 8 });  // G → local ground
+      // Sideways in the left gutter — H/wires own the right; top band hits the coil.
+      paintSideGutterTitles(-15, { rotate: -90, y: 0 });
     } else if (kind === 'pickup-hb' || kind === 'pickup-4c') {
       /*
-       * Humbucker / 4-conductor (NA guitar practice): two series coils.
+       * Dual-coil pickup (NA guitar practice): two series coils.
        * DOM tip order: H · N · R · S · G  (SD-style color code)
-       *   N ──∩∩∩── R ──∩∩∩── S     (coil starts / series link / coil finish)
-       *   series link = N↔R; hot out = H; ground = S+G (shield)
        */
-      const is4c = kind === 'pickup-4c';
-      schematicTitleLabel(labelsG, 0, nameY - 10, is4c ? '4-Conductor' : 'HB', 6.5, '#555');
+      schematicTitleLabel(labelsG, 0, nameY - 8, 'DC', 6, '#555');
 
-      // North coil (top)
       g.appendChild(svgEl('path', strokeAttrs({
-        d: 'M-10 -10 c0-6 6-6 6 0 s6 6 6 0 s6 -6 6 0',
+        d: 'M-8 -8 c0-4.5 4.5-4.5 4.5 0 s4.5 4.5 4.5 0 s4.5 -4.5 4.5 0',
       })));
-      // South coil (bottom)
       g.appendChild(svgEl('path', strokeAttrs({
-        d: 'M-10 10 c0-6 6-6 6 0 s6 6 6 0 s6 -6 6 0',
+        d: 'M-8 8 c0-4.5 4.5-4.5 4.5 0 s4.5 4.5 4.5 0 s4.5 -4.5 4.5 0',
       })));
-      // Series link (R junction between coils)
       g.appendChild(svgEl('line', strokeAttrs({
-        x1: 8, y1: -10, x2: 8, y2: 10, 'stroke-width': 1.25,
+        x1: 6, y1: -8, x2: 6, y2: 8, 'stroke-width': 1.15,
       })));
       g.appendChild(svgEl('circle', {
-        cx: 8, cy: 0, r: 1.6, fill: '#111', stroke: '#111', 'stroke-width': 0.8,
+        cx: 6, cy: 0, r: 1.35, fill: '#111', stroke: '#111', 'stroke-width': 0.7,
       }));
-      // Core / bar magnet hint between coils
       g.appendChild(svgEl('line', strokeAttrs({
-        x1: -6, y1: 0, x2: 4, y2: 0, 'stroke-width': 2.2, 'stroke-linecap': 'round',
+        x1: -5, y1: 0, x2: 3, y2: 0, 'stroke-width': 1.9, 'stroke-linecap': 'round',
       })));
 
-      // Pin stubs — left stack: N, H, S ; right: R ; bottom: G
       const pinLayout = [
-        { x: -22, y: -14 }, // H
-        { x: -22, y: -10 }, // N (align near north coil start)
-        { x: 20, y: 0 },    // R series link
-        { x: -22, y: 10 },  // S
-        { x: -22, y: 18 },  // G
+        { x: -18, y: -11, exit: 'left', stubLen: 9 },
+        { x: -18, y: -7, exit: 'left', stubLen: 9 },
+        { x: 16, y: 0, exit: 'right', stubLen: 9 },
+        { x: -18, y: 8, exit: 'left', stubLen: 9 },
+        { x: -18, y: 14, exit: 'down', stubLen: 10 },
       ];
-      // Lead-ins
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: -14, x2: -10, y2: -10 }))); // H→north finish-ish
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: -10, x2: -10, y2: -10 }))); // N
-      g.appendChild(svgEl('line', strokeAttrs({ x1: 8, y1: 0, x2: 20, y2: 0 }))); // R
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: 10, x2: -10, y2: 10 }))); // S
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: -11, x2: -8, y2: -8 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: -7, x2: -8, y2: -8 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 6, y1: 0, x2: 16, y2: 0 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: 8, x2: -8, y2: 8 })));
       g.appendChild(svgEl('line', strokeAttrs({
-        x1: -22, y1: 18, x2: -8, y2: 18, 'stroke-dasharray': '2 1.5', 'stroke-width': 1.1,
+        x1: -18, y1: 14, x2: -6, y2: 14, 'stroke-dasharray': '2 1.5', 'stroke-width': 1.0,
       })));
       g.appendChild(svgEl('line', strokeAttrs({
-        x1: -8, y1: 18, x2: -8, y2: 12, 'stroke-dasharray': '2 1.5', 'stroke-width': 1.1,
+        x1: -6, y1: 14, x2: -6, y2: 10, 'stroke-dasharray': '2 1.5', 'stroke-width': 1.0,
       })));
 
       for (let i = 0; i < Math.max(terms.length, 5); i++) {
-        const p = pinLayout[i] || { x: -22 + i * 8, y: 22 };
-        addPin(p.x, p.y, terms[i]);
+        const p = pinLayout[i] || { x: -18 + i * 7, y: 18, exit: 'down', stubLen: 9 };
+        addPin(p.x, p.y, terms[i], { exit: p.exit, stubLen: p.stubLen });
       }
     } else if (kind === 'pot') {
-      // ANSI Y32.2 / IEEE 315 potentiometer — longer track + lead stubs so
-      // lug/ground/wiper wiring doesn’t crowd the body.
-      const halfW = 28;
-      const stub = 10;
-      const wiperY = 28;
-      const lug1X = -(halfW + stub);
-      const lug3X = halfW + stub;
-      const t = Math.min(1, Math.max(0, (meta?.potPosition ?? 100) / 100));
-      const wx = -halfW + (halfW * 2) * t;
-      drawPotTrack(0, 0, halfW);
-      // Lead stubs from track ends to lug pins
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -halfW, y1: 0, x2: lug1X, y2: 0 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: halfW, y1: 0, x2: lug3X, y2: 0 })));
-      // Wiper from tap on track down to lug 2 (pin stays fixed for wiring)
-      g.appendChild(svgEl('line', strokeAttrs({ x1: wx, y1: 0, x2: 0, y2: wiperY })));
-      g.appendChild(svgEl('path', strokeAttrs({
-        d: `M${wx} 0 L${wx - 3.5} 7 L${wx + 3.5} 7 Z`,
-        fill: '#111',
-      })));
-      // 1 — left (cold): short drop stub so leads clear the case-G apron (same
-      // idea as wiper). 2 — wiper down. 3 — right (hot).
-      const lug1Y = 12;
-      g.appendChild(svgEl('line', strokeAttrs({ x1: lug1X, y1: 0, x2: lug1X, y2: lug1Y })));
-      addPin(lug1X, lug1Y, terms[0]);
-      addPin(0, wiperY, terms[1]);
-      addPin(lug3X, 0, terms[2]);
+      /*
+       * Sideways pot (preferred): vertical zigzag track, wiper to the right.
+       *   3 (hot/in) top → track → 1 (cold) bottom; 2 wiper exits right.
+       * Lug ends and wiper tip→pin share SYMBOL_END (same visual “end” as SC).
+       */
+      const halfLen = POT_TRACK_HALF;
+      const endStub = SYMBOL_END;
+      const lug3Y = -(halfLen + endStub);
+      const lug1Y = halfLen + endStub;
+      const t = Math.min(1, Math.max(0, (meta?.potPosition ?? 50) / 100));
+      // Visual mid of the zigzag sits a hair below geometric 0 — bias the 50%
+      // tap (and pin) down so the arrow reads centered on the track.
+      const wiperMidY = 1.15;
+      const tapY = t <= 0.5
+        ? -halfLen + (wiperMidY - (-halfLen)) * (t * 2)
+        : wiperMidY + (halfLen - wiperMidY) * ((t - 0.5) * 2);
+      const track = drawPotTrack(0, 0, halfLen, true);
+      // Tip kisses outer edge of right peaks (peakAmp is vertex center; +½ stroke
+      // clears the track paint). Fill-only head — stroked fill overlapped the zigzag.
+      const tipX = track.peakAmp + 0.8;
+      const wiperX = tipX + SYMBOL_END;
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: -halfLen, x2: 0, y2: lug3Y })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: halfLen, x2: 0, y2: lug1Y })));
+      drawPotWiperLead(tipX, tapY, wiperX, wiperMidY);
+      addPin(0, lug1Y, terms[0], { exit: 'down', stubLen: 8 });   // 1 cold
+      addPin(wiperX, wiperMidY, terms[1], { exit: 'right', stubLen: 9 }); // 2 wiper
+      addPin(0, lug3Y, terms[2], { exit: 'left', stubLen: 9 });   // 3 hot (toward switch)
       if (terms[3]) {
-        addPotCaseGround(lug1X, lug1Y, terms[3], !!meta?.potBondCaseToLug1, wiperY, 0);
+        addPotCaseGround(0, lug1Y, terms[3], !!meta?.potBondCaseToLug1, wiperX, wiperMidY);
       }
+      // Right of the wiper — left gutter shares space with lug3 hot copper.
+      paintSideGutterTitles(wiperX + 14, { rotate: -90, y: 0, step: 9 });
     } else if (kind === 'push-pot') {
       /*
-       * ANSI Y32.2 / IEEE 315 push-pull pot — stacked like the workspace:
-       *   • DPDT (two SPDT + §14.1 dashed gang) above
-       *   • Potentiometer below with shared dashed shaft
+       * Compact push-pull: small DPDT above + sideways pot below, shared shaft.
        * DOM pin order: T1–T6, then pot 1 / 2 / 3 / G
        */
       const type = meta?.switchType === 2 ? 2 : 1;
-      const stateHint = meta?.stateLabel ? ` · ${meta.stateLabel}` : '';
       schematicTitleLabel(
         labelsG,
         0,
-        nameY - 14,
-        `PP · Type ${type}${stateHint}`,
-        6.5,
+        nameY - 10,
+        `PP · Type ${type}`,
+        6,
         '#555'
       );
 
-      const halfW = 22;
-      const stub = 9;
-      const wiperY = 22;
-      const potX = 0;
-      const potY = 30;
-      const potT = Math.min(1, Math.max(0, (meta?.potPosition ?? 100) / 100));
-      const potWx = potX - halfW + (halfW * 2) * potT;
-      const lug1X = potX - (halfW + stub);
-      const lug3X = potX + (halfW + stub);
+      const halfLen = 12;
+      const endStub = Math.round(SYMBOL_END * (halfLen / POT_TRACK_HALF) * 10) / 10;
+      const potY = 22;
+      const potT = Math.min(1, Math.max(0, (meta?.potPosition ?? 50) / 100));
+      const wiperMidY = potY + 1.0;
+      const tapY = potT <= 0.5
+        ? (potY - halfLen) + (wiperMidY - (potY - halfLen)) * (potT * 2)
+        : wiperMidY + ((potY + halfLen) - wiperMidY) * ((potT - 0.5) * 2);
+      const lug3Y = potY - (halfLen + endStub);
+      const lug1Y = potY + halfLen + endStub;
 
-      const poleAx = -12;
-      const poleBx = 12;
-      const yThrowUp = -40;
-      const yCommon = -24;
-      const yThrowDn = -8;
+      const poleAx = -9;
+      const poleBx = 9;
+      const yThrowUp = -30;
+      const yCommon = -18;
+      const yThrowDn = -6;
       const swPositions = drawAnsiDpdtPoles(
         poleAx, poleBx, yThrowUp, yCommon, yThrowDn, meta?.bridges
       );
 
-      // Shared push/pull shaft (vertical mechanical connection)
       g.appendChild(svgEl('line', strokeAttrs({
-        x1: potX,
-        y1: yThrowDn + 4,
-        x2: potX,
-        y2: potY - 4,
+        x1: 0,
+        y1: yThrowDn + 3,
+        x2: 0,
+        y2: potY - halfLen - 2,
         'stroke-dasharray': '2.5 2',
-        'stroke-width': 1.1,
+        'stroke-width': 1.0,
       })));
 
-      drawPotTrack(potX, potY, halfW);
-      g.appendChild(svgEl('line', strokeAttrs({
-        x1: potX - halfW, y1: potY, x2: lug1X, y2: potY,
-      })));
-      g.appendChild(svgEl('line', strokeAttrs({
-        x1: potX + halfW, y1: potY, x2: lug3X, y2: potY,
-      })));
-      g.appendChild(svgEl('line', strokeAttrs({
-        x1: potWx, y1: potY, x2: potX, y2: potY + wiperY,
-      })));
-      g.appendChild(svgEl('path', strokeAttrs({
-        d: `M${potWx} ${potY} L${potWx - 3.5} ${potY + 7} L${potWx + 3.5} ${potY + 7} Z`,
-        fill: '#111',
-      })));
+      const ppTrack = drawPotTrack(0, potY, halfLen, true);
+      const ppTipX = ppTrack.peakAmp + 0.8;
+      const wiperX = ppTipX + endStub;
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: potY - halfLen, x2: 0, y2: lug3Y })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: potY + halfLen, x2: 0, y2: lug1Y })));
+      drawPotWiperLead(ppTipX, tapY, wiperX, wiperMidY, { arrowLen: 3.4, arrowHalfH: 2.4 });
 
-      const pinOut = [
-        { x: poleAx - 14, y: yThrowUp },
-        { x: poleBx + 14, y: yThrowUp },
-        { x: poleAx - 14, y: yCommon },
-        { x: poleBx + 14, y: yCommon },
-        { x: poleAx - 14, y: yThrowDn },
-        { x: poleBx + 14, y: yThrowDn },
-      ];
-      for (let i = 0; i < 6; i++) {
-        const p = swPositions[i];
-        const o = pinOut[i];
-        g.appendChild(svgEl('line', strokeAttrs({
-          x1: p.x, y1: p.y, x2: o.x, y2: o.y, 'stroke-width': 1.2,
-        })));
-        // Compact T labels so the stack stays readable
-        const tMeta = terms[i]
-          ? { ...terms[i], label: terms[i].label || `T${i + 1}` }
-          : { label: `T${i + 1}`, active: true };
-        addPin(o.x, o.y, tMeta);
-      }
-      g.appendChild(svgEl('line', strokeAttrs({
-        x1: lug1X, y1: potY, x2: lug1X, y2: potY + 12,
-      })));
-      addPin(lug1X, potY + 12, terms[6] || { label: '1' });
-      addPin(potX, potY + wiperY, terms[7] || { label: '2' });
-      addPin(lug3X, potY, terms[8] || { label: '3' });
+      const pinOut = guitarDpdtPinOut(poleAx, poleBx, yThrowUp, yCommon, yThrowDn);
+      attachGuitarDpdtPins(swPositions, pinOut);
+      addPin(0, lug1Y, terms[6] || { label: '1' }, { exit: 'down', stubLen: 8 });
+      addPin(wiperX, wiperMidY, terms[7] || { label: '2' }, { exit: 'right', stubLen: 8 });
+      addPin(0, lug3Y, terms[8] || { label: '3' }, { exit: 'left', stubLen: 8 });
       if (terms[9]) {
         addPotCaseGround(
-          lug1X, potY + 12, terms[9], !!meta?.potBondCaseToLug1, wiperY, potX,
+          0, lug1Y, terms[9], !!meta?.potBondCaseToLug1, wiperX, wiperMidY,
         );
       }
     } else if (kind === 'capacitor') {
       /*
        * IEEE capacitor. Shunt-to-ground (tone caps): vertical — signal lead on top,
        * ground lead on bottom dropping to the rail (NA guitar schematic practice).
-       * Series caps stay horizontal.
+       * Series caps stay horizontal. Shunt form is slightly compact so it can sit
+       * clear of pot lug 1 / case ground when hung under the wiper.
        */
       const gndEnd = meta?.leadGroundEnd;
       if (gndEnd === 0 || gndEnd === 1) {
+        const plateW = 6.5;
+        const plateY = 2.35;
+        const lead = 9;
         g.appendChild(svgEl('line', strokeAttrs({
-          x1: -11, y1: -3.5, x2: 11, y2: -3.5, 'stroke-width': 2.4,
+          x1: -plateW, y1: -plateY, x2: plateW, y2: -plateY, 'stroke-width': 1.95,
         })));
         g.appendChild(svgEl('line', strokeAttrs({
-          x1: -11, y1: 3.5, x2: 11, y2: 3.5, 'stroke-width': 2.4,
+          x1: -plateW, y1: plateY, x2: plateW, y2: plateY, 'stroke-width': 1.95,
         })));
-        g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: -14, x2: 0, y2: -3.5 })));
-        g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: 3.5, x2: 0, y2: 14 })));
-        const top = { x: 0, y: -14 };
-        const bot = { x: 0, y: 14 };
-        // DOM order: ground end at bottom (drops to rail), signal end on top
+        g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: -lead, x2: 0, y2: -plateY })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: plateY, x2: 0, y2: lead })));
+        const top = { x: 0, y: -lead };
+        const bot = { x: 0, y: lead };
         const p0 = gndEnd === 0 ? bot : top;
         const p1 = gndEnd === 1 ? bot : top;
         addPin(p0.x, p0.y, terms[0]);
         addPin(p1.x, p1.y, terms[1]);
+        // Value to the right of the plates — vertical lead owns the centerline.
+        paintSideGutterTitles(11, { anchor: 'start', y: 1, step: 9 });
       } else {
-        g.appendChild(svgEl('line', strokeAttrs({ x1: -3.5, y1: -11, x2: -3.5, y2: 11, 'stroke-width': 2.4 })));
-        g.appendChild(svgEl('line', strokeAttrs({ x1: 3.5, y1: -11, x2: 3.5, y2: 11, 'stroke-width': 2.4 })));
-        g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: 0, x2: -3.5, y2: 0 })));
-        g.appendChild(svgEl('line', strokeAttrs({ x1: 3.5, y1: 0, x2: 18, y2: 0 })));
-        addPin(-18, 0, terms[0]);
-        addPin(18, 0, terms[1]);
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -2.8, y1: -8, x2: -2.8, y2: 8, 'stroke-width': 2.1 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: 2.8, y1: -8, x2: 2.8, y2: 8, 'stroke-width': 2.1 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -14, y1: 0, x2: -2.8, y2: 0 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: 2.8, y1: 0, x2: 14, y2: 0 })));
+        addPin(-14, 0, terms[0]);
+        addPin(14, 0, terms[1]);
       }
     } else if (kind === 'resistor') {
       const gndEnd = meta?.leadGroundEnd;
       if (gndEnd === 0 || gndEnd === 1) {
         g.appendChild(svgEl('path', strokeAttrs({
-          d: 'M0 -14 L-7 -10 L7 -5 L-7 0 L7 5 L-7 10 L0 14',
+          d: 'M0 -11 L-5.5 -8 L5.5 -4 L-5.5 0 L5.5 4 L-5.5 8 L0 11',
         })));
-        g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: -22, x2: 0, y2: -14 })));
-        g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: 14, x2: 0, y2: 22 })));
-        const top = { x: 0, y: -22 };
-        const bot = { x: 0, y: 22 };
+        g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: -17, x2: 0, y2: -11 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: 11, x2: 0, y2: 17 })));
+        const top = { x: 0, y: -17 };
+        const bot = { x: 0, y: 17 };
         const p0 = gndEnd === 0 ? bot : top;
         const p1 = gndEnd === 1 ? bot : top;
         addPin(p0.x, p0.y, terms[0]);
         addPin(p1.x, p1.y, terms[1]);
+        paintSideGutterTitles(10, { anchor: 'start', y: 0, step: 9 });
       } else {
         g.appendChild(svgEl('path', strokeAttrs({
-          d: 'M-18 0 L-13 -7 L-8 7 L-3 -7 L2 7 L7 -7 L12 7 L18 0',
+          d: 'M-14 0 L-10 -5.5 L-6 5.5 L-2 -5.5 L2 5.5 L6 -5.5 L10 5.5 L14 0',
         })));
-        addPin(-18, 0, terms[0]);
-        addPin(18, 0, terms[1]);
+        addPin(-14, 0, terms[0]);
+        addPin(14, 0, terms[1]);
       }
     } else if (kind === 'inductor') {
       const gndEnd = meta?.leadGroundEnd;
@@ -32045,20 +33584,49 @@
         addPin(-18, 0, terms[0]);
         addPin(18, 0, terms[1]);
       }
-    } else if (kind === 'transistor') {
-      // BJT: circle + base/emitter/collector (E B C tip order)
-      g.appendChild(svgEl('circle', strokeAttrs({ cx: 0, cy: 0, r: 10, fill: '#fff' })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -4, y1: -7, x2: -4, y2: 7, 'stroke-width': 2.2 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: 0, x2: -4, y2: 0 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -4, y1: -4, x2: 10, y2: -12 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -4, y1: 4, x2: 10, y2: 12 })));
-      g.appendChild(svgEl('path', strokeAttrs({
-        d: 'M6 8 L10 12 L7 13 Z',
-        fill: '#111',
-      })));
-      addPin(-18, 0, terms[1]); // B
-      addPin(12, -12, terms[2]); // C
-      addPin(12, 12, terms[0]); // E
+    } else if (kind === 'transistor' || kind === 'jfet' || kind === 'mosfet-n' || kind === 'mosfet-p') {
+      // Discrete semiconductors — DOM tip order E/S · B/G · C/D
+      g.appendChild(svgEl('circle', strokeAttrs({ cx: 0, cy: 0, r: 11, fill: '#fff' })));
+      if (kind === 'jfet') {
+        // JFET: channel bar + gate arrow into channel
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -5, y1: -8, x2: -5, y2: 8, 'stroke-width': 2.2 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: 0, x2: -5, y2: 0 })));
+        g.appendChild(svgEl('path', strokeAttrs({
+          d: 'M-11 0 L-5 -3.5 L-5 3.5 Z', fill: '#111',
+        })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -5, y1: -5, x2: 12, y2: -12 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -5, y1: 5, x2: 12, y2: 12 })));
+      } else if (kind === 'mosfet-n' || kind === 'mosfet-p') {
+        // MOSFET: broken channel + gate plate (N arrow out of source)
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -3, y1: -8, x2: -3, y2: -2, 'stroke-width': 2 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -3, y1: 2, x2: -3, y2: 8, 'stroke-width': 2 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -7, y1: -8, x2: -7, y2: 8, 'stroke-width': 1.4 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: 0, x2: -7, y2: 0 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -3, y1: -5, x2: 12, y2: -12 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -3, y1: 5, x2: 12, y2: 12 })));
+        if (kind === 'mosfet-n') {
+          g.appendChild(svgEl('path', strokeAttrs({
+            d: 'M4 6 L12 12 L6 12 Z', fill: '#111',
+          })));
+        } else {
+          g.appendChild(svgEl('path', strokeAttrs({
+            d: 'M12 6 L4 12 L12 12 Z', fill: '#111',
+          })));
+        }
+      } else {
+        // BJT NPN (default)
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -4, y1: -7, x2: -4, y2: 7, 'stroke-width': 2.2 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: 0, x2: -4, y2: 0 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -4, y1: -4, x2: 10, y2: -12 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -4, y1: 4, x2: 10, y2: 12 })));
+        g.appendChild(svgEl('path', strokeAttrs({
+          d: 'M6 8 L10 12 L7 13 Z',
+          fill: '#111',
+        })));
+      }
+      addPin(-18, 0, terms[1]); // B / G
+      addPin(12, -12, terms[2]); // C / D
+      addPin(12, 12, terms[0]); // E / S
     } else if (kind === 'opamp') {
       // Triangle amp: − / + inputs, output, V+ / V−
       g.appendChild(svgEl('path', strokeAttrs({
@@ -32258,7 +33826,8 @@
       addPin(18, -10, terms[2]);
       addEarth(0, 22);
     } else if (kind === 'power-transformer' || kind === 'audio-transformer') {
-      // IEEE two-winding transformer with isolation gap
+      // IEEE two-winding transformer; audio OT adds phase dots
+      const audio = kind === 'audio-transformer';
       g.appendChild(svgEl('path', strokeAttrs({
         d: 'M-14 -10 c0-5 5-5 5 0 s5 5 5 0 s5 -5 5 0',
       })));
@@ -32272,6 +33841,19 @@
       g.appendChild(svgEl('path', strokeAttrs({
         d: 'M8 10 c0-5 5-5 5 0 s5 5 5 0 s5 -5 5 0',
       })));
+      if (audio) {
+        g.appendChild(svgEl('circle', {
+          cx: -8, cy: -14, r: 1.6, fill: '#111', stroke: 'none',
+        }));
+        g.appendChild(svgEl('circle', {
+          cx: 14, cy: -14, r: 1.6, fill: '#111', stroke: 'none',
+        }));
+      }
+      // Optional center-tap (5th term) on secondary
+      if (terms[4]) {
+        g.appendChild(svgEl('line', strokeAttrs({ x1: 22, y1: 0, x2: 28, y2: 0 })));
+        addPin(28, 0, terms[4]);
+      }
       addPin(-22, -10, terms[0]);
       addPin(-22, 10, terms[1]);
       addPin(22, -10, terms[2]);
@@ -32290,106 +33872,440 @@
         addPin(20, -12 + (i - 2) * 10, terms[i]);
       }
     } else if (kind === 'jack') {
-      // Theoretical output jack (rightmost column): tip faces left toward the circuit,
-      // sleeve drops down to the chassis ground rail — no wrap-around to H.
-      // DOM pin order still G then H.
-      g.appendChild(svgEl('circle', strokeAttrs({ cx: 0, cy: 0, r: 9, fill: '#fff' })));
-      // Tip contact (hot) left
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -9, y1: 0, x2: -18, y2: 0 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -14, y1: -3, x2: -18, y2: 0 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -14, y1: 3, x2: -18, y2: 0 })));
-      // Sleeve contact (ground) bottom — straight drop (no right-side bulge)
-      g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: 9, x2: 0, y2: 18 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -4, y1: 18, x2: 4, y2: 18 })));
-      addPin(0, 18, terms[0]);  // G
-      addPin(-18, 0, terms[1]); // H
-    } else if (kind === 'jack-stereo') {
-      // Theoretical TRS jack: tip left, ring below, sleeve bottom — DOM G, R, H
-      g.appendChild(svgEl('circle', strokeAttrs({ cx: 0, cy: 0, r: 9, fill: '#fff' })));
-      // Tip (hot) left
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -9, y1: 0, x2: -18, y2: 0 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -14, y1: -3, x2: -18, y2: 0 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -14, y1: 3, x2: -18, y2: 0 })));
-      // Ring below-left
-      g.appendChild(svgEl('path', strokeAttrs({ d: 'M-4 8 L-6 18' })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -9, y1: 18, x2: -3, y2: 18 })));
-      // Sleeve bottom (straight)
-      g.appendChild(svgEl('line', strokeAttrs({ x1: 4, y1: 8, x2: 4, y2: 18 })));
-      g.appendChild(svgEl('line', strokeAttrs({ x1: 1, y1: 18, x2: 7, y2: 18 })));
-      addPin(4, 18, terms[0]);   // G sleeve
-      addPin(-6, 18, terms[1]);  // R ring
-      addPin(-18, 0, terms[2]);  // H tip
-    } else if (kind === 'footswitch') {
-      // SPDT footswitch — C / NO / NC
-      g.appendChild(svgEl('line', strokeAttrs({ x1: -8, y1: 0, x2: 6, y2: -10, 'stroke-width': 2 })));
-      g.appendChild(svgEl('circle', {
-        cx: -8, cy: 0, r: 2.2, fill: '#111', stroke: '#111', 'stroke-width': 1,
+      /*
+       * ¼″ TS instrument jack — audio/guitar schematic form (leaf chevron + body bar).
+       * Tip spring points at the shell; sleeve is a simpler bend into the barrel.
+       * Tip leaf→pin uses SYMBOL_END (same as pot wiper tip→pin / coil ends).
+       */
+      const bodyX = 10;
+      const bodyTop = -11;
+      const bodyBot = 13;
+      const tipLeafX = -3;
+      const tipPinX = tipLeafX - SYMBOL_END;
+      const gPinY = POT_TRACK_HALF + SYMBOL_END; // align with pot lug 1
+      g.appendChild(svgEl('rect', {
+        x: bodyX, y: bodyTop, width: 3.2, height: bodyBot - bodyTop,
+        fill: '#111', stroke: 'none',
       }));
-      addPin(-18, 0, terms[0]);
-      addPin(16, -12, terms[1]);
-      addPin(16, 12, terms[2]);
+      // Tip leaf chevron (point toward body) + stub
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-3 -4 L5 0 L-3 4',
+        fill: 'none',
+        'stroke-width': 1.55,
+        'stroke-linejoin': 'miter',
+        'stroke-linecap': 'butt',
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: 5, y1: 0, x2: bodyX, y2: 0, 'stroke-width': 1.45,
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: tipPinX, y1: 0, x2: tipLeafX, y2: 0,
+      })));
+      // Sleeve: horizontal then diagonal up into body
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: `M-8 9 L4 9 L${bodyX} 5`,
+        fill: 'none',
+        'stroke-width': 1.45,
+        'stroke-linejoin': 'miter',
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: bodyX + 1.6, y1: bodyBot, x2: bodyX + 1.6, y2: gPinY,
+      })));
+      addPin(bodyX + 1.6, gPinY, terms[0], {
+        exit: 'down', stubLen: 8, labelDy: 13, labelAnchor: 'middle',
+      }); // G sleeve
+      addPin(tipPinX, 0, terms[1], {
+        exit: 'left', stubLen: 8, labelDx: -10, labelDy: -5, labelAnchor: 'end',
+      }); // H tip
+    } else if (kind === 'jack-stereo') {
+      /*
+       * ¼″ TRS — tip + ring leaf chevrons, sleeve bend, shared body bar.
+       * DOM order: G, R, H.
+       */
+      const bodyX = 10;
+      const bodyTop = -14;
+      const bodyBot = 16;
+      g.appendChild(svgEl('rect', {
+        x: bodyX, y: bodyTop, width: 3.2, height: bodyBot - bodyTop,
+        fill: '#111', stroke: 'none',
+      }));
+      // Tip chevron (upper)
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-3 -8 L5 -4 L-3 0',
+        fill: 'none',
+        'stroke-width': 1.5,
+        'stroke-linejoin': 'miter',
+        'stroke-linecap': 'butt',
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: 5, y1: -4, x2: bodyX, y2: -4, 'stroke-width': 1.4,
+      })));
+      const tipLeafX = -3;
+      const tipPinX = tipLeafX - SYMBOL_END;
+      const gPinY = POT_TRACK_HALF + SYMBOL_END;
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: tipPinX, y1: -4, x2: tipLeafX, y2: -4,
+      })));
+      // Ring chevron (mid)
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-3 0 L5 4 L-3 8',
+        fill: 'none',
+        'stroke-width': 1.45,
+        'stroke-linejoin': 'miter',
+        'stroke-linecap': 'butt',
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: 5, y1: 4, x2: bodyX, y2: 4, 'stroke-width': 1.35,
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: -10, y1: 4, x2: -3, y2: 4,
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: -10, y1: 4, x2: -10, y2: 17,
+      })));
+      // Sleeve bend into body
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: `M-6 12 L4 12 L${bodyX} 8`,
+        fill: 'none',
+        'stroke-width': 1.4,
+        'stroke-linejoin': 'miter',
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: bodyX + 1.6, y1: bodyBot, x2: bodyX + 1.6, y2: gPinY,
+      })));
+      addPin(bodyX + 1.6, gPinY, terms[0], {
+        exit: 'down', stubLen: 8, labelDy: 13, labelAnchor: 'middle',
+      }); // G
+      addPin(-10, 17, terms[1], {
+        exit: 'down', stubLen: 8, labelDy: 13, labelAnchor: 'middle',
+      }); // R
+      addPin(tipPinX, -4, terms[2], {
+        exit: 'left', stubLen: 8, labelDx: -10, labelDy: -5, labelAnchor: 'end',
+      }); // H
+    } else if (kind === 'footswitch' || kind === 'footswitch-3pdt') {
+      if (kind === 'footswitch-3pdt') {
+        // 3PDT stomp — three ganged SPDT poles (true-bypass / LED / effect)
+        const xs = [-16, 0, 16];
+        xs.forEach((x, pi) => {
+          g.appendChild(svgEl('line', strokeAttrs({
+            x1: x - 2, y1: 2, x2: x + 8, y2: -10, 'stroke-width': 1.8,
+          })));
+          g.appendChild(svgEl('circle', {
+            cx: x - 2, cy: 2, r: 1.8, fill: '#111', stroke: '#111', 'stroke-width': 1,
+          }));
+          addPin(x - 2, 14, terms[pi * 3] || { label: 'C' });
+          addPin(x + 10, -14, terms[pi * 3 + 1] || { label: 'NO' });
+          addPin(x + 10, 14, terms[pi * 3 + 2] || { label: 'NC' });
+        });
+        g.appendChild(svgEl('line', strokeAttrs({
+          x1: -14, y1: -2, x2: 14, y2: -2, 'stroke-dasharray': '2 2', 'stroke-width': 1.1,
+        })));
+      } else {
+        // SPDT footswitch — C / NO / NC
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -8, y1: 0, x2: 6, y2: -10, 'stroke-width': 2 })));
+        g.appendChild(svgEl('circle', {
+          cx: -8, cy: 0, r: 2.2, fill: '#111', stroke: '#111', 'stroke-width': 1,
+        }));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -8, y1: 0, x2: -18, y2: 0, 'stroke-width': 1.15 })));
+        addPin(-18, 0, terms[0]);
+        addPin(16, -12, terms[1]);
+        addPin(16, 12, terms[2]);
+      }
+    } else if (kind === 'switch-spst') {
+      // SPST ON-OFF — single pole + case ground
+      const closed = !!(meta?.bridges?.length);
+      g.appendChild(svgEl('circle', {
+        cx: -10, cy: 0, r: 2.2, fill: '#111', stroke: '#111', 'stroke-width': 1,
+      }));
+      g.appendChild(svgEl('circle', {
+        cx: 10, cy: 0, r: 2.2, fill: closed ? '#111' : '#fff', stroke: '#111', 'stroke-width': 1.15,
+      }));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: -10, y1: 0, x2: closed ? 10 : 6, y2: closed ? 0 : -8, 'stroke-width': 2,
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: 0, x2: -10, y2: 0 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 10, y1: 0, x2: 22, y2: 0 })));
+      addPin(-22, 0, terms[0] || { label: 'T1' });
+      addPin(22, 0, terms[1] || { label: 'T2' });
+      attachSwitchCaseGround(-10, 10, 0, 0);
+      const throwLabel = getToggleSwitchThrowLabel(meta?.switchThrow || 'on-off');
+      schematicTitleLabel(labelsG, 0, nameY - 11, throwLabel, 7, '#555');
     } else if (kind === 'switch') {
-      // ANSI Y32.2 / IEEE 315 DPDT (two SPDT + §14.1 mechanical connection)
+      // Lever/arrow DPDT — dual commons → arrow wipers → throw columns, ganged
       const type = meta?.switchType === 2 ? 2 : 1;
       const throwLabel = getToggleSwitchThrowLabel(meta?.switchThrow);
       schematicTitleLabel(
         labelsG,
         0,
-        nameY - 11,
-        `${throwLabel} · Type ${type}${meta?.stateLabel ? ` · ${meta.stateLabel}` : ''}`,
-        7,
+        nameY - 9,
+        `${throwLabel} · Type ${type}`,
+        6.5,
         '#555'
       );
 
-      const poleAx = -14;
-      const poleBx = 14;
-      const yUp = -16;
-      const yMid = 0;
-      const yDn = 16;
-      const contacts = drawAnsiDpdtPoles(poleAx, poleBx, yUp, yMid, yDn, meta?.bridges);
-      const pinOut = [
-        { x: poleAx - 14, y: yUp },
-        { x: poleBx + 14, y: yUp },
-        { x: poleAx - 14, y: yMid },
-        { x: poleBx + 14, y: yMid },
-        { x: poleAx - 14, y: yDn },
-        { x: poleBx + 14, y: yDn },
-      ];
-      for (let i = 0; i < 6; i++) {
-        const p = contacts[i];
-        const o = pinOut[i];
-        g.appendChild(svgEl('line', strokeAttrs({
-          x1: p.x, y1: p.y, x2: o.x, y2: o.y, 'stroke-width': 1.2,
-        })));
-        addPin(o.x, o.y, terms[i] || { label: `T${i + 1}`, active: true });
-      }
+      const lever = drawLeverDpdtPoles(meta?.bridges);
+      // Throws on the pickup side exit left; commons + right-pole throws exit
+      // right toward the pot bus (T3 is the exclusive selector hot out).
+      const pinOut = lever.contacts.map((c, i) => ({
+        x: c.x,
+        y: c.y,
+        exit: (i === 0 || i === 4) ? 'left' : 'right',
+        stubLen: swStub,
+      }));
+      attachGuitarDpdtPins(lever.contacts, pinOut);
       /*
-       * Case / frame ground (T7): IEEE 315 §3.9.2 chassis symbol centered under
-       * the pole stack — not a seventh throw and not beside T4/T6.
-       * Same treatment as pot enclosure ground on NA diagrams.
+       * Case / frame ground (T7): IEEE 315 §3.9.2 on the bottom apron —
+       * clears side throw/common stubs and the shared chassis rail below.
        */
-      if (terms[6] && (
-        terms[6].isGround
-        || terms[6].label === 'G'
-        || terms[6].role === 'G'
-        || terms[6].term?.classList?.contains('switch-case-ground')
-      )) {
-        addFrameCaseGround(0, yDn + 14, terms[6], { fromY: yDn + 4 });
+      attachSwitchCaseGround(lever.poleAx, lever.poleBx, lever.yUp, lever.yDn);
+    } else if (kind === 'capacitor-polar') {
+      // Electrolytic: curved plate = negative (IEEE / NA) — compact
+      const gndEnd = meta?.leadGroundEnd;
+      if (gndEnd === 0 || gndEnd === 1) {
+        g.appendChild(svgEl('line', strokeAttrs({
+          x1: -8, y1: -2.8, x2: 8, y2: -2.8, 'stroke-width': 2.1,
+        })));
+        g.appendChild(svgEl('path', strokeAttrs({
+          d: 'M-8 4 Q0 0 8 4', 'stroke-width': 1.9, fill: 'none',
+        })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: -11, x2: 0, y2: -2.8 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: 4, x2: 0, y2: 11 })));
+        const plus = svgEl('text', {
+          x: 5, y: -5, 'font-size': 6, fill: '#111', 'font-family': 'Consolas, monospace',
+        });
+        plus.textContent = '+';
+        g.appendChild(plus);
+        const top = { x: 0, y: -11 };
+        const bot = { x: 0, y: 11 };
+        const p0 = gndEnd === 0 ? bot : top;
+        const p1 = gndEnd === 1 ? bot : top;
+        addPin(p0.x, p0.y, terms[0]);
+        addPin(p1.x, p1.y, terms[1]);
+      } else {
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -2.8, y1: -8, x2: -2.8, y2: 8, 'stroke-width': 2.1 })));
+        g.appendChild(svgEl('path', strokeAttrs({
+          d: 'M4 -8 Q0 0 4 8', 'stroke-width': 1.9, fill: 'none',
+        })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: -14, y1: 0, x2: -2.8, y2: 0 })));
+        g.appendChild(svgEl('line', strokeAttrs({ x1: 4, y1: 0, x2: 14, y2: 0 })));
+        const plus = svgEl('text', {
+          x: -8, y: -6, 'font-size': 6, fill: '#111', 'font-family': 'Consolas, monospace',
+        });
+        plus.textContent = '+';
+        g.appendChild(plus);
+        addPin(-14, 0, terms[0]);
+        addPin(14, 0, terms[1]);
       }
-    } else {
+    } else if (kind === 'chassis-ground') {
+      addChassisGround(0, 0);
+      addPin(0, 8, terms[0] || { label: 'G', isGround: true });
+    } else if (kind === 'earth-ground') {
+      addEarth(0, 0);
+      addPin(0, 8, terms[0] || { label: 'G', isGround: true });
+    } else if (kind === 'fuse') {
       g.appendChild(svgEl('rect', strokeAttrs({
-        x: -16, y: -10, width: 32, height: 20, fill: '#fff',
+        x: -12, y: -5, width: 24, height: 10, rx: 2, fill: '#fff',
       })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: 0, x2: -12, y2: 0 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 12, y1: 0, x2: 18, y2: 0 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -8, y1: 0, x2: 8, y2: 0, 'stroke-width': 1.2 })));
+      addPin(-18, 0, terms[0]);
+      addPin(18, 0, terms[1]);
+    } else if (kind === 'choke') {
+      // Iron-core choke (amp power supply)
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-14 0 c0-7 7-7 7 0 s7 7 7 0 s7 -7 7 0 s7 7 7 0',
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -8, y1: -12, x2: -8, y2: 12, 'stroke-width': 1.6 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -4, y1: -12, x2: -4, y2: 12, 'stroke-width': 1.6 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: 0, x2: -14, y2: 0 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 14, y1: 0, x2: 22, y2: 0 })));
+      addPin(-22, 0, terms[0]);
+      addPin(22, 0, terms[1]);
+    } else if (kind === 'speaker') {
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-6 -10 L2 -16 L2 16 L-6 10 Z', fill: '#fff',
+      })));
+      g.appendChild(svgEl('rect', strokeAttrs({
+        x: -12, y: -6, width: 6, height: 12, fill: '#fff',
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: -4, x2: -12, y2: -4 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -22, y1: 4, x2: -12, y2: 4 })));
+      addPin(-22, -4, terms[0]);
+      addPin(-22, 4, terms[1]);
+    } else if (kind === 'piezo') {
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -3.5, y1: -11, x2: -3.5, y2: 11, 'stroke-width': 2.4 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 3.5, y1: -11, x2: 3.5, y2: 11, 'stroke-width': 2.4 })));
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M8 -6 L14 0 L8 6', 'stroke-width': 1.3, fill: 'none',
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: 0, x2: -3.5, y2: 0 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 3.5, y1: 0, x2: 10, y2: 0 })));
+      addPin(-18, 0, terms[0]);
+      addPin(14, 0, terms[1]);
+    } else if (kind === 'bridge-rectifier') {
+      // Diamond bridge — ~ / + / ~ / −
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M0 -14 L14 0 L0 14 L-14 0 Z', fill: '#fff',
+      })));
+      g.appendChild(svgEl('path', strokeAttrs({ d: 'M-6 -4 L0 -10 L6 -4', fill: 'none' })));
+      g.appendChild(svgEl('path', strokeAttrs({ d: 'M-6 4 L0 10 L6 4', fill: 'none' })));
+      addPin(0, -18, terms[0] || { label: '~' });
+      addPin(18, 0, terms[1] || { label: '+' });
+      addPin(0, 18, terms[2] || { label: '~' });
+      addPin(-18, 0, terms[3] || { label: '−' });
+    } else if (kind === 'neon') {
+      g.appendChild(svgEl('circle', strokeAttrs({ cx: 0, cy: 0, r: 9, fill: '#fff' })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -4, y1: -5, x2: -4, y2: 5, 'stroke-width': 1.8 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 4, y1: -5, x2: 4, y2: 5, 'stroke-width': 1.8 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -18, y1: 0, x2: -9, y2: 0 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 9, y1: 0, x2: 18, y2: 0 })));
+      addPin(-18, 0, terms[0]);
+      addPin(18, 0, terms[1]);
+    } else if (kind === 'ldr') {
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-14 0 L-9 -7 L-4 7 L1 -7 L6 7 L11 -7 L16 0',
+      })));
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M8 -14 L4 -8 M12 -14 L8 -8', 'stroke-width': 1.2,
+      })));
+      addPin(-18, 0, terms[0]);
+      addPin(18, 0, terms[1]);
+    } else if (kind === 'optocoupler') {
+      g.appendChild(svgEl('rect', strokeAttrs({
+        x: -18, y: -14, width: 36, height: 28, fill: '#fff',
+      })));
+      // LED
+      g.appendChild(svgEl('path', strokeAttrs({ d: 'M-12 -4 L-4 -4 L-8 4 Z', fill: '#111' })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -12, y1: 4, x2: -4, y2: 4, 'stroke-width': 1.6 })));
+      // Phototransistor
+      g.appendChild(svgEl('circle', strokeAttrs({ cx: 8, cy: 0, r: 6, fill: '#fff' })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 5, y1: -4, x2: 5, y2: 4, 'stroke-width': 1.6 })));
+      addPin(-14, -18, terms[0] || { label: 'A' });
+      addPin(-14, 18, terms[1] || { label: 'K' });
+      addPin(14, -18, terms[2] || { label: 'C' });
+      addPin(14, 18, terms[3] || { label: 'E' });
+    } else if (kind === 'trimmer') {
+      // Compact sideways trimmer — vertical track, wiper right
+      const halfLen = 10;
+      const trTrack = drawPotTrack(0, 0, halfLen, true);
+      const trTipX = trTrack.peakAmp + 0.8;
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: -halfLen, x2: 0, y2: -halfLen - 5 })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: halfLen, x2: 0, y2: halfLen + 5 })));
+      drawPotWiperLead(trTipX, 0, 12, 0, { arrowLen: 3.4, arrowHalfH: 2.8 });
+      addPin(0, halfLen + 5, terms[0] || { label: '1' }, { exit: 'down', stubLen: 7 });
+      addPin(12, 0, terms[1] || { label: '2' }, { exit: 'right', stubLen: 7 });
+      addPin(0, -(halfLen + 5), terms[2] || { label: '3' }, { exit: 'left', stubLen: 7 });
+      paintSideGutterTitles(20, { rotate: -90, y: 0, step: 9 });
+    } else if (kind === 'rotary-switch') {
+      g.appendChild(svgEl('circle', strokeAttrs({ cx: 0, cy: 0, r: 10, fill: '#fff' })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 0, y1: 0, x2: 8, y2: -6, 'stroke-width': 2 })));
+      g.appendChild(svgEl('circle', {
+        cx: 0, cy: 0, r: 2, fill: '#111', stroke: 'none',
+      }));
+      const n = Math.max(3, Math.min(12, terms.length || 6));
+      for (let i = 0; i < n; i++) {
+        const a = (-Math.PI / 2) + (i / n) * Math.PI * 2;
+        const x = Math.cos(a) * 18;
+        const y = Math.sin(a) * 18;
+        g.appendChild(svgEl('line', strokeAttrs({
+          x1: Math.cos(a) * 10, y1: Math.sin(a) * 10, x2: x, y2: y, 'stroke-width': 1.1,
+        })));
+        addPin(x, y, terms[i] || { label: String(i + 1) });
+      }
+    } else if (kind === 'jack-in') {
+      /*
+       * TS input — same leaf + body form, mirrored (body left, tip into circuit right).
+       * Tip leaf→pin = SYMBOL_END (matches output jack / pot wiper).
+       */
+      const bodyX = -13.2;
+      const bodyTop = -11;
+      const bodyBot = 13;
+      const tipLeafX = 3;
+      const tipPinX = tipLeafX + SYMBOL_END;
+      const gPinY = POT_TRACK_HALF + SYMBOL_END;
+      g.appendChild(svgEl('rect', {
+        x: bodyX, y: bodyTop, width: 3.2, height: bodyBot - bodyTop,
+        fill: '#111', stroke: 'none',
+      }));
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M3 -4 L-5 0 L3 4',
+        fill: 'none',
+        'stroke-width': 1.55,
+        'stroke-linejoin': 'miter',
+        'stroke-linecap': 'butt',
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: -5, y1: 0, x2: bodyX + 3.2, y2: 0, 'stroke-width': 1.45,
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: tipLeafX, y1: 0, x2: tipPinX, y2: 0,
+      })));
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: `M8 9 L-4 9 L${bodyX + 3.2} 5`,
+        fill: 'none',
+        'stroke-width': 1.45,
+        'stroke-linejoin': 'miter',
+      })));
+      g.appendChild(svgEl('line', strokeAttrs({
+        x1: bodyX + 1.6, y1: bodyBot, x2: bodyX + 1.6, y2: gPinY,
+      })));
+      addPin(bodyX + 1.6, gPinY, terms[0], {
+        exit: 'down', stubLen: 8, labelDy: 13, labelAnchor: 'middle',
+      }); // G
+      addPin(tipPinX, 0, terms[1], {
+        exit: 'right', stubLen: 8, labelDx: 10, labelDy: -5, labelAnchor: 'start',
+      }); // H
+    } else if (kind === 'tube-rectifier') {
+      // Dual-diode rectifier envelope (5Y3 / GZ34 class)
+      g.appendChild(svgEl('ellipse', strokeAttrs({
+        cx: 0, cy: 0, rx: 18, ry: 16, fill: '#fff',
+      })));
+      g.appendChild(svgEl('path', strokeAttrs({ d: 'M-10 -2 L-2 -2 L-6 6 Z', fill: '#111' })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: -10, y1: 6, x2: -2, y2: 6, 'stroke-width': 1.6 })));
+      g.appendChild(svgEl('path', strokeAttrs({ d: 'M2 -2 L10 -2 L6 6 Z', fill: '#111' })));
+      g.appendChild(svgEl('line', strokeAttrs({ x1: 2, y1: 6, x2: 10, y2: 6, 'stroke-width': 1.6 })));
+      g.appendChild(svgEl('path', strokeAttrs({
+        d: 'M-5 8 L-2 12 L1 8 L4 12 L7 8', 'stroke-width': 1.1,
+      })));
+      addPin(-8, -20, terms[0] || { label: 'P1' });
+      addPin(8, -20, terms[1] || { label: 'P2' });
+      addPin(0, 20, terms[2] || { label: 'K' });
+      if (terms[3]) addPin(-14, 18, terms[3]);
+      if (terms[4]) addPin(14, 18, terms[4]);
+    } else {
+      // Professional generic block — dashed enclosure + titled stub pins
+      g.appendChild(svgEl('rect', strokeAttrs({
+        x: -18, y: -12, width: 36, height: 24, fill: '#fff', 'stroke-dasharray': '3 2',
+      })));
+      const catalog = SCHEMATIC_SYMBOL_CATALOG[kind];
+      if (catalog?.label && kind !== 'generic') {
+        schematicTitleLabel(labelsG, 0, 2, catalog.label.split(' ')[0], 6, '#666');
+      }
       const n = Math.max(2, terms.length || 2);
       for (let i = 0; i < n; i++) {
         const t = n === 1 ? 0.5 : i / (n - 1);
-        addPin(-16 + t * 32, 14, terms[i]);
+        addPin(-16 + t * 32, 18, terms[i]);
       }
     }
 
     while (pins.length < terms.length) {
       const i = pins.length;
-      addPin(-20 + i * 10, 28, terms[i]);
+      const term = terms[i];
+      const isEncG = !!(term?.isGround
+        || term?.role === 'G'
+        || term?.label === 'G'
+        || term?.term?.classList?.contains?.('switch-case-ground')
+        || term?.term?.classList?.contains?.('pot-case-ground'));
+      // Enclosure G is placed by attachSwitchCaseGround / pot case helpers only —
+      // never invent a floating pad under the body when G is omitted.
+      if (isEncG) {
+        pins.push({
+          x: 0, y: 0, exit: null, stubLen: null, omitted: true,
+        });
+        continue;
+      }
+      addPin(-20 + i * 10, 28, term);
     }
 
     g.appendChild(labelsG);
@@ -32398,27 +34314,38 @@
 
   /**
    * Ideal schematic column by signal role (theoretical left→right flow).
+   * Guitar SSS: pickups → blade (3-way) → 2-way (bridge-on / phase) → pots/cap → out.
    * Workspace XY is NOT used for absolute placement — only relative order within a column.
    */
   function schematicColumnForKind(kind, meta) {
     if (kind === 'pickup-sc' || kind === 'pickup-hb' || kind === 'pickup-4c'
       || kind === 'battery' || kind === 'dc-jack'
       || kind === 'heater-supply' || kind === 'hv-supply'
-      || kind === 'dual-rail' || kind === 'power-transformer') {
-      return 0; // sources
+      || kind === 'dual-rail' || kind === 'power-transformer'
+      || kind === 'jack-in' || kind === 'chassis-ground' || kind === 'earth-ground') {
+      return 0; // sources / grounds
     }
-    if (kind === 'switch' || kind === 'footswitch') return 1; // selectors
-    if (kind === 'pot' || kind === 'push-pot') return 2; // controls
-    // Shunt-to-ground passives sit with the pots they load (tone cap, bleed R, …)
+    if (kind === 'switch' || kind === 'switch-spst' || kind === 'footswitch'
+      || kind === 'footswitch-3pdt' || kind === 'rotary-switch') {
+      // Pickup selector (3-way) left of compact 2-position switches
+      // (bridge-on, mid-phase, series/split).
+      const thr = meta?.switchThrow;
+      if (thr === 'on-on-on' || thr === 'on-off-on') return 1;
+      if (thr === 'on-on' || thr === 'on-off') return 2;
+      return 1; // other switches — treat as selector column
+    }
+    if (kind === 'pot' || kind === 'push-pot' || kind === 'trimmer') return 3; // controls
     const gndEnd = meta?.leadGroundEnd;
     if ((gndEnd === 0 || gndEnd === 1)
-      && (kind === 'capacitor' || kind === 'resistor' || kind === 'diode'
-        || kind === 'led' || kind === 'inductor')) {
-      return 2;
+      && (kind === 'capacitor' || kind === 'capacitor-polar' || kind === 'resistor'
+        || kind === 'diode' || kind === 'led' || kind === 'inductor' || kind === 'fuse')) {
+      return 3;
     }
-    if (kind === 'jack' || kind === 'jack-stereo') return 4; // outputs
-    return 3; // discrete passives / actives
+    if (kind === 'jack' || kind === 'jack-stereo' || kind === 'speaker') return 5; // outputs
+    return 4; // discrete passives / actives
   }
+
+  const SCHEMATIC_CONTROLS_COL = 3;
 
   function isSchematicChassisGroundTerm(termMeta, termEl) {
     if (!termMeta && !termEl) return false;
@@ -32434,6 +34361,37 @@
     return false;
   }
 
+  /** Enclosure / frame ground lug only (not pickup coil G, not a throw tied into the bus). */
+  function isSchematicEnclosureGroundTerm(termMeta, termEl) {
+    if (termEl?.classList?.contains('switch-case-ground')
+      || termEl?.classList?.contains('pot-case-ground')) {
+      return true;
+    }
+    if (termMeta?.term?.classList?.contains('switch-case-ground')
+      || termMeta?.term?.classList?.contains('pot-case-ground')) {
+      return true;
+    }
+    if (termMeta?.signalMark === 'chassis') return true;
+    return false;
+  }
+
+  /**
+   * Pins that terminate into a local ground symbol (enclosure G, dedicated
+   * chassis asset, jack sleeve, pickup shield/G) — not a shared rail.
+   * Signal commons wired into the ground net are NOT listed here.
+   */
+  function isSchematicRailGroundPin(termMeta, termEl, kind) {
+    if (isSchematicEnclosureGroundTerm(termMeta, termEl)) return true;
+    if (kind === 'chassis-ground' || kind === 'earth-ground') return true;
+    if (kind === 'jack' || kind === 'jack-in' || kind === 'jack-stereo') {
+      return isSchematicChassisGroundTerm(termMeta, termEl);
+    }
+    if (kind === 'pickup-sc' || kind === 'pickup-hb' || kind === 'pickup-4c') {
+      return isSchematicChassisGroundTerm(termMeta, termEl);
+    }
+    return false;
+  }
+
   /** Compare workspace neighbors: above/below first, then left/right. */
   function compareSchematicWorkspaceOrder(a, b) {
     const dy = a.canvasY - b.canvasY;
@@ -32443,6 +34401,46 @@
     return dy || dx || String(a.id).localeCompare(String(b.id));
   }
 
+  /** Neck=0 · Mid=1 · Bridge=2 from place-label / title when present. */
+  function schematicPickupRoleFromLabel(text) {
+    const s = String(text || '').toLowerCase();
+    if (/\bneck\b|\bnk\b/.test(s)) return 0;
+    if (/\bmid(?:dle)?\b/.test(s)) return 1;
+    if (/\bbridge\b|\bbr\b/.test(s)) return 2;
+    return null;
+  }
+
+  /**
+   * Guitar pickup stack order: neck top/left · mid middle · bridge bottom/right.
+   * Uses labels when set; otherwise infers from workspace Y then X among peers.
+   */
+  function schematicPickupRoleRank(node, peers = null) {
+    const labeled = schematicPickupRoleFromLabel(node?.label)
+      || schematicPickupRoleFromLabel(node?.el && getAssetDisplayName(node.el));
+    if (labeled != null) return labeled;
+    const group = (peers && peers.length ? peers : [node]).filter((n) => (
+      n.kind === 'pickup-sc' || n.kind === 'pickup-hb' || n.kind === 'pickup-4c'
+    ));
+    if (group.length <= 1) return 0;
+    const sorted = [...group].sort(compareSchematicWorkspaceOrder);
+    const idx = sorted.findIndex((n) => n.id === node.id);
+    if (idx <= 0) return 0;
+    if (idx >= sorted.length - 1) return 2;
+    if (sorted.length === 2) return 2;
+    return 1;
+  }
+
+  function compareSchematicPickupOrder(a, b, peers) {
+    const ra = schematicPickupRoleRank(a, peers);
+    const rb = schematicPickupRoleRank(b, peers);
+    if (ra !== rb) return ra - rb;
+    return compareSchematicWorkspaceOrder(a, b);
+  }
+
+  function isSchematicPickupNode(n) {
+    return n?.kind === 'pickup-sc' || n?.kind === 'pickup-hb' || n?.kind === 'pickup-4c';
+  }
+
   function schematicSymbolPack(kind, pins) {
     const xs = pins.map((p) => p.x);
     const ys = pins.map((p) => p.y);
@@ -32450,20 +34448,21 @@
     const maxX = (xs.length ? Math.max(...xs) : 24) + 10;
     const minY = (ys.length ? Math.min(...ys) : -20) - 8;
     const maxY = (ys.length ? Math.max(...ys) : 20) + 8;
-    // Title / value band above the body — leave room so wires don’t eat labels
-    const titlePad = (kind === 'push-pot') ? 64
-      : (kind === 'pot') ? 52
-        : (kind === 'switch') ? 46
-          : (kind === 'pickup-hb' || kind === 'pickup-4c'
-            || kind === 'tube-dual' || kind === 'tube-power') ? 48
-            : (kind === 'capacitor' || kind === 'resistor') ? 40
-              : 38;
+    // Title / value band above the body — compact utilitarian clearance
+    const titlePad = (kind === 'push-pot') ? 56
+      : (kind === 'pot' || kind === 'trimmer') ? 36
+      : (kind === 'switch' || kind === 'switch-spst' || kind === 'footswitch-3pdt') ? 48
+        : (kind === 'pickup-sc' || kind === 'pickup-hb' || kind === 'pickup-4c'
+            || kind === 'tube-dual' || kind === 'tube-power' || kind === 'tube-rectifier') ? 36
+            : (kind === 'capacitor' || kind === 'capacitor-polar' || kind === 'resistor') ? 32
+              : 30;
     // Bonded pot chassis glyph sits below pin bbox; independent case G is already a pin.
-    const caseExtra = (kind === 'push-pot') ? 28
-      : (kind === 'pot') ? 18
-        : (kind === 'switch') ? 6
-          : (kind === 'jack' || kind === 'jack-stereo') ? 4
-            : 0;
+    const caseExtra = (kind === 'push-pot') ? 22
+      : (kind === 'pot') ? 14
+        : (kind === 'switch' || kind === 'switch-spst') ? 20
+          : (kind === 'jack' || kind === 'jack-in' || kind === 'jack-stereo') ? 10
+            : (kind === 'chassis-ground' || kind === 'earth-ground') ? 4
+              : 0;
     return {
       minX,
       maxX,
@@ -32481,41 +34480,55 @@
 
   /** Preferred leave direction for a schematic pin (NA / pin geometry). */
   function schematicPreferredPinExit(kind, pinIdx, localX, localY, meta) {
-    if (kind === 'jack') {
+    if (kind === 'jack' || kind === 'jack-in') {
       if (pinIdx === 0) return 'down'; // sleeve G
-      if (pinIdx === 1) return 'left'; // tip H
+      if (pinIdx === 1) return kind === 'jack-in' ? 'right' : 'left'; // tip H
     }
     if (kind === 'jack-stereo') {
       if (pinIdx === 0) return 'down';
       if (pinIdx === 2) return 'left';
       return 'down';
     }
-    if (kind === 'pot') {
-      // Lug 1 shares the left apron with case G — drop then route (like wiper),
-      // unless lug1↔case is bonded (ground already owns the down stub).
-      if (pinIdx === 0) return meta?.potBondCaseToLug1 ? 'up' : 'down';
-      if (pinIdx === 1) return 'down';
-      if (pinIdx === 2) return 'right';
+    if (kind === 'pot' || kind === 'trimmer') {
+      // Sideways pot: 1 cold bottom, 2 wiper right, 3 hot top (exit left toward switch)
+      if (pinIdx === 0) return 'down';
+      if (pinIdx === 1) return 'right';
+      if (pinIdx === 2) return 'left';
       return 'down';
     }
-    if (kind === 'push-pot') {
-      if (pinIdx === 6) return meta?.potBondCaseToLug1 ? 'up' : 'down';
-      if (pinIdx === 7) return 'down';
-      if (pinIdx === 8) return 'right';
-      if (pinIdx === 9) return 'down';
-      // DPDT poles straddle 0 when stacked: even idx = pole A (left), odd = pole B
-      return (pinIdx % 2 === 0) ? 'left' : 'right';
-    }
     const gndEnd = meta?.leadGroundEnd;
-    if ((kind === 'capacitor' || kind === 'resistor' || kind === 'diode'
-      || kind === 'led' || kind === 'inductor')
+    if ((kind === 'capacitor' || kind === 'capacitor-polar' || kind === 'resistor'
+      || kind === 'diode' || kind === 'led' || kind === 'inductor' || kind === 'fuse')
       && (gndEnd === 0 || gndEnd === 1)) {
       return pinIdx === gndEnd ? 'down' : 'up';
     }
-    if (kind === 'pickup-sc' || kind === 'pickup-hb') {
-      if (localX < -4) return 'right'; // toward circuit
-      if (localX > 4) return 'left';
+    if (kind === 'pickup-sc') {
+      // Vertical coil: H top → circuit; G bottom → local ground symbol
+      if (pinIdx === 0) return 'right'; // H
+      if (pinIdx === 1) return 'down'; // G
     }
+    if (kind === 'switch') {
+      // T1/T5 ← pickups; T2/T6 → right throws; T3/T4 commons → pot bus; G ↓
+      if (pinIdx >= 6) return 'down';
+      if (pinIdx === 0 || pinIdx === 4) return 'left';
+      return 'right';
+    }
+    if (kind === 'push-pot') {
+      if (pinIdx === 6) return 'down'; // pot 1 cold
+      if (pinIdx === 7) return 'right'; // pot 2 wiper
+      if (pinIdx === 8) return 'left'; // pot 3 hot
+      if (pinIdx === 9) return 'down'; // case G
+      // DPDT: left pole ← left; right pole → right (never through mid)
+      if (pinIdx < 6) return (pinIdx % 2 === 0) ? 'left' : 'right';
+      return (pinIdx % 2 === 0) ? 'left' : 'right';
+    }
+    if (kind === 'pickup-hb' || kind === 'pickup-4c') {
+      if (pinIdx === 4) return 'down'; // G → chassis
+      if (pinIdx === 2) return 'right'; // R
+      if (pinIdx === 0 || pinIdx === 1 || pinIdx === 3 || localX < -4) return 'left';
+      if (localX > 4) return 'right';
+    }
+    if (kind === 'chassis-ground' || kind === 'earth-ground') return 'down';
     if (Math.abs(localY) >= Math.abs(localX) - 1) return localY >= 0 ? 'down' : 'up';
     return localX < 0 ? 'left' : 'right';
   }
@@ -32592,23 +34605,123 @@
     return dots;
   }
 
-  /** Sort controls column so shunt passives sit next to the pot they’re wired to. */
+  /**
+   * NA sheet convention: semicircle hop where orthogonal wires cross without a
+   * junction (degree < 3). Leaves collectSchematicJunctionDots as the only
+   * connection marks.
+   */
+  function schematicApplyCrossingHops(pathDs, junctionDots = []) {
+    const junctionKeys = new Set(
+      (junctionDots || []).map((p) => schematicPointKey(p.x, p.y)),
+    );
+    const hopR = 3.2;
+    const segsByPath = pathDs.map((d) => {
+      const pts = schematicPathPoints(d);
+      const segs = [];
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1];
+        const b = pts[i];
+        const horiz = Math.abs(a.y - b.y) < 0.6;
+        const vert = Math.abs(a.x - b.x) < 0.6;
+        if (!horiz && !vert) continue;
+        segs.push({
+          x1: a.x, y1: a.y, x2: b.x, y2: b.y, horiz, vert, i0: i - 1, i1: i,
+        });
+      }
+      return { pts, segs, d };
+    });
+
+    const hopsOnPath = pathDs.map(() => []); // [{x,y,alongX}] along horizontal segs
+    const hopSeen = pathDs.map(() => new Set());
+
+    // Hop every horizontal that crosses a vertical — independent of draw order.
+    // (Draw-order-only hops left Mid H×Vol→T3 as a false + beside the Tone hop.)
+    for (let hi = 0; hi < segsByPath.length; hi++) {
+      for (let vi = 0; vi < segsByPath.length; vi++) {
+        if (hi === vi) continue;
+        const hp = segsByPath[hi];
+        const vp = segsByPath[vi];
+        hp.segs.forEach((h) => {
+          if (!h.horiz) return;
+          vp.segs.forEach((v) => {
+            if (!v.vert) return;
+            const x = v.x1;
+            const y = h.y1;
+            const hLo = Math.min(h.x1, h.x2);
+            const hHi = Math.max(h.x1, h.x2);
+            const vLo = Math.min(v.y1, v.y2);
+            const vHi = Math.max(v.y1, v.y2);
+            if (x <= hLo + hopR + 1 || x >= hHi - hopR - 1) return;
+            if (y <= vLo + hopR + 1 || y >= vHi - hopR - 1) return;
+            if (junctionKeys.has(schematicPointKey(x, y))) return;
+            const key = schematicPointKey(x, y);
+            if (hopSeen[hi].has(key)) return;
+            hopSeen[hi].add(key);
+            hopsOnPath[hi].push({ x, y, seg: h });
+          });
+        });
+      }
+    }
+
+    return pathDs.map((d, pi) => {
+      const hops = hopsOnPath[pi];
+      if (!hops.length) return d;
+      const pts = schematicPathPoints(d);
+      if (pts.length < 2) return d;
+      // Group hops by segment index, sort along travel
+      const bySeg = new Map();
+      hops.forEach((h) => {
+        const key = h.seg.i0;
+        if (!bySeg.has(key)) bySeg.set(key, []);
+        bySeg.get(key).push(h);
+      });
+      let out = `M${pts[0].x} ${pts[0].y}`;
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1];
+        const b = pts[i];
+        const segHops = bySeg.get(i - 1);
+        if (!segHops || !segHops.length || Math.abs(a.y - b.y) >= 0.6) {
+          out += ` L${b.x} ${b.y}`;
+          continue;
+        }
+        const goingRight = b.x >= a.x;
+        segHops.sort((p, q) => (goingRight ? p.x - q.x : q.x - p.x));
+        let cx = a.x;
+        const cy = a.y;
+        segHops.forEach((h) => {
+          const x0 = goingRight ? h.x - hopR : h.x + hopR;
+          const x1 = goingRight ? h.x + hopR : h.x - hopR;
+          if (Math.abs(x0 - cx) > 0.4) out += ` L${x0} ${cy}`;
+          // CW arc when L→R reaches y−r (visual “up”); CCW when R→L
+          const sweep = goingRight ? 0 : 1;
+          out += ` A${hopR} ${hopR} 0 0 ${sweep} ${x1} ${cy}`;
+          cx = x1;
+        });
+        out += ` L${b.x} ${b.y}`;
+      }
+      return out.replace(/\s+/g, ' ').trim();
+    });
+  }
+
+  /** Sort controls column: pots first (above), shunt passives last (below their pots). */
   function compareSchematicControlsColumn(a, b, nodesById) {
-    const potish = (n) => n.kind === 'pot' || n.kind === 'push-pot';
+    const potish = (n) => n.kind === 'pot' || n.kind === 'push-pot' || n.kind === 'trimmer';
     const shunt = (n) => {
       const g = n.meta?.leadGroundEnd;
       return (g === 0 || g === 1)
-        && (n.kind === 'capacitor' || n.kind === 'resistor' || n.kind === 'diode'
-          || n.kind === 'led' || n.kind === 'inductor');
+        && (n.kind === 'capacitor' || n.kind === 'capacitor-polar' || n.kind === 'resistor'
+          || n.kind === 'diode' || n.kind === 'led' || n.kind === 'inductor' || n.kind === 'fuse');
     };
+    const band = (n) => (potish(n) ? 0 : shunt(n) ? 2 : 1);
+    if (band(a) !== band(b)) return band(a) - band(b);
+
     const anchorY = (n) => {
       if (!shunt(n)) return n.canvasY;
-      // Prefer Y of a wired pot neighbor
-      let best = n.canvasY;
+      let best = n.canvasY + 80; // prefer below
       let bestD = Infinity;
       const terms = [...n.el.querySelectorAll('.terminal')];
       terms.forEach((t) => {
-        schematicWireNeighborTerminals(t).forEach((nt) => {
+        schematicNeighborTerminalsIncludingDocks(t).forEach((nt) => {
           const host = nt.closest?.('.component');
           if (!host) return;
           const other = nodesById.get(host.dataset.id);
@@ -32616,17 +34729,16 @@
           const d = Math.abs(other.canvasY - n.canvasY);
           if (d < bestD) {
             bestD = d;
-            best = other.canvasY + 12;
+            best = other.canvasY + 48;
           }
         });
       });
       return best;
     };
-    const dy = anchorY(a) - anchorY(b);
-    if (Math.abs(dy) > 12) return dy;
-    // Pots above their shunt caps when tied
-    if (potish(a) && shunt(b)) return -1;
-    if (shunt(a) && potish(b)) return 1;
+    const dy = potish(a) && potish(b)
+      ? (a.canvasY - b.canvasY)
+      : (anchorY(a) - anchorY(b));
+    if (Math.abs(dy) > 8) return dy;
     return compareSchematicWorkspaceOrder(a, b);
   }
 
@@ -32706,13 +34818,12 @@
   function getPickupBuildTypeLabel(el) {
     const template = GuitarAssets.getTemplate(el?.dataset?.assetId);
     const subtype = template?.subtype || el?.dataset?.assetId || '';
-    if (subtype === '4conductor' || template?.id === '4conductor') return '4-conductor';
-    if (isSingleCoilComponent(el)) return 'SC (single-coil)';
-    if (isDualCoilComponent(el) && isPickupComponent(el)) return 'dual-coil';
-    if (template?.category === 'pickup') {
-      if (subtype === 'singlecoil') return 'SC (single-coil)';
-      if (subtype === 'dualcoil') return 'dual-coil';
+    if (isSingleCoilComponent(el) || subtype === 'singlecoil') return 'SC (single coil)';
+    if (isDualCoilComponent(el) && isPickupComponent(el)) return 'DC (dual coil)';
+    if (subtype === 'dualcoil' || subtype === '4conductor' || template?.id === '4conductor') {
+      return 'DC (dual coil)';
     }
+    if (template?.category === 'pickup') return 'pickup';
     return 'pickup';
   }
 
@@ -33064,37 +35175,124 @@
    * @param {object[]} nodes
    * @param {{ colGap?: number, rowGap?: number }} [opts]
    */
+  /**
+   * Ideal schematic placements — signal-flow columns with connectivity-aware
+   * vertical order (barycenter) and a pin-alignment pass. No hard locks on
+   * absolute Y; workspace order is only a fallback seed.
+   */
   function computeSchematicPlacements(nodes, opts = {}) {
-    const roleColumns = [[], [], [], [], []];
+    const profile = opts.profile || getSchematicCircuitProfile(nodes);
+    const edgeList = Array.isArray(opts.edges) ? opts.edges : [];
     const nodesById = new Map(nodes.map((n) => [n.id, n]));
+
+    // Neighbor sets for barycenter ordering
+    const neigh = new Map();
+    nodes.forEach((n) => neigh.set(n.id, new Set()));
+    edgeList.forEach((e) => {
+      if (!e?.aId || !e?.bId || e.aId === e.bId) return;
+      if (!neigh.has(e.aId) || !neigh.has(e.bId)) return;
+      neigh.get(e.aId).add(e.bId);
+      neigh.get(e.bId).add(e.aId);
+    });
+
+    const roleColumns = [[], [], [], [], [], []];
     nodes.forEach((node) => {
       roleColumns[schematicColumnForKind(node.kind, node.meta)].push(node);
     });
-    roleColumns.forEach((col, ci) => {
-      if (ci === 2) col.sort((a, b) => compareSchematicControlsColumn(a, b, nodesById));
-      else col.sort(compareSchematicWorkspaceOrder);
-    });
-    const columns = roleColumns.filter((col) => col.length > 0);
 
-    const colGap = Number.isFinite(opts.colGap) ? opts.colGap : 184;
-    const rowGap = Number.isFinite(opts.rowGap) ? opts.rowGap : 30;
+    // Seed order: controls keep shunt-follows-pot; pickups neck→mid→bridge; else workspace Y
+    roleColumns.forEach((col, ci) => {
+      if (ci === SCHEMATIC_CONTROLS_COL) {
+        col.sort((a, b) => compareSchematicControlsColumn(a, b, nodesById));
+      } else if (col.some(isSchematicPickupNode)) {
+        col.sort((a, b) => compareSchematicPickupOrder(a, b, col));
+      } else col.sort(compareSchematicWorkspaceOrder);
+    });
+
+    // Barycenter: pull each column toward neighbors — skip controls so shunt
+    // caps stay below pots (barycenter was lifting the tone cap).
+    const colOf = new Map();
+    roleColumns.forEach((col, ci) => col.forEach((n) => colOf.set(n.id, ci)));
+    const rankInCol = () => {
+      const r = new Map();
+      roleColumns.forEach((col) => {
+        col.forEach((n, i) => r.set(n.id, i));
+      });
+      return r;
+    };
+    for (let pass = 0; pass < 4; pass++) {
+      const ranks = rankInCol();
+      const dir = pass % 2 === 0 ? 1 : -1;
+      for (let ci = dir > 0 ? 0 : roleColumns.length - 1;
+        dir > 0 ? ci < roleColumns.length : ci >= 0;
+        ci += dir) {
+        if (ci === SCHEMATIC_CONTROLS_COL) continue;
+        const col = roleColumns[ci];
+        if (col.length < 2) continue;
+        const scored = col.map((n, i) => {
+          let sum = 0;
+          let cnt = 0;
+          neigh.get(n.id)?.forEach((oid) => {
+            const oc = colOf.get(oid);
+            if (oc == null || oc === ci) return;
+            if (ranks.has(oid)) {
+              sum += ranks.get(oid);
+              cnt += 1;
+            }
+          });
+          const bary = cnt ? sum / cnt : i;
+          return { n, bary, seed: i };
+        });
+        scored.sort((a, b) => (a.bary - b.bary) || (a.seed - b.seed));
+        roleColumns[ci] = scored.map((s) => s.n);
+      }
+    }
+    // Re-assert controls order after other columns moved
+    if (roleColumns[SCHEMATIC_CONTROLS_COL].length) {
+      roleColumns[SCHEMATIC_CONTROLS_COL].sort((a, b) => (
+        compareSchematicControlsColumn(a, b, nodesById)
+      ));
+    }
+    // Re-assert pickup neck→mid→bridge (barycenter must not scramble SSS stack)
+    roleColumns.forEach((col) => {
+      if (col.some(isSchematicPickupNode)) {
+        col.sort((a, b) => compareSchematicPickupOrder(a, b, col));
+      }
+    });
+
+    const columns = roleColumns.filter((col) => col.length > 0);
+    const colGap = Number.isFinite(opts.colGap) ? opts.colGap : profile.colGap;
+    const rowGap = Number.isFinite(opts.rowGap) ? opts.rowGap : profile.rowGap;
+    const pickupRowGap = Number.isFinite(profile.pickupRowGap)
+      ? profile.pickupRowGap
+      : rowGap + 12;
     const originX = 64;
-    const originY = 56;
+    const originY = 72;
     const placements = new Map();
+    let maxX = originX;
+    let maxY = originY;
     const colCursorY = columns.map(() => originY);
     const colCenterX = columns.map((_, ci) => originX + ci * colGap);
 
     columns.forEach((colNodes, ci) => {
+      // Map filtered column index back to role for pickup spacing
+      const roleCi = schematicColumnForKind(colNodes[0].kind, colNodes[0].meta);
+      const usePickupGap = roleCi === 0 && colNodes.some((n) => (
+        n.kind === 'pickup-sc' || n.kind === 'pickup-hb' || n.kind === 'pickup-4c'
+      ));
       colNodes.forEach((node) => {
-        const sym = buildSchematicSymbol(node.kind, node.label, node.meta);
+        const sym = buildSchematicSymbol(node.kind, node.label, node.meta, profile);
         const pack = schematicSymbolPack(node.kind, sym.pins);
         const x = colCenterX[ci];
         const y = colCursorY[ci] - pack.minY;
+        sym.g.setAttribute('transform', `translate(${x} ${y})`);
         const absPins = sym.pins.map((p) => ({
           x: p.x,
           y: p.y,
           absX: x + p.x,
           absY: y + p.y,
+          exit: p.exit || null,
+          stubLen: p.stubLen ?? null,
         }));
         placements.set(node.id, {
           x,
@@ -33104,11 +35302,18 @@
           pins: absPins,
           localPins: sym.pins,
           pack,
+          g: sym.g,
+          colIndex: ci,
+          profileId: profile.id,
         });
-        colCursorY[ci] = y + pack.maxY + rowGap;
+        const gapAfter = usePickupGap ? pickupRowGap : rowGap;
+        colCursorY[ci] = y + pack.maxY + gapAfter;
+        maxX = Math.max(maxX, x + pack.maxX + 40);
+        maxY = Math.max(maxY, colCursorY[ci]);
       });
     });
 
+    // Vertical centering across columns
     const colSpans = columns.map((colNodes) => {
       if (!colNodes.length) return { mid: originY, min: originY, max: originY };
       let min = Infinity;
@@ -33133,14 +35338,275 @@
         const p = placements.get(n.id);
         if (!p) return;
         p.y += shift;
+        if (p.g) p.g.setAttribute('transform', `translate(${p.x} ${p.y})`);
         p.pins.forEach((pin, i) => {
           pin.absY = p.y + p.localPins[i].y;
           pin.y = p.localPins[i].y;
         });
       });
+      maxY = Math.max(maxY, colSpans[ci].max + shift + 10);
     });
 
-    return { placements, columns, colGap, originX, originY };
+    // Soft pin-alignment between adjacent columns (skip shunt caps — keep them below pots)
+    if (edgeList.length) {
+      const isShuntKind = (k) => k === 'capacitor' || k === 'capacitor-polar' || k === 'resistor';
+      const tried = new Set();
+      edgeList.forEach((e) => {
+        const key = [e.aId, e.bId].sort().join('|');
+        if (tried.has(key)) return;
+        tried.add(key);
+        const pa = placements.get(e.aId);
+        const pb = placements.get(e.bId);
+        if (!pa || !pb || pa.colIndex === pb.colIndex) return;
+        if (isShuntKind(pa.kind) || isShuntKind(pb.kind)) return;
+        const dy = pb.y - pa.y;
+        if (Math.abs(dy) < 10 || Math.abs(dy) > 120) return;
+        const pull = dy * 0.18;
+        const apply = (p, delta) => {
+          p.y += delta;
+          if (p.g) p.g.setAttribute('transform', `translate(${p.x} ${p.y})`);
+          p.pins.forEach((pin, i) => {
+            pin.absY = p.y + p.localPins[i].y;
+          });
+        };
+        apply(pa, pull * 0.5);
+        apply(pb, -pull * 0.5);
+      });
+    }
+
+    // Signal-path pin snap: keep connected non-ground pins on one horizontal
+    // when safe (e.g. SC H → jack tip). Downstream column moves to match.
+    if (edgeList.length) {
+      const shiftPlacementY = (p, dy) => {
+        if (!p || Math.abs(dy) < 0.5) return;
+        p.y += dy;
+        if (p.g) p.g.setAttribute('transform', `translate(${p.x} ${p.y})`);
+        p.pins.forEach((pin, i) => {
+          pin.absY = p.y + p.localPins[i].y;
+          pin.y = p.localPins[i].y;
+        });
+      };
+      const pinIdxFor = (placement, termEl) => {
+        const terms = placement.meta?.terms || [];
+        const byRef = terms.findIndex((t) => t.term === termEl);
+        if (byRef >= 0) return byRef;
+        return -1;
+      };
+      const pairs = [];
+      edgeList.forEach((e) => {
+        const pa = placements.get(e.aId);
+        const pb = placements.get(e.bId);
+        if (!pa || !pb || pa.colIndex === pb.colIndex) return;
+        const ia = pinIdxFor(pa, e.aTerm);
+        const ib = pinIdxFor(pb, e.bTerm);
+        if (ia < 0 || ib < 0) return;
+        const termA = pa.meta.terms[ia];
+        const termB = pb.meta.terms[ib];
+        const aRail = isSchematicRailGroundPin(termA, e.aTerm, pa.kind);
+        const bRail = isSchematicRailGroundPin(termB, e.bTerm, pb.kind);
+        // Only align true signal↔signal (hot path). Grounds drop locally.
+        if (aRail || bRail) return;
+        pairs.push({
+          pa, pb, ia, ib,
+          span: Math.abs(pa.colIndex - pb.colIndex),
+        });
+      });
+      pairs.sort((a, b) => a.span - b.span);
+      pairs.forEach(({ pa, pb, ia, ib }) => {
+        const left = pa.colIndex <= pb.colIndex ? pa : pb;
+        const right = pa.colIndex <= pb.colIndex ? pb : pa;
+        const li = pa.colIndex <= pb.colIndex ? ia : ib;
+        const ri = pa.colIndex <= pb.colIndex ? ib : ia;
+        const targetY = left.pins[li]?.absY;
+        const curY = right.pins[ri]?.absY;
+        if (!Number.isFinite(targetY) || !Number.isFinite(curY)) return;
+        const dy = targetY - curY;
+        if (Math.abs(dy) < 1 || Math.abs(dy) > 160) return;
+        const nextY = right.y + dy;
+        const peers = [...placements.values()].filter((p) => (
+          p !== right && p.colIndex === right.colIndex
+        ));
+        const overlaps = peers.some((peer) => {
+          const a0 = nextY + right.pack.minY;
+          const a1 = nextY + right.pack.maxY;
+          const b0 = peer.y + peer.pack.minY;
+          const b1 = peer.y + peer.pack.maxY;
+          return a0 < b1 - 8 && a1 > b0 + 8;
+        });
+        if (overlaps) return;
+        shiftPlacementY(right, dy);
+        maxY = Math.max(maxY, nextY + right.pack.maxY + 12);
+      });
+    }
+
+    // Seat phase/on-on beside the pickup it fans from (usually Mid) so H/G spines stay short
+    placements.forEach((p, id) => {
+      if (p.kind !== 'switch') return;
+      const thr = p.meta?.switchThrow;
+      if (thr !== 'on-on' && thr !== 'on-off') return;
+      let best = null;
+      let bestN = 0;
+      neigh.get(id)?.forEach((oid) => {
+        const o = placements.get(oid);
+        if (!o || (o.kind !== 'pickup-sc' && o.kind !== 'pickup-hb' && o.kind !== 'pickup-4c')) {
+          return;
+        }
+        let n = 0;
+        edgeList.forEach((e) => {
+          if ((e.aId === id && e.bId === oid) || (e.bId === id && e.aId === oid)) n += 1;
+        });
+        if (n > bestN) {
+          bestN = n;
+          best = o;
+        }
+      });
+      if (!best || bestN < 1) return;
+      const dy = best.y - p.y;
+      if (Math.abs(dy) < 6 || Math.abs(dy) > 160) return;
+      p.y += dy * 0.85;
+      if (p.g) p.g.setAttribute('transform', `translate(${p.x} ${p.y})`);
+      p.pins.forEach((pin, i) => {
+        pin.absY = p.y + p.localPins[i].y;
+      });
+    });
+
+    // Seat 3-way blade on the Mid pickup row (N/M/B or SSS stack)
+    placements.forEach((p, id) => {
+      if (p.kind !== 'switch') return;
+      const thr = p.meta?.switchThrow;
+      if (thr !== 'on-on-on' && thr !== 'on-off-on') return;
+      const pickups = [...placements.entries()]
+        .filter(([, o]) => (
+          o.kind === 'pickup-sc' || o.kind === 'pickup-hb' || o.kind === 'pickup-4c'
+        ))
+        .map(([pid, o]) => ({ id: pid, p: o, node: nodesById.get(pid) }))
+        .sort((a, b) => a.p.y - b.p.y);
+      if (!pickups.length) return;
+      const midByLabel = pickups.find(({ node, p: pl }) => {
+        const label = String(
+          (node?.el && getAssetPlaceLabel(node.el))
+          || node?.label
+          || pl.meta?.label
+          || ''
+        ).toLowerCase();
+        return /\bmid(dle)?\b/.test(label) || label === 'm';
+      });
+      const target = midByLabel?.p
+        || (pickups.length >= 3 ? pickups[Math.floor((pickups.length - 1) / 2)].p : pickups[0].p);
+      const dy = target.y - p.y;
+      if (Math.abs(dy) < 4) return;
+      p.y += dy;
+      if (p.g) p.g.setAttribute('transform', `translate(${p.x} ${p.y})`);
+      p.pins.forEach((pin, i) => {
+        pin.absY = p.y + p.localPins[i].y;
+      });
+    });
+
+    // Keep Mid as visual center of the N/M/B stack (Mid stays put — switch is
+    // already seated on it). Collapse a longer Neck↔Mid or Mid↔Bridge gap.
+    {
+      const stack = [...placements.values()]
+        .filter((o) => (
+          o.kind === 'pickup-sc' || o.kind === 'pickup-hb' || o.kind === 'pickup-4c'
+        ))
+        .sort((a, b) => a.y - b.y);
+      if (stack.length === 3) {
+        const [top, mid, bot] = stack;
+        const gapTop = mid.y - top.y;
+        const gapBot = bot.y - mid.y;
+        const shiftPlacement = (p, dy) => {
+          if (!p || Math.abs(dy) < 0.5) return;
+          p.y += dy;
+          if (p.g) p.g.setAttribute('transform', `translate(${p.x} ${p.y})`);
+          p.pins.forEach((pin, i) => {
+            pin.absY = p.y + p.localPins[i].y;
+            pin.y = p.localPins[i].y;
+          });
+        };
+        if (gapBot - gapTop > 8) {
+          // Bridge too low — pull it up to match Neck↔Mid
+          shiftPlacement(bot, gapTop - gapBot);
+        } else if (gapTop - gapBot > 8) {
+          // Neck too high — push it down to match Mid↔Bridge
+          shiftPlacement(top, gapTop - gapBot);
+        }
+      }
+    }
+
+    placements.forEach((p) => {
+      maxY = Math.max(maxY, p.y + (p.pack.maxY || 40) + 24);
+    });
+
+    // Shunt tone cap (etc.): hang under the pot pin it leaves from (lug 1 or
+    // wiper) so the lead drops straight down into the symbol, then to ground.
+    // Wiper hang inherits tip→pin SYMBOL_END clearance from the pot shaft.
+    // Lug 3 stays on the left hot bus — never pull a shunt under that pin.
+    if (edgeList.length) {
+      const isShuntPlacement = (p) => {
+        const g = p?.meta?.leadGroundEnd;
+        return (g === 0 || g === 1)
+          && (p.kind === 'capacitor' || p.kind === 'capacitor-polar' || p.kind === 'resistor'
+            || p.kind === 'diode' || p.kind === 'led' || p.kind === 'inductor' || p.kind === 'fuse');
+      };
+      const isPotPlacement = (p) => (
+        p?.kind === 'pot' || p?.kind === 'push-pot' || p?.kind === 'trimmer'
+      );
+      const potHangPin = (kind, idx) => {
+        if (kind === 'pot' || kind === 'trimmer') return idx === 0 || idx === 1;
+        if (kind === 'push-pot') return idx === 6 || idx === 7;
+        return false;
+      };
+      const termIdx = (placement, termEl) => {
+        const terms = placement?.meta?.terms || [];
+        return terms.findIndex((t) => t.term === termEl);
+      };
+      edgeList.forEach((e) => {
+        const pa = placements.get(e.aId);
+        const pb = placements.get(e.bId);
+        if (!pa || !pb) return;
+        let potP;
+        let capP;
+        let potTerm;
+        let capTerm;
+        if (isPotPlacement(pa) && isShuntPlacement(pb)) {
+          potP = pa; capP = pb; potTerm = e.aTerm; capTerm = e.bTerm;
+        } else if (isPotPlacement(pb) && isShuntPlacement(pa)) {
+          potP = pb; capP = pa; potTerm = e.bTerm; capTerm = e.aTerm;
+        } else return;
+        const potIdx = termIdx(potP, potTerm);
+        const capIdx = termIdx(capP, capTerm);
+        if (potIdx < 0 || capIdx < 0) return;
+        if (capIdx === capP.meta.leadGroundEnd) return;
+        if (!potHangPin(potP.kind, potIdx)) return;
+        const potPin = potP.pins[potIdx];
+        const capPin = capP.pins[capIdx];
+        if (!potPin || !capPin) return;
+        // Wiper hang: top of cap at the same Y as lug 1; X still under/out from
+        // the wiper so the body clears the shaft / case ground.
+        // Lug1 hang: short drop below that pin.
+        const fromWiper = potIdx === 1 || potIdx === 7;
+        const lug1Idx = (potP.kind === 'push-pot') ? 6 : 0;
+        const lug1Pin = potP.pins[lug1Idx] || null;
+        const outBoard = fromWiper ? 6 : 0;
+        const targetY = fromWiper && lug1Pin
+          ? lug1Pin.absY
+          : potPin.absY + 18;
+        const dx = (potPin.absX + outBoard) - capPin.absX;
+        const dy = targetY - capPin.absY;
+        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+        capP.x += dx;
+        capP.y += dy;
+        if (capP.g) capP.g.setAttribute('transform', `translate(${capP.x} ${capP.y})`);
+        capP.pins.forEach((pin, i) => {
+          pin.absX = capP.x + capP.localPins[i].x;
+          pin.absY = capP.y + capP.localPins[i].y;
+        });
+        maxX = Math.max(maxX, capP.x + (capP.pack.maxX || 20) + 40);
+        maxY = Math.max(maxY, capP.y + (capP.pack.maxY || 40) + 24);
+      });
+    }
+
+    return { placements, columns, colGap, originX, originY, maxX, maxY, profile };
   }
 
   function collectSchematicNodesFromGraph(compById, connectedIds) {
@@ -33438,7 +35904,7 @@
     else schematicPeekCircuitIndex = circuitIndex;
     const island = islands.length >= 2 ? islands[circuitIndex] : null;
     const componentIds = island ? island.idSet : null;
-    const { compById, edges, connectedIds } = componentIds
+    const { compById, edges, jumpers = [], connectedIds } = componentIds
       ? collectConnectedCircuitGraph({ groupId, componentIds })
       : islandGraph;
 
@@ -33449,10 +35915,13 @@
 
     const nodes = collectSchematicNodesFromGraph(compById, connectedIds);
     // Wider than peek schematic so remade workplace parts/wires breathe
-    const remakeColGap = 248;
+    const remakeProfile = getSchematicCircuitProfile(nodes);
+    const remakeColGap = Math.max(260, (remakeProfile.colGap || 220) + 40);
     const { placements } = computeSchematicPlacements(nodes, {
       colGap: remakeColGap,
-      rowGap: 48,
+      rowGap: Math.max(56, (remakeProfile.rowGap || 48) + 8),
+      profile: remakeProfile,
+      edges,
     });
     if (!placements.size) {
       setStatus('Remake failed — no schematic layout');
@@ -33621,6 +36090,22 @@
       if (!idSet.has(aId) && !idSet.has(bId)) return;
       const start = getAttachPoint(wire, 'start');
       const end = getAttachPoint(wire, 'end');
+      // Internal jumper: prefer a direct/min-bend run (allowed through switch mid)
+      if (aId && aId === bId) {
+        const dx = Math.abs(end.x - start.x);
+        const dy = Math.abs(end.y - start.y);
+        if (dy < 1.5) {
+          wire.anchors = [];
+        } else if (dx < 1.5) {
+          wire.anchors = [];
+        } else {
+          wire.anchors = [{ x: end.x, y: start.y }];
+        }
+        wire.slack = 0;
+        wire.routeMode = 'manhattan';
+        updateWirePosition(wire);
+        return;
+      }
       const preferH = Math.abs(end.x - start.x) >= Math.abs(end.y - start.y);
       const pitch = remakeLanePitchFromStroke(getWireVisualStrokePx(wire)) || lanePitch;
       const fanStart = allocTermFan(wire.start?.terminal);
@@ -33684,7 +36169,7 @@
       syncSchematicPinCircuitName(targets.pin);
     }
 
-    const { compById, edges, connectedIds } = componentIds
+    const { compById, edges, jumpers = [], connectedIds } = componentIds
       ? collectConnectedCircuitGraph({ groupId, componentIds })
       : islandGraph;
 
@@ -33738,115 +36223,28 @@
     if (targets.pin) targets.pin.activeComponentIds = componentIds;
     if (isPeek) schematicPeekActiveComponentIds = componentIds;
 
-    const nodes = connectedIds.map((id) => {
-      const el = compById.get(id);
-      const kind = getSchematicSymbolKind(el);
-      const meta = collectSchematicTerminalMeta(el);
-      const raw = (getAssetDisplayName(el) || el.dataset.type || meta.template?.name || 'Part')
-        .replace(/\s+/g, ' ')
-        .trim();
-      const short = raw.length > 16 ? `${raw.slice(0, 14)}…` : raw;
-      return {
-        id,
-        el,
-        kind,
-        meta,
-        label: short,
-        // Workspace coords only inform relative order (above/below, left/right)
-        canvasX: parseFloat(el.style.left) || 0,
-        canvasY: parseFloat(el.style.top) || 0,
-      };
-    });
+    const nodes = collectSchematicNodesFromGraph(compById, connectedIds);
 
     /*
      * Ideal theoretical layout (not a 1:1 map of the workspace):
      *   sources → switch → pots → passives → jack
      * Within a column, preserve only relative above/below (then left/right).
      * Empty role-columns are skipped so gaps stay tight.
+     * Circuit profile (guitar/pedal/amp) sets density + switch conventions.
      */
-    const roleColumns = [[], [], [], [], []];
-    const nodesById = new Map(nodes.map((n) => [n.id, n]));
-    nodes.forEach((node) => {
-      roleColumns[schematicColumnForKind(node.kind, node.meta)].push(node);
-    });
-    roleColumns.forEach((col, ci) => {
-      if (ci === 2) col.sort((a, b) => compareSchematicControlsColumn(a, b, nodesById));
-      else col.sort(compareSchematicWorkspaceOrder);
-    });
-    const columns = roleColumns.filter((col) => col.length > 0);
-
-    const colGap = 184;
-    const rowGap = 30;
-    const originX = 64;
-    const originY = 56;
-    const placements = new Map();
-    let maxX = originX;
-    let maxY = originY;
-    const colCursorY = columns.map(() => originY);
-    const colCenterX = columns.map((_, ci) => originX + ci * colGap);
-
-    columns.forEach((colNodes, ci) => {
-      colNodes.forEach((node) => {
-        const sym = buildSchematicSymbol(node.kind, node.label, node.meta);
-        const pack = schematicSymbolPack(node.kind, sym.pins);
-        const x = colCenterX[ci];
-        const y = colCursorY[ci] - pack.minY; // top of title clears previous row
-        sym.g.setAttribute('transform', `translate(${x} ${y})`);
-        const absPins = sym.pins.map((p) => ({
-          x: p.x,
-          y: p.y,
-          absX: x + p.x,
-          absY: y + p.y,
-        }));
-        placements.set(node.id, {
-          x,
-          y,
-          kind: node.kind,
-          meta: node.meta,
-          pins: absPins,
-          localPins: sym.pins,
-          pack,
-          g: sym.g,
-        });
-        colCursorY[ci] = y + pack.maxY + rowGap;
-        maxX = Math.max(maxX, x + pack.maxX + 40);
-        maxY = Math.max(maxY, colCursorY[ci]);
-      });
-    });
-
-    // Align shorter columns toward the vertical middle of the tallest column
-    const colSpans = columns.map((colNodes, ci) => {
-      if (!colNodes.length) return { mid: originY, min: originY, max: originY };
-      let min = Infinity;
-      let max = -Infinity;
-      colNodes.forEach((n) => {
-        const p = placements.get(n.id);
-        if (!p) return;
-        min = Math.min(min, p.y + p.pack.minY);
-        max = Math.max(max, p.y + p.pack.maxY);
-      });
-      return { mid: (min + max) / 2, min, max };
-    });
-    const globalMid = colSpans.reduce((acc, s, i) => (
-      columns[i].length ? Math.max(acc, s.max - s.min) : acc
-    ), 0);
-    const targetMid = originY + globalMid / 2;
-    columns.forEach((colNodes, ci) => {
-      if (colNodes.length < 1) return;
-      const shift = targetMid - colSpans[ci].mid;
-      if (Math.abs(shift) < 4) return;
-      colNodes.forEach((n) => {
-        const p = placements.get(n.id);
-        if (!p) return;
-        p.y += shift;
-        p.g.setAttribute('transform', `translate(${p.x} ${p.y})`);
-        p.pins.forEach((pin, i) => {
-          pin.absY = p.y + p.localPins[i].y;
-          pin.y = p.localPins[i].y;
-        });
-      });
-      maxY = Math.max(maxY, colSpans[ci].max + shift + 10);
-    });
+    const {
+      placements,
+      colGap,
+      originX,
+      maxX: layoutMaxX,
+      maxY: layoutMaxY,
+      profile: circuitProfile,
+    } = computeSchematicPlacements(nodes, { edges });
+    let maxX = layoutMaxX;
+    let maxY = layoutMaxY;
+    if (isPeek && circuitProfile?.id) {
+      svg.dataset.circuitProfile = circuitProfile.id;
+    }
 
     const frag = document.createDocumentFragment();
     const wireLayer = svgEl('g');
@@ -33859,10 +36257,33 @@
     const pinAbs = (placement, termEl, comp) => {
       if (!placement) return null;
       const idx = terminalIndexOnComponent(comp, termEl);
-      const pin = placement.pins[Math.min(idx, placement.pins.length - 1)]
-        || placement.pins[0];
-      if (!pin) return null;
-      return { ...pin, idx };
+      if (idx >= 0 && idx < placement.pins.length) {
+        const pin = placement.pins[idx];
+        if (pin?.omitted) return null;
+        return { ...pin, idx };
+      }
+      // Prefer matching an enclosure ground pin over clamping onto the wrong throw
+      const termMeta = placement.meta?.terms?.[idx];
+      if (isSchematicChassisGroundTerm(termMeta, termEl)) {
+        for (let i = placement.pins.length - 1; i >= 0; i--) {
+          const tm = placement.meta?.terms?.[i];
+          const pin = placement.pins[i];
+          if (pin?.omitted) continue;
+          if (isSchematicEnclosureGroundTerm(tm, tm?.term)
+            || isSchematicRailGroundPin(tm, tm?.term, placement.kind)) {
+            return { ...pin, idx: i };
+          }
+        }
+        for (let i = placement.pins.length - 1; i >= 0; i--) {
+          const tm = placement.meta?.terms?.[i];
+          const pin = placement.pins[i];
+          if (pin?.omitted) continue;
+          if (isSchematicChassisGroundTerm(tm, null)) {
+            return { ...pin, idx: i };
+          }
+        }
+      }
+      return null;
     };
 
     edges.forEach((edge) => {
@@ -33878,37 +36299,59 @@
       // Shunt lead that only lands on ground joins the chassis bus (tone cap, etc.)
       const aLeadG = pa.meta?.leadGroundEnd === ia;
       const bLeadG = pb.meta?.leadGroundEnd === ib;
-      const aG = isSchematicChassisGroundTerm(termA, edge.aTerm) || aLeadG;
-      const bG = isSchematicChassisGroundTerm(termB, edge.bTerm) || bLeadG;
+      // Rail pins own chassis drops; signal commons wired into ground stay signal routes
+      const aRail = isSchematicRailGroundPin(termA, edge.aTerm, pa.kind) || aLeadG;
+      const bRail = isSchematicRailGroundPin(termB, edge.bTerm, pb.kind) || bLeadG;
       const pinA = pinAbs(pa, edge.aTerm, compA);
       const pinB = pinAbs(pb, edge.bTerm, compB);
       if (!pinA || !pinB) return;
 
-      if (aG) {
+      if (aRail) {
+        // Bonded pot case already draws general ground on the symbol — no second drop
+        const skipBonded = pa.meta?.potBondCaseToLug1
+          && isSchematicEnclosureGroundTerm(termA, edge.aTerm);
         const key = `${edge.aId}:${ia}`;
-        if (!groundPinKeys.has(key)) {
+        if (!skipBonded && !groundPinKeys.has(key)) {
           groundPinKeys.add(key);
           const posKey = `${Math.round(pinA.absX)}:${Math.round(pinA.absY)}`;
           if (!groundPinKeys.has(`pos:${posKey}`)) {
             groundPinKeys.add(`pos:${posKey}`);
-            groundPins.push({ absX: pinA.absX, absY: pinA.absY, key });
+            groundPins.push({
+              absX: pinA.absX,
+              absY: pinA.absY,
+              key,
+              id: edge.aId,
+              kind: pa.kind,
+              enclosure: isSchematicEnclosureGroundTerm(termA, edge.aTerm),
+              exit: pinA.exit || null,
+            });
           }
         }
       }
-      if (bG) {
+      if (bRail) {
+        const skipBonded = pb.meta?.potBondCaseToLug1
+          && isSchematicEnclosureGroundTerm(termB, edge.bTerm);
         const key = `${edge.bId}:${ib}`;
-        if (!groundPinKeys.has(key)) {
+        if (!skipBonded && !groundPinKeys.has(key)) {
           groundPinKeys.add(key);
           const posKey = `${Math.round(pinB.absX)}:${Math.round(pinB.absY)}`;
           if (!groundPinKeys.has(`pos:${posKey}`)) {
             groundPinKeys.add(`pos:${posKey}`);
-            groundPins.push({ absX: pinB.absX, absY: pinB.absY, key });
+            groundPins.push({
+              absX: pinB.absX,
+              absY: pinB.absY,
+              key,
+              id: edge.bId,
+              kind: pb.kind,
+              enclosure: isSchematicEnclosureGroundTerm(termB, edge.bTerm),
+              exit: pinB.exit || null,
+            });
           }
         }
       }
 
       // Pure chassis-bus links are replaced by the ideal ground rail
-      if (aG && bG) return;
+      if (aRail && bRail) return;
 
       signalEdges.push({
         ...edge,
@@ -33916,8 +36359,10 @@
         y1: pinA.absY,
         x2: pinB.absX,
         y2: pinB.absY,
-        aG,
-        bG,
+        // Rail↔rail omitted above. Signal↔rail stays a normal route (no
+        // vertical drop hijacked onto a throw/common).
+        aG: false,
+        bG: false,
         aIdx: ia,
         bIdx: ib,
         fromId: edge.aId,
@@ -33930,14 +36375,58 @@
         bKind: pb.kind,
         aMeta: pa.meta,
         bMeta: pb.meta,
+        aPin: pinA,
+        bPin: pinB,
+        jumper: false,
       });
     });
 
-    // Ideal chassis ground rail Y — tight clearance under ground pins / packs
+    // Same-component jumpers (e.g. Strat commons T3↔T4) — only paths allowed
+    // through a switch mid; drawn as short terminal↔terminal runs.
+    (jumpers || []).forEach((edge) => {
+      if (componentIds && !componentIds.has(edge.aId)) return;
+      const pa = placements.get(edge.aId);
+      if (!pa) return;
+      const comp = compById.get(edge.aId);
+      const ia = terminalIndexOnComponent(comp, edge.aTerm);
+      const ib = terminalIndexOnComponent(comp, edge.bTerm);
+      const pinA = pinAbs(pa, edge.aTerm, comp);
+      const pinB = pinAbs(pa, edge.bTerm, comp);
+      if (!pinA || !pinB) return;
+      signalEdges.push({
+        ...edge,
+        x1: pinA.absX,
+        y1: pinA.absY,
+        x2: pinB.absX,
+        y2: pinB.absY,
+        aG: false,
+        bG: false,
+        aIdx: ia,
+        bIdx: ib,
+        fromId: edge.aId,
+        toId: edge.bId,
+        aLocalX: pinA.x,
+        aLocalY: pinA.y,
+        bLocalX: pinB.x,
+        bLocalY: pinB.y,
+        aKind: pa.kind,
+        bKind: pa.kind,
+        aMeta: pa.meta,
+        bMeta: pa.meta,
+        aPin: pinA,
+        bPin: pinB,
+        jumper: true,
+      });
+    });
+
+    // Local ground symbol floor — short stub under each rail pin (no shared bus)
+    const GROUND_DROP = 12; // match bonded pot case glyph (lug1Y + 12)
     const busY = groundPins.length
       ? Math.max(
-        ...[...placements.values()].map((p) => p.y + p.pack.maxY + 14),
-        ...groundPins.map((p) => p.absY + 12),
+        ...[...placements.values()].map((p) => p.y + (p.pack.bodyMaxY ?? p.pack.maxY) + 14),
+        ...groundPins.map((p) => (
+          p.exit === 'up' ? p.absY - GROUND_DROP : p.absY + GROUND_DROP
+        ) + 8),
       )
       : maxY + 12;
 
@@ -33962,16 +36451,63 @@
       netUnite(`${e.aId}:${e.aIdx}`, `${e.bId}:${e.bIdx}`);
     });
 
-    // Symbol bodies — used so Manhattan routes don’t cut through pot/switch glyphs
+    // Symbol bodies only (not title pads) so routes can clear along pin stubs.
+    // Switches also expose an inter-pole gutter (T1↔T2, T3↔T4, T5↔T6) that
+    // non-jumper routes must never enter. Pots expose a shaft gutter on the
+    // zigzag centerline so buses never run straight through the track.
     const obstacles = [];
     placements.forEach((p, id) => {
+      const isSw = p.kind === 'switch' || p.kind === 'switch-spst' || p.kind === 'push-pot';
+      const isPot = p.kind === 'pot' || p.kind === 'trimmer';
+      const pad = isSw ? 2 : 4;
+      const left = p.x + (p.pack.bodyMinX ?? p.pack.minX) + pad;
+      const right = p.x + (p.pack.bodyMaxX ?? p.pack.maxX) - pad;
+      const top = p.y + (p.pack.bodyMinY ?? p.pack.minY) + pad;
+      const bottom = p.y + (p.pack.bodyMaxY ?? p.pack.maxY) - pad;
+      let gutterL = null;
+      let gutterR = null;
+      let gutterTop = top;
+      let gutterBot = bottom;
+      if (isSw && Array.isArray(p.localPins) && p.localPins.length >= 2) {
+        const contactPins = p.localPins.slice(0, Math.min(6, p.localPins.length));
+        const xs = contactPins.map((pin) => p.x + pin.x);
+        const ys = contactPins.map((pin) => p.y + pin.y);
+        const poleL = Math.min(...xs);
+        const poleR = Math.max(...xs);
+        // Interior between left/right pole contacts — ban for through-routing
+        gutterL = poleL + 3;
+        gutterR = poleR - 3;
+        if (gutterR <= gutterL) {
+          gutterL = p.x - 8;
+          gutterR = p.x + 8;
+        }
+        gutterTop = Math.min(...ys) - 6;
+        gutterBot = Math.max(...ys) + 6;
+      } else if (isSw) {
+        gutterL = p.x - 10;
+        gutterR = p.x + 10;
+      } else if (isPot) {
+        // Sideways pot zigzag sits on the symbol X — keep buses off the shaft
+        gutterL = p.x - 7;
+        gutterR = p.x + 7;
+        gutterTop = top + 4;
+        gutterBot = bottom - 4;
+      }
       obstacles.push({
         id,
         kind: p.kind,
-        left: p.x + p.pack.minX,
-        right: p.x + p.pack.maxX,
-        top: p.y + p.pack.minY,
-        bottom: p.y + p.pack.maxY,
+        left,
+        right,
+        top,
+        bottom,
+        midX: p.x,
+        midY: p.y,
+        gutterL,
+        gutterR,
+        gutterTop,
+        gutterBot,
+        isSwitch: isSw,
+        isPot,
       });
     });
 
@@ -33988,25 +36524,139 @@
       return false;
     };
 
-    // Shared orthogonal channels — same net / destination reuses the same vertical trunk
-    const trunkByDest = new Map(); // destKey -> channel X
-    let laneCounter = 0;
+    const vertCrossesBody = (x, ya, yb, ignoreIds = null) => {
+      const lo = Math.min(ya, yb);
+      const hi = Math.max(ya, yb);
+      if (hi - lo < 1.5) return false;
+      for (let i = 0; i < obstacles.length; i++) {
+        const o = obstacles[i];
+        if (ignoreIds && ignoreIds.has(o.id)) {
+          // Endpoint ignore still must not allow a vertical run down the pot shaft
+          if (o.isPot && o.gutterL != null && x >= o.gutterL - 0.5 && x <= o.gutterR + 0.5) {
+            if (lo < o.gutterBot - 2 && hi > o.gutterTop + 2) return true;
+          }
+          continue;
+        }
+        if (x < o.left - 1 || x > o.right + 1) continue;
+        if (lo < o.bottom - 3 && hi > o.top + 3) return true;
+      }
+      return false;
+    };
+
+    /**
+     * True if a segment enters a switch’s inter-pole gutter (space between
+     * T1–T2 / T3–T4 / T5–T6). Jumpers may cross; normal signal routes must not.
+     * Never honor ignoreIds for gutters — even when routing to that switch,
+     * approach must stay outside and enter via the pin’s own exit stub.
+     */
+    const segCrossesSwitchGutter = (x1, y1, x2, y2) => {
+      const ax = Math.min(x1, x2);
+      const bx = Math.max(x1, x2);
+      const ay = Math.min(y1, y2);
+      const by = Math.max(y1, y2);
+      const horiz = Math.abs(y2 - y1) < 0.75;
+      const vert = Math.abs(x2 - x1) < 0.75;
+      for (let i = 0; i < obstacles.length; i++) {
+        const o = obstacles[i];
+        if (!o.isSwitch || o.gutterL == null || o.gutterR == null) continue;
+        const gL = o.gutterL;
+        const gR = o.gutterR;
+        const gT = o.gutterTop ?? o.top;
+        const gB = o.gutterBot ?? o.bottom;
+        if (horiz) {
+          if (y1 < gT - 1 || y1 > gB + 1) continue;
+          // Through the pair gap (must cross the mid between left/right poles)
+          if (ax < o.midX - 1 && bx > o.midX + 1) return true;
+        } else if (vert) {
+          if (x1 <= gL + 1 || x1 >= gR - 1) continue;
+          if (ay < gB - 1 && by > gT + 1) return true;
+        } else {
+          // Degenerate / diagonal — treat mid-crossing bbox as hit
+          if (ax < o.midX && bx > o.midX && ay < gB && by > gT) return true;
+        }
+      }
+      return false;
+    };
+
+    /** True if an H segment crosses a switch’s vertical mid (legacy helper). */
+    const horizCrossesSwitchMid = (xa, y, xb, ignoreIds = null) => {
+      if (segCrossesSwitchGutter(xa, y, xb, y)) return true;
+      const lo = Math.min(xa, xb);
+      const hi = Math.max(xa, xb);
+      if (hi - lo < 1.5) return false;
+      for (let i = 0; i < obstacles.length; i++) {
+        const o = obstacles[i];
+        if (!o.isSwitch) continue;
+        if (ignoreIds && ignoreIds.has(o.id)) continue;
+        if (y < o.top - 1 || y > o.bottom + 1) continue;
+        if (lo < o.midX - 2 && hi > o.midX + 2) return true;
+      }
+      return false;
+    };
+
+    const vertCrossesSwitchGutter = (x, ya, yb) => segCrossesSwitchGutter(x, ya, x, yb);
+
+    // Occupied horizontal / vertical run lanes — keep parallel wires from touching
+    const occupiedHY = []; // { y, x0, x1 }
+    const occupiedVX = []; // { x, y0, y1 }
+    const LANE_SEP = Math.max(8, Number(circuitProfile?.laneSep) || 12);
+    const lanesTouchH = (y, x0, x1) => {
+      const lo = Math.min(x0, x1);
+      const hi = Math.max(x0, x1);
+      return occupiedHY.some((s) => (
+        Math.abs(s.y - y) < LANE_SEP
+        && lo < s.x1 + 2 && hi > s.x0 - 2
+      ));
+    };
+    const lanesTouchV = (x, y0, y1) => {
+      const lo = Math.min(y0, y1);
+      const hi = Math.max(y0, y1);
+      return occupiedVX.some((s) => (
+        Math.abs(s.x - x) < LANE_SEP
+        && lo < s.y1 + 2 && hi > s.y0 - 2
+      ));
+    };
+    const registerPathLanes = (d) => {
+      const pts = schematicPathPoints(d);
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1];
+        const b = pts[i];
+        if (Math.abs(a.y - b.y) < 0.5) {
+          occupiedHY.push({ y: a.y, x0: Math.min(a.x, b.x), x1: Math.max(a.x, b.x) });
+        } else if (Math.abs(a.x - b.x) < 0.5) {
+          occupiedVX.push({ x: a.x, y0: Math.min(a.y, b.y), y1: Math.max(a.y, b.y) });
+        }
+      }
+    };
+
+    // Shared orthogonal channels — net + inter-column corridor (stable lanes)
+    const trunkByKey = new Map(); // fullKey -> channel X
+    const corridorLaneCount = new Map();
+    const colOfX = (x) => Math.round((x - originX) / colGap);
     const allocTrunk = (destKey, xa, xb) => {
-      if (trunkByDest.has(destKey)) return trunkByDest.get(destKey);
-      const mid = (xa + xb) / 2;
-      const col = Math.round((mid - originX) / colGap);
-      const base = originX + col * colGap + colGap * 0.5;
-      const lane = ((laneCounter++) % 6) - 2.5;
-      const x = base + lane * 9;
-      trunkByDest.set(destKey, x);
+      const ca = colOfX(xa);
+      const cb = colOfX(xb);
+      const cLo = Math.min(ca, cb);
+      const cHi = Math.max(ca, cb);
+      const corridor = cLo === cHi ? `col:${cLo}` : `gap:${cLo}|${cHi}`;
+      const fullKey = `${destKey || 'misc'}::${corridor}`;
+      if (trunkByKey.has(fullKey)) return trunkByKey.get(fullKey);
+      const n = corridorLaneCount.get(corridor) || 0;
+      corridorLaneCount.set(corridor, n + 1);
+      const lane = remakeLaneIndex(n);
+      const baseX = originX + ((cLo + cHi) / 2) * colGap;
+      const x = baseX + lane * 9;
+      trunkByKey.set(fullKey, x);
       return x;
     };
 
+    let wingLaneCounter = 0;
     const exitStub = (x, y, dir, len = 11) => {
-      if (dir === 'left') return { x: x - len, y };
-      if (dir === 'right') return { x: x + len, y };
-      if (dir === 'up') return { x, y: y - len };
-      if (dir === 'down') return { x, y: y + len };
+      const L = Math.max(4, Number(len) || 11);
+      if (dir === 'left') return { x: x - L, y };
+      if (dir === 'right') return { x: x + L, y };
+      if (dir === 'up') return { x, y: y - L };
+      if (dir === 'down') return { x, y: y + L };
       return { x, y };
     };
 
@@ -34026,60 +36676,91 @@
             : Math.min(wing, fromObs.left - 18);
         }
       }
-      wing += ((laneCounter++) % 4) * 8 * (wing >= x1 ? 1 : -1);
+      wing += remakeLaneIndex(wingLaneCounter++) * 8;
       for (let pass = 0; pass < 5; pass++) {
         const blocked = obstacles.some((o) => {
           const yLo = Math.min(y1, y2);
           const yHi = Math.max(y1, y2);
           if (yHi < o.top - 2 || yLo > o.bottom + 2) return false;
           return wing > o.left - 4 && wing < o.right + 4;
-        });
+        }) || vertCrossesSwitchGutter(wing, y1, y2) || lanesTouchV(wing, y1, y2);
         if (!blocked) break;
         wing += wing >= x1 ? 14 : -14;
       }
       return wing;
     };
 
+    /** Obstacles whose X-span sits between the route’s endpoints (must clear above/below). */
+    const interveningObstacles = (x1, x2, ignoreIds = null) => {
+      const lo = Math.min(x1, x2);
+      const hi = Math.max(x1, x2);
+      return obstacles.filter((o) => {
+        if (ignoreIds && ignoreIds.has(o.id)) return false;
+        return o.right > lo + 2 && o.left < hi - 2;
+      });
+    };
+
+    /**
+     * Clear channel Y: go above or below every intervening asset, then straight
+     * across. Prefer the shorter of above-vs-below relative to start/end.
+     */
     const findClearChannelY = (x1, y1, x2, y2, fromObs, toObs) => {
-      const goingDown = y2 >= y1;
       const ignore = new Set();
       if (fromObs) ignore.add(fromObs.id);
       if (toObs) ignore.add(toObs.id);
+      const blockers = interveningObstacles(x1, x2, ignore);
       const candidates = [];
-      if (fromObs && toObs) {
-        if (goingDown && toObs.top > fromObs.bottom + 18) {
-          candidates.push((fromObs.bottom + toObs.top) / 2);
-        } else if (!goingDown && fromObs.top > toObs.bottom + 18) {
-          candidates.push((toObs.bottom + fromObs.top) / 2);
-        }
-      }
-      if (fromObs) {
-        candidates.push(goingDown ? fromObs.bottom + 10 : fromObs.top - 10);
-        const cx = (fromObs.left + fromObs.right) / 2;
-        obstacles.forEach((s) => {
-          if (ignore.has(s.id)) return;
-          if (Math.abs((s.left + s.right) / 2 - cx) > colGap * 0.4) return;
-          if (goingDown && s.top > fromObs.bottom + 14) {
-            candidates.push((fromObs.bottom + s.top) / 2);
-          } else if (!goingDown && fromObs.top > s.bottom + 14) {
-            candidates.push((s.bottom + fromObs.top) / 2);
-          }
+
+      if (blockers.length) {
+        const above = Math.min(...blockers.map((o) => o.top)) - 12;
+        const below = Math.max(...blockers.map((o) => o.bottom)) + 12;
+        candidates.push(above, below);
+        // Also try just above/below each blocker (tighter corridors)
+        blockers.forEach((o) => {
+          candidates.push(o.top - 12, o.bottom + 12);
         });
       }
-      candidates.push(goingDown ? y1 + 14 : y1 - 14);
-      candidates.push((y1 + y2) / 2);
-      let probe = candidates[0] ?? (goingDown ? y1 + 14 : y1 - 14);
-      for (let i = 0; i < 12; i++) {
-        if (!candidates.includes(probe)) candidates.push(probe);
-        probe += goingDown ? 12 : -12;
+
+      if (fromObs) {
+        candidates.push(fromObs.top - 12, fromObs.bottom + 12);
       }
+      if (toObs) {
+        candidates.push(toObs.top - 12, toObs.bottom + 12);
+      }
+
+      const midY = (y1 + y2) / 2;
+      candidates.push(midY, y1 - 18, y1 + 18, y2 - 18, y2 + 18);
+      // Fan more probes
+      for (let k = 1; k <= 8; k++) {
+        candidates.push(y1 - 12 * k, y1 + 12 * k, midY - 10 * k, midY + 10 * k);
+      }
+
+      const scored = [];
+      const seen = new Set();
       for (let i = 0; i < candidates.length; i++) {
-        const channelY = candidates[i];
-        if (goingDown && channelY >= y2 - 2) continue;
-        if (!goingDown && channelY <= y2 + 2) continue;
-        if (!horizCrossesBody(x1, channelY, x2, ignore)) return channelY;
+        let channelY = candidates[i];
+        if (!Number.isFinite(channelY)) continue;
+        // Nudge off occupied horizontal lanes
+        for (let nudge = 0; nudge < 6; nudge++) {
+          const tryY = channelY + remakeLaneIndex(nudge) * LANE_SEP;
+          const key = Math.round(tryY * 2) / 2;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          if (horizCrossesBody(x1, tryY, x2, ignore)) continue;
+          if (segCrossesSwitchGutter(x1, tryY, x2, tryY)) continue;
+          if (lanesTouchH(tryY, x1, x2)) continue;
+          if (vertCrossesBody(x1, y1, tryY, ignore)) continue;
+          if (vertCrossesSwitchGutter(x1, y1, tryY)) continue;
+          if (vertCrossesBody(x2, tryY, y2, ignore)) continue;
+          if (vertCrossesSwitchGutter(x2, tryY, y2)) continue;
+          const detour = Math.abs(tryY - y1) + Math.abs(tryY - y2);
+          scored.push({ y: tryY, detour });
+          break;
+        }
       }
-      return null;
+      if (!scored.length) return null;
+      scored.sort((a, b) => a.detour - b.detour);
+      return scored[0].y;
     };
 
     const wingAround = (x1, y1, x2, y2, fromObs) => {
@@ -34088,7 +36769,7 @@
         return `M${x1} ${y1} L${wing} ${y1} L${wing} ${y2} L${x2} ${y2}`;
       }
       const goingDown = y2 >= y1;
-      let bump = goingDown ? fromObs.bottom + 8 : fromObs.top - 8;
+      let bump = goingDown ? fromObs.bottom + 10 : fromObs.top - 10;
       if (goingDown && bump >= y2 - 2) bump = (y1 + y2) / 2;
       if (!goingDown && bump <= y2 + 2) bump = (y1 + y2) / 2;
       if (Math.abs(bump - y1) < 3) {
@@ -34097,11 +36778,127 @@
       return `M${x1} ${y1} L${x1} ${bump} L${wing} ${bump} L${wing} ${y2} L${x2} ${y2}`;
     };
 
-    const orthoRouteCore = (x1, y1, x2, y2, destKey, meta = {}) => {
+    /** Direct terminal↔terminal jumper — mid-body OK, fewest bends. */
+    const orthoJumperRoute = (x1, y1, x2, y2) => {
       const dx = Math.abs(x2 - x1);
       const dy = Math.abs(y2 - y1);
       if (dx < 0.75) return `M${x1} ${y1} L${x1} ${y2}`;
       if (dy < 0.75) return `M${x1} ${y1} L${x2} ${y1}`;
+      return `M${x1} ${y1} L${x2} ${y1} L${x2} ${y2}`;
+    };
+
+    /**
+     * Leave direction. lockHint: keep pin’s native side (shared trunks, switch
+     * poles, SC H/G) — never flip through a body toward the peer.
+     */
+    const chooseExit = (x, y, tx, ty, hint, lockHint = false) => {
+      if (lockHint && hint) return hint;
+      const dx = tx - x;
+      const dy = ty - y;
+      if (Math.abs(dx) < 1.5 && Math.abs(dy) < 1.5) return hint || null;
+      if (hint === 'left' && dx <= 2) return 'left';
+      if (hint === 'right' && dx >= -2) return 'right';
+      if (hint === 'up' && dy <= 2) return 'up';
+      if (hint === 'down' && dy >= -2) return 'down';
+      if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? 'right' : 'left';
+      return dy >= 0 ? 'down' : 'up';
+    };
+
+    const countBends = (d) => {
+      const pts = [...String(d).matchAll(/([ML])\s*([-.\d]+)\s+([-.\d]+)/g)]
+        .map((m) => ({ x: +m[2], y: +m[3] }));
+      let bends = 0;
+      for (let i = 2; i < pts.length; i++) {
+        const a = pts[i - 2];
+        const b = pts[i - 1];
+        const c = pts[i];
+        const orth1 = Math.abs(a.x - b.x) < 0.5 || Math.abs(a.y - b.y) < 0.5;
+        const orth2 = Math.abs(b.x - c.x) < 0.5 || Math.abs(b.y - c.y) < 0.5;
+        if (!orth1 || !orth2) continue;
+        const h1 = Math.abs(a.y - b.y) < 0.5;
+        const h2 = Math.abs(b.y - c.y) < 0.5;
+        if (h1 !== h2) bends += 1;
+      }
+      return bends;
+    };
+
+    const pathLen = (d) => {
+      const pts = [...String(d).matchAll(/([ML])\s*([-.\d]+)\s+([-.\d]+)/g)]
+        .map((m) => ({ x: +m[2], y: +m[3] }));
+      let len = 0;
+      for (let i = 1; i < pts.length; i++) {
+        len += Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+      }
+      return len;
+    };
+
+    /** True if any segment of path d hits a switch gutter or foreign body. */
+    const pathHasViolation = (d, ignoreIds = null, meta = {}) => {
+      const pts = schematicPathPoints(d);
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1];
+        const b = pts[i];
+        if (segCrossesSwitchGutter(a.x, a.y, b.x, b.y)) return true;
+        if (Math.abs(a.y - b.y) < 0.5) {
+          if (horizCrossesBody(a.x, a.y, b.x, ignoreIds)) return true;
+        } else if (Math.abs(a.x - b.x) < 0.5) {
+          if (vertCrossesBody(a.x, a.y, b.y, ignoreIds)) return true;
+        }
+      }
+      // SC H: never run through/past the coil toward the G side
+      if (meta.forceRightOf != null && Number.isFinite(meta.coilY)) {
+        const band = 14;
+        const floorX = meta.forceRightOf;
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i - 1];
+          const b = pts[i];
+          const nearCoil = Math.abs(a.y - meta.coilY) <= band
+            || Math.abs(b.y - meta.coilY) <= band
+            || (Math.min(a.y, b.y) <= meta.coilY + band
+              && Math.max(a.y, b.y) >= meta.coilY - band);
+          if (!nearCoil) continue;
+          if (Math.min(a.x, b.x) < floorX - 0.5) return true;
+        }
+      }
+      // SC G: don't climb through the coil toward the H side at coil height
+      if (meta.forceLeftOf != null && Number.isFinite(meta.coilY)) {
+        const band = 14;
+        const ceilX = meta.forceLeftOf;
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i - 1];
+          const b = pts[i];
+          const nearCoil = Math.abs(a.y - meta.coilY) <= band
+            || Math.abs(b.y - meta.coilY) <= band
+            || (Math.min(a.y, b.y) <= meta.coilY + band
+              && Math.max(a.y, b.y) >= meta.coilY - band);
+          if (!nearCoil) continue;
+          if (Math.max(a.x, b.x) > ceilX + 0.5) return true;
+        }
+      }
+      return false;
+    };
+
+    const orthoRouteCore = (x1, y1, x2, y2, destKey, meta = {}) => {
+      const dx = Math.abs(x2 - x1);
+      const dy = Math.abs(y2 - y1);
+      if (dx < 0.75) {
+        const d = `M${x1} ${y1} L${x1} ${y2}`;
+        if (!meta.allowMid && vertCrossesSwitchGutter(x1, y1, y2)) {
+          const side = x1 <= (obstacles.find((o) => o.isSwitch)?.midX ?? x1) ? x1 - 16 : x1 + 16;
+          return `M${x1} ${y1} L${side} ${y1} L${side} ${y2} L${x2} ${y2}`;
+        }
+        return d;
+      }
+      if (dy < 0.75) {
+        const d = `M${x1} ${y1} L${x2} ${y1}`;
+        if (!meta.allowMid && segCrossesSwitchGutter(x1, y1, x2, y1)) {
+          const channelY = findClearChannelY(x1, y1, x2, y2, null, null);
+          if (channelY != null) {
+            return `M${x1} ${y1} L${x1} ${channelY} L${x2} ${channelY} L${x2} ${y2}`;
+          }
+        }
+        return d;
+      }
 
       const fromObs = meta.fromId != null
         ? obstacles.find((o) => o.id === meta.fromId)
@@ -34109,46 +36906,150 @@
       const toObs = meta.toId != null
         ? obstacles.find((o) => o.id === meta.toId)
         : null;
-      const ignoreFrom = fromObs ? new Set([fromObs.id]) : null;
+      const ignore = new Set();
+      if (fromObs) ignore.add(fromObs.id);
+      if (toObs) ignore.add(toObs.id);
 
-      const exitCross = horizCrossesBody(x1, y1, x2);
-      const approachCross = horizCrossesBody(x1, y2, x2, ignoreFrom);
+      const blockedH = (xa, y, xb) => (
+        horizCrossesBody(xa, y, xb, ignore)
+        || (!meta.allowMid && segCrossesSwitchGutter(xa, y, xb, y))
+        || lanesTouchH(y, xa, xb)
+      );
+      const blockedV = (x, ya, yb) => (
+        vertCrossesBody(x, ya, yb, ignore)
+        || (!meta.allowMid && vertCrossesSwitchGutter(x, ya, yb))
+        || lanesTouchV(x, ya, yb)
+      );
 
-      if (exitCross || approachCross) {
+      const candidates = [];
+      const push = (d) => {
+        if (!d) return;
+        if (!meta.allowMid && pathHasViolation(d, ignore, meta)) return;
+        candidates.push(d);
+      };
+
+      // SC H → peer to the right: first run stays on the hot pin Y (go right
+      // immediately), then rise/drop outside the destination body.
+      if (meta.forceRightOf != null && x2 > meta.forceRightOf + 8) {
+        // Left-side switch throws (T1/T5): drop on a bus well left of the
+        // terminal column — not hugging the stub beside other contacts.
+        if (toObs?.isSwitch && x2 <= (toObs.midX ?? toObs.left) + 6) {
+          // Already left of the blade (shared H spine): continue vertical on
+          // this X, then into the throw. A second bus at left-72 often lands
+          // 1px from the pot-hot→T3 drop and reads as a double-line artifact.
+          if (x1 < (toObs.left ?? x2) - 16) {
+            const dSpine = `M${x1} ${y1} L${x1} ${y2} L${x2} ${y2}`;
+            if (!pathHasViolation(dSpine, ignore, meta)
+              && !vertCrossesBody(x1, y1, y2, ignore)
+              && !vertCrossesSwitchGutter(x1, y1, y2)
+              && !horizCrossesBody(x1, y2, x2, ignore)) {
+              return dSpine;
+            }
+          }
+          // Keep the vertical well left of the throw column so it does not
+          // crowd the commons / ground stubs beside T1/T5.
+          const busX = Math.max(
+            x1 + 20,
+            Math.min(toObs.left - 72, meta.forceRightOf + 28),
+          );
+          const dBus = `M${x1} ${y1} L${busX} ${y1} L${busX} ${y2} L${x2} ${y2}`;
+          if (!pathHasViolation(dBus, ignore, meta)
+            && !vertCrossesBody(busX, y1, y2, ignore)
+            && !vertCrossesSwitchGutter(busX, y1, y2)
+            && !horizCrossesBody(busX, y2, x2, ignore)) {
+            return dBus;
+          }
+        }
+        const wingBase = Math.max(
+          x2 + 14,
+          toObs?.right != null ? toObs.right + 14 : x2 + 14,
+        );
+        // Stagger right-side wings so Mid/Bridge don't share one black vertical.
+        const wing = wingBase + remakeLaneIndex(wingLaneCounter++) * 12;
+        const dWing = `M${x1} ${y1} L${wing} ${y1} L${wing} ${y2} L${x2} ${y2}`;
+        // Prefer this aesthetic even when a shorter jog-up channel exists.
+        if (!pathHasViolation(dWing, ignore, meta)
+          && !vertCrossesBody(wing, y1, y2, ignore)
+          && !vertCrossesSwitchGutter(wing, y1, y2)
+          && !horizCrossesBody(wing, y2, x2, ignore)) {
+          return dWing;
+        }
+      }
+
+      // Prefer clear-then-across when anything sits between the endpoints
+      const blockers = interveningObstacles(x1, x2, ignore);
+      const needsClear = blockers.length > 0
+        || blockedH(x1, y1, x2)
+        || blockedH(x1, y2, x2)
+        || meta.forceRightOf != null
+        || meta.forceLeftOf != null;
+
+      if (needsClear) {
         const channelY = findClearChannelY(x1, y1, x2, y2, fromObs, toObs);
         if (channelY != null) {
-          return `M${x1} ${y1} L${x1} ${channelY} L${x2} ${channelY} L${x2} ${y2}`;
+          push(`M${x1} ${y1} L${x1} ${channelY} L${x2} ${channelY} L${x2} ${y2}`);
         }
-        return wingAround(x1, y1, x2, y2, fromObs);
+      }
+
+      if (!blockedH(x1, y1, x2) && !blockedV(x2, y1, y2)) {
+        push(`M${x1} ${y1} L${x2} ${y1} L${x2} ${y2}`);
+      }
+      if (!blockedV(x1, y1, y2) && !blockedH(x1, y2, x2)) {
+        push(`M${x1} ${y1} L${x1} ${y2} L${x2} ${y2}`);
+      }
+
+      if (candidates.length) {
+        candidates.sort((a, b) => (countBends(a) - countBends(b)) || (pathLen(a) - pathLen(b)));
+        return candidates[0];
+      }
+
+      const channelY = findClearChannelY(x1, y1, x2, y2, fromObs, toObs);
+      if (channelY != null) {
+        const d = `M${x1} ${y1} L${x1} ${channelY} L${x2} ${channelY} L${x2} ${y2}`;
+        if (meta.allowMid || !pathHasViolation(d, ignore, meta)) return d;
       }
 
       if (dx < 32) {
-        const wing = Math.max(x1, x2) + 34 + ((laneCounter++) % 4) * 8;
-        if (!horizCrossesBody(x1, y1, wing) && !horizCrossesBody(wing, y2, x2, ignoreFrom)) {
-          return `M${x1} ${y1} L${wing} ${y1} L${wing} ${y2} L${x2} ${y2}`;
+        const wing = Math.max(x1, x2) + 34 + remakeLaneIndex(wingLaneCounter++) * 8;
+        if (!blockedH(x1, y1, wing) && !blockedH(wing, y2, x2)
+          && !blockedV(wing, y1, y2)) {
+          const d = `M${x1} ${y1} L${wing} ${y1} L${wing} ${y2} L${x2} ${y2}`;
+          if (!pathHasViolation(d, ignore, meta)) return d;
         }
         return wingAround(x1, y1, x2, y2, fromObs);
       }
       const mx = allocTrunk(destKey || `${Math.round(x2)}:${Math.round(y2)}`, x1, x2);
-      if (!horizCrossesBody(x1, y1, mx) && !horizCrossesBody(mx, y2, x2, ignoreFrom)) {
-        return `M${x1} ${y1} L${mx} ${y1} L${mx} ${y2} L${x2} ${y2}`;
-      }
-      const channelY = findClearChannelY(x1, y1, x2, y2, fromObs, toObs);
-      if (channelY != null) {
-        return `M${x1} ${y1} L${x1} ${channelY} L${x2} ${channelY} L${x2} ${y2}`;
+      if (!blockedH(x1, y1, mx) && !blockedH(mx, y2, x2)
+        && !blockedV(mx, y1, y2)) {
+        const d = `M${x1} ${y1} L${mx} ${y1} L${mx} ${y2} L${x2} ${y2}`;
+        if (!pathHasViolation(d, ignore, meta)) return d;
       }
       return wingAround(x1, y1, x2, y2, fromObs);
     };
 
     /**
-     * Pin-aware Manhattan: short stub in the pin’s natural exit direction, then
-     * core route, then stub into the destination pin.
+     * Pin-aware Manhattan: locked exit stubs on native sides, then clear-then-across.
+     * Jumpers skip stubs and may cross switch mid.
      */
+    const lockExitKind = (kind) => (
+      kind === 'switch' || kind === 'switch-spst' || kind === 'push-pot'
+      || kind === 'pickup-sc' || kind === 'pickup-hb' || kind === 'pickup-4c'
+      || kind === 'pot' || kind === 'trimmer'
+    );
+
     const orthoRoute = (x1, y1, x2, y2, destKey, meta = {}) => {
-      const fromExit = meta.fromExit || null;
-      const toExit = meta.toExit || null;
-      const s1 = fromExit ? exitStub(x1, y1, fromExit) : { x: x1, y: y1 };
-      const s2 = toExit ? exitStub(x2, y2, toExit) : { x: x2, y: y2 };
+      if (meta.jumper) return orthoJumperRoute(x1, y1, x2, y2);
+      // fromStub/toStub === 0: already at a shared source rail — no second leave stub
+      const lockFrom = !!meta.lockFromExit || lockExitKind(meta.fromKind);
+      const lockTo = !!meta.lockToExit || lockExitKind(meta.toKind);
+      const fromExit = meta.fromStub === 0
+        ? null
+        : chooseExit(x1, y1, x2, y2, meta.fromExit || null, lockFrom);
+      const toExit = meta.toStub === 0
+        ? null
+        : chooseExit(x2, y2, x1, y1, meta.toExit || null, lockTo);
+      const s1 = fromExit ? exitStub(x1, y1, fromExit, meta.fromStub) : { x: x1, y: y1 };
+      const s2 = toExit ? exitStub(x2, y2, toExit, meta.toStub) : { x: x2, y: y2 };
       const core = orthoRouteCore(s1.x, s1.y, s2.x, s2.y, destKey, meta);
       const coreBody = core.replace(/^M[-.\d\s]+/, '').trim();
       let d = `M${x1} ${y1}`;
@@ -34163,8 +37064,249 @@
       return d.replace(/\s+/g, ' ').trim();
     };
 
-    const drawnPaths = []; // { d, chassis }
+    const drawnPathSpecs = []; // { d, stroke, width }
     const junctionLayer = svgEl('g');
+
+    /*
+     * Shared source spines: when ≥2 signal edges leave the same pin, one stub +
+     * vertical spine on the pin’s native side, then short coloured branches.
+     * SC H always spines on the RIGHT (never past G); SC G on the LEFT.
+     */
+    const pinTouchCount = new Map();
+    signalEdges.forEach((e) => {
+      if (e.jumper || e.aG || e.bG) return;
+      const ka = `${e.aId}:${e.aIdx}`;
+      const kb = `${e.bId}:${e.bIdx}`;
+      pinTouchCount.set(ka, (pinTouchCount.get(ka) || 0) + 1);
+      pinTouchCount.set(kb, (pinTouchCount.get(kb) || 0) + 1);
+    });
+
+    /** Native leave side for a pin — SC H/G and pot lugs are hard-locked. */
+    const nativeLeave = (kind, pinIdx, pin, meta) => {
+      if (kind === 'pickup-sc') {
+        if (pinIdx === 0) return 'right'; // H — never the G side
+        if (pinIdx === 1) return 'left'; // G
+      }
+      if (kind === 'pot' || kind === 'trimmer') {
+        // 1 cold down · 2 wiper right · 3 hot left (toward pickups / bus)
+        if (pinIdx === 0) return 'down';
+        if (pinIdx === 1) return 'right';
+        if (pinIdx === 2) return 'left';
+      }
+      if (kind === 'switch') {
+        if (pinIdx >= 6) return 'down';
+        // Commons + right throws → pot bus; left throws ← pickups
+        if (pinIdx === 0 || pinIdx === 4) return 'left';
+        return 'right';
+      }
+      return pin?.exit
+        || schematicPreferredPinExit(kind, pinIdx, pin?.x ?? 0, pin?.y ?? 0, meta)
+        || 'right';
+    };
+
+    const sourceSpines = new Map(); // pinKey -> spine record
+    /** Pot / trimmer / push-pot hot lug (toward switch). */
+    const isPotHotPin = (kind, idx) => (
+      ((kind === 'pot' || kind === 'trimmer') && idx === 2)
+      || (kind === 'push-pot' && idx === 8)
+    );
+    /** Far-left switch on pot hot — direct left-then-down, not mid-bus spine. */
+    const isPotHotSwitchPeer = (sp, peerX, peerKind) => (
+      isPotHotPin(sp.kind, sp.idx)
+      && sp.leave === 'left'
+      && peerKind === 'switch'
+      && peerX < sp.x0 - 40
+    );
+    const ensureSourceSpine = (key, edge, end) => {
+      if (sourceSpines.has(key)) return sourceSpines.get(key);
+      if ((pinTouchCount.get(key) || 0) < 2) return null;
+      const kind = end === 'a' ? edge.aKind : edge.bKind;
+      const idx = end === 'a' ? edge.aIdx : edge.bIdx;
+      const pin = end === 'a' ? edge.aPin : edge.bPin;
+      const meta = end === 'a' ? edge.aMeta : edge.bMeta;
+      const x0 = end === 'a' ? edge.x1 : edge.x2;
+      const y0 = end === 'a' ? edge.y1 : edge.y2;
+      const leave = nativeLeave(kind, idx, pin, meta);
+      const stubLen = Math.max(10, Math.min(14, (Number(pin?.stubLen) || 10) + 2));
+      const tip = exitStub(x0, y0, leave, stubLen);
+      // Fan spine slightly further out so branches clear the symbol
+      const spineX = leave === 'right' ? tip.x + 6
+        : leave === 'left' ? tip.x - 6
+          : tip.x;
+      const spine = {
+        key,
+        kind,
+        idx,
+        x0,
+        y0,
+        leave,
+        tipX: tip.x,
+        tipY: tip.y,
+        spineX,
+        yMin: tip.y,
+        yMax: tip.y,
+        peers: [], // { edge, end, x, y }
+        drawn: false,
+      };
+      sourceSpines.set(key, spine);
+      return spine;
+    };
+
+    signalEdges.forEach((e) => {
+      if (e.jumper || e.aG || e.bG) return;
+      const sa = ensureSourceSpine(`${e.aId}:${e.aIdx}`, e, 'a');
+      const sb = ensureSourceSpine(`${e.bId}:${e.bIdx}`, e, 'b');
+      if (sa && !isPotHotSwitchPeer(sa, e.x2, e.bKind)) {
+        sa.peers.push({
+          edge: e,
+          end: 'a',
+          x: e.x2,
+          y: e.y2,
+          compId: e.bId,
+          kind: e.bKind,
+          pinIdx: e.bIdx,
+        });
+        sa.yMin = Math.min(sa.yMin, e.y2);
+        sa.yMax = Math.max(sa.yMax, e.y2);
+      }
+      if (sb && !isPotHotSwitchPeer(sb, e.x1, e.aKind)) {
+        sb.peers.push({
+          edge: e,
+          end: 'b',
+          x: e.x1,
+          y: e.y1,
+          compId: e.aId,
+          kind: e.aKind,
+          pinIdx: e.aIdx,
+        });
+        sb.yMin = Math.min(sb.yMin, e.y1);
+        sb.yMax = Math.max(sb.yMax, e.y1);
+      }
+    });
+
+    // Parallel SC fan: bus halfway between coil stubs and the pot; peers ordered
+    // neck (top) → mid → bridge (bottom). 3rd+ roles still keep that stack order.
+    // Same-column peers (tone lug3 on the hot net) must NOT pull the spine onto
+    // the pot shaft — only peers on the leave side of the owner pin count.
+    sourceSpines.forEach((sp) => {
+      if (!sp.peers.length) {
+        sp.joinY = sp.tipY;
+        return;
+      }
+      const peerNodes = sp.peers.map((p) => {
+        const pl = placements.get(p.compId);
+        return {
+          id: p.compId,
+          kind: p.kind || pl?.kind,
+          label: pl?.meta?.title || pl?.label || '',
+          el: compById.get(p.compId) || null,
+          canvasX: 0,
+          canvasY: p.y,
+          peer: p,
+        };
+      });
+      const sorted = [...peerNodes].sort((a, b) => (
+        compareSchematicPickupOrder(a, b, peerNodes)
+      ));
+      const peerXs = sorted.map((n) => n.peer.x);
+      if (sp.leave === 'left') {
+        const sideXs = peerXs.filter((x) => x < sp.x0 - 1);
+        const nearPeers = sideXs.length
+          ? Math.max(...sideXs) + 16
+          : sp.tipX - 18;
+        const nearOwner = sp.tipX - 6;
+        // Clamp: stay left of the leave stub — never back through the symbol
+        sp.spineX = Math.min((nearPeers + nearOwner) / 2, sp.tipX - 4);
+      } else if (sp.leave === 'right') {
+        const sideXs = peerXs.filter((x) => x > sp.x0 + 1);
+        const nearPeers = sideXs.length
+          ? Math.min(...sideXs) - 16
+          : sp.tipX + 18;
+        const nearOwner = sp.tipX + 6;
+        sp.spineX = Math.max((nearPeers + nearOwner) / 2, sp.tipX + 4);
+      }
+      // Approach switch throws from their native exit side (not over the top):
+      // T1/T5 ← left bus, T2/T6 → right wing. Keep ALL throw attaches at coil Y
+      // so a shared H spine (blade + tone tap) stays short — a tall spine forces
+      // neighbor pickups to hop through the T3/T5 corridor (Strat 1V2T artifact).
+      sorted.forEach((n) => {
+        const p = n.peer;
+        const throwPin = p.kind === 'switch'
+          && (p.pinIdx === 0 || p.pinIdx === 1 || p.pinIdx === 4 || p.pinIdx === 5);
+        if (sp.kind === 'pickup-sc' && sp.idx === 0 && throwPin) {
+          p.attachY = sp.y0;
+        } else {
+          p.attachY = p.y;
+        }
+      });
+      // Right-leave SC fans with only right peers (e.g. Mid→T6 + Tone): do not
+      // stretch spineX halfway to the blade — that parks the fan junction
+      // between the T5 bus and Vol→T3 drop (stray + in the corridor).
+      if (sp.leave === 'right' && sp.kind === 'pickup-sc' && sp.idx === 0) {
+        const hasLeftThrow = sorted.some((n) => {
+          const p = n.peer;
+          return p.kind === 'switch' && (p.pinIdx === 0 || p.pinIdx === 4);
+        });
+        if (!hasLeftThrow) {
+          sp.spineX = Math.min(sp.spineX, sp.tipX + 22);
+        }
+      }
+      const attachYs = sorted.map((n) => n.peer.attachY);
+      sp.joinY = sp.tipY;
+      sp.yMin = Math.min(...attachYs, sp.joinY);
+      sp.yMax = Math.max(...attachYs, sp.joinY);
+      // Flat fans (all peers at join Y) stay flat — do not invent an 8px
+      // vertical stub. On Strat 1V2T that stub landed between the T5 yellow
+      // bus and the T3 blue drop and read as a stray tick on Mid H.
+    });
+
+    /** Attach point on a spine for a coloured peer branch. */
+    const spineAttach = (sp, ty, edge = null) => {
+      const peer = (edge && sp.peers.find((p) => p.edge === edge))
+        || sp.peers.find((p) => Math.abs(p.y - ty) < 0.75)
+        || null;
+      const y = peer?.attachY ?? sp.joinY ?? ty;
+      return {
+        x: sp.spineX,
+        y: Math.max(sp.yMin, Math.min(sp.yMax, y)),
+      };
+    };
+
+    // Deterministic draw order → stable corridor lane assignment
+    signalEdges.sort((a, b) => {
+      const netA = (!a.aG && !a.bG)
+        ? netFind(`${a.aId}:${a.aIdx}`)
+        : `g:${a.aId}:${a.aIdx}`;
+      const netB = (!b.aG && !b.bG)
+        ? netFind(`${b.aId}:${b.bIdx}`)
+        : `g:${b.aId}:${b.bIdx}`;
+      if (netA !== netB) return String(netA).localeCompare(String(netB));
+      return ((a.y1 + a.y2) / 2) - ((b.y1 + b.y2) / 2);
+    });
+
+    // Draw shared stub + vertical spine once (neutral) before coloured branches
+    sourceSpines.forEach((sp) => {
+      if (sp.drawn) return;
+      const joinY = sp.joinY ?? sp.tipY;
+      // Owner pin → tip → long run to the leftward bus at pin height
+      const stubD = `M${sp.x0} ${sp.y0} L${sp.tipX} ${sp.y0} L${sp.spineX} ${joinY}`;
+      const spineD = `M${sp.spineX} ${sp.yMin} L${sp.spineX} ${sp.yMax}`;
+      drawnPathSpecs.push({
+        d: stubD,
+        stroke: '#6a6a72',
+        width: 1.5,
+        chassis: false,
+      });
+      drawnPathSpecs.push({
+        d: spineD,
+        stroke: '#6a6a72',
+        width: 1.5,
+        chassis: false,
+      });
+      registerPathLanes(stubD);
+      registerPathLanes(spineD);
+      sp.drawn = true;
+    });
 
     signalEdges.forEach((edge) => {
       let x1 = edge.x1;
@@ -34174,20 +37316,27 @@
       let destKey;
       let fromId = edge.fromId;
       let toId = edge.toId;
-      let fromExit = schematicPreferredPinExit(
-        edge.aKind, edge.aIdx, edge.aLocalX, edge.aLocalY, edge.aMeta,
-      );
-      let toExit = schematicPreferredPinExit(
-        edge.bKind, edge.bIdx, edge.bLocalX, edge.bLocalY, edge.bMeta,
-      );
+      let fromExit = nativeLeave(edge.aKind, edge.aIdx, edge.aPin, edge.aMeta);
+      let toExit = nativeLeave(edge.bKind, edge.bIdx, edge.bPin, edge.bMeta);
+      let fromStub = edge.aPin?.stubLen ?? 11;
+      let toStub = edge.bPin?.stubLen ?? 11;
       let chassis = false;
+      const isJumper = !!edge.jumper;
+      let forceRightOf = null; // SC H: never through coil toward G
+      let forceLeftOf = null; // SC G: don't cross coil toward H at coil height
+      let coilY = null;
 
-      if (edge.bG && !edge.aG) {
+      if (isJumper) {
+        destKey = `jumper:${edge.aId}:${Math.min(edge.aIdx, edge.bIdx)}-${Math.max(edge.aIdx, edge.bIdx)}`;
+        fromExit = null;
+        toExit = null;
+      } else if (edge.bG && !edge.aG) {
         x2 = x1;
         y2 = busY;
         destKey = `gnd:${Math.round(x1)}`;
-        toExit = null; // pure drop to bus
+        toExit = null;
         fromExit = fromExit === 'up' ? 'down' : fromExit;
+        toStub = 11;
         chassis = true;
       } else if (edge.aG && !edge.bG) {
         const sx = x2;
@@ -34201,20 +37350,192 @@
         toId = edge.fromId;
         fromExit = toExit === 'up' ? 'down' : toExit;
         toExit = null;
+        fromStub = edge.bPin?.stubLen ?? 11;
+        toStub = 11;
         chassis = true;
       } else {
         const netId = netFind(`${edge.aId}:${edge.aIdx}`);
         destKey = `net:${netId}`;
       }
 
-      // Don’t stub against the travel direction for pure vertical bus drops
+      // Attach coloured branches on shared spines (no second leave stub)
+      if (!chassis && !isJumper) {
+        const spineA = sourceSpines.get(`${edge.aId}:${edge.aIdx}`);
+        const spineB = sourceSpines.get(`${edge.bId}:${edge.bIdx}`);
+        const skipSpineA = spineA && isPotHotSwitchPeer(spineA, edge.x2, edge.bKind);
+        const skipSpineB = spineB && isPotHotSwitchPeer(spineB, edge.x1, edge.aKind);
+        if (spineA && !skipSpineA) {
+          const at = spineAttach(spineA, y2, edge);
+          x1 = at.x;
+          y1 = at.y;
+          fromExit = null;
+          fromStub = 0;
+          if (edge.aKind === 'pickup-sc' && edge.aIdx === 0) {
+            forceRightOf = spineA.x0; // H pin X — stay on hot side of coil
+            coilY = spineA.y0;
+          }
+          if (edge.aKind === 'pickup-sc' && edge.aIdx === 1) {
+            coilY = spineA.y0;
+          }
+        } else if (edge.aKind === 'pickup-sc' && edge.aIdx === 0) {
+          fromExit = 'right';
+          forceRightOf = x1;
+          coilY = y1;
+        } else if (edge.aKind === 'pickup-sc' && edge.aIdx === 1) {
+          fromExit = 'down';
+          coilY = y1;
+        }
+        if (spineB && !skipSpineB) {
+          const at = spineAttach(spineB, y1, edge);
+          x2 = at.x;
+          y2 = at.y;
+          toExit = null;
+          toStub = 0;
+          if (edge.bKind === 'pickup-sc' && edge.bIdx === 0) {
+            forceRightOf = spineB.x0;
+            coilY = spineB.y0;
+          }
+        } else if (edge.bKind === 'pickup-sc' && edge.bIdx === 0) {
+          toExit = 'right';
+          forceRightOf = x2;
+          coilY = y2;
+        } else if (edge.bKind === 'pickup-sc' && edge.bIdx === 1) {
+          toExit = 'down';
+        }
+      }
+
+      // Pot lug3 → switch: left to a clear column outside the contact grid,
+      // then to pin Y and into the pad. Never drop on the T1/T5 (or T2/T6)
+      // column — that reads as a wire through the other throws.
+      if (!chassis && !isJumper) {
+        const aHotSw = isPotHotPin(edge.aKind, edge.aIdx) && edge.bKind === 'switch';
+        const bHotSw = isPotHotPin(edge.bKind, edge.bIdx) && edge.aKind === 'switch';
+        if (aHotSw || bHotSw) {
+          const potX = aHotSw ? edge.x1 : edge.x2;
+          const potY = aHotSw ? edge.y1 : edge.y2;
+          const swX = aHotSw ? edge.x2 : edge.x1;
+          const swY = aHotSw ? edge.y2 : edge.y1;
+          const swId = aHotSw ? edge.bId : edge.aId;
+          const swIdx = aHotSw ? edge.bIdx : edge.aIdx;
+          const potKey = aHotSw
+            ? `${edge.aId}:${edge.aIdx}`
+            : `${edge.bId}:${edge.bIdx}`;
+          const sp = sourceSpines.get(potKey);
+          const swObs = obstacles.find((o) => o.id === swId);
+          const leftPole = swIdx % 2 === 0;
+          // Outside the left/right throw column (and body), then into the pad.
+          let dropX = leftPole
+            ? Math.min(swX - 14, (swObs?.left ?? swX) - 12)
+            : Math.max(swX + 14, (swObs?.right ?? swX) + 12);
+          if (swObs?.gutterL != null && swObs?.gutterR != null) {
+            dropX = leftPole
+              ? Math.min(dropX, swObs.gutterL - 10)
+              : Math.max(dropX, swObs.gutterR + 10);
+          }
+          let dL;
+          if (sp && Number.isFinite(sp.spineX)) {
+            const y = sp.joinY ?? sp.tipY ?? potY;
+            dL = `M${sp.spineX} ${y} L${dropX} ${y} L${dropX} ${swY} L${swX} ${swY}`;
+          } else {
+            const potStub = Math.max(8, Math.min(12, (aHotSw ? fromStub : toStub) || 11));
+            const tipX = potX - potStub;
+            dL = `M${potX} ${potY} L${tipX} ${potY} L${dropX} ${potY} L${dropX} ${swY} L${swX} ${swY}`;
+          }
+          const baseStroke = schematicWireColourEnabled
+            ? ((edge.color === '#ffffff' || edge.color === '#fff') ? '#555' : edge.color)
+            : '#6a6a72';
+          const selected = !!(edge.wire?.group && selectedWireGroups.has(edge.wire.group));
+          drawnPathSpecs.push({
+            d: dL,
+            stroke: baseStroke,
+            width: selected ? 2.2 : 1.5,
+            chassis: false,
+          });
+          registerPathLanes(dL);
+          maxY = Math.max(maxY, potY + 8, swY + 8, busY + 8);
+          return;
+        }
+      }
+
+      // Pot lug1 / wiper → shunt: drop straight down into the passive (then its
+      // own ground end). Do not leave the wiper right and jog back left.
+      if (!chassis && !isJumper) {
+        const potHangIdx = (kind, idx) => {
+          if (kind === 'pot' || kind === 'trimmer') return idx === 0 || idx === 1;
+          if (kind === 'push-pot') return idx === 6 || idx === 7;
+          return false;
+        };
+        const shuntSig = (kind, meta, idx) => {
+          const g = meta?.leadGroundEnd;
+          if (!(g === 0 || g === 1) || idx === g) return false;
+          return kind === 'capacitor' || kind === 'capacitor-polar' || kind === 'resistor'
+            || kind === 'diode' || kind === 'led' || kind === 'inductor' || kind === 'fuse';
+        };
+        if (potHangIdx(edge.aKind, edge.aIdx) && shuntSig(edge.bKind, edge.bMeta, edge.bIdx)) {
+          // Wiper→shunt: leave right a hair (clears lug1/G) then drop into cap
+          const fromWiper = edge.aIdx === 1 || edge.aIdx === 7;
+          fromExit = fromWiper ? 'right' : 'down';
+          toExit = 'up';
+          fromStub = fromWiper ? 6 : Math.min(fromStub || 8, 6);
+          toStub = Math.min(toStub || 8, 5);
+        } else if (potHangIdx(edge.bKind, edge.bIdx) && shuntSig(edge.aKind, edge.aMeta, edge.aIdx)) {
+          const toWiper = edge.bIdx === 1 || edge.bIdx === 7;
+          fromExit = 'up';
+          toExit = toWiper ? 'right' : 'down';
+          fromStub = Math.min(fromStub || 8, 5);
+          toStub = toWiper ? 6 : Math.min(toStub || 8, 6);
+        }
+      }
+
       if (chassis && Math.abs(x1 - x2) < 0.75) {
         fromExit = y2 > y1 ? 'down' : 'up';
         toExit = null;
+        const own = obstacles.find((o) => o.id === fromId);
+        const ignore = own ? new Set([own.id]) : null;
+        if (vertCrossesBody(x1, y1, y2, ignore)) {
+          const side = own ? own.left - 12 : x1 - 18;
+          const alt = own ? own.right + 12 : x1 + 18;
+          const dropX = !vertCrossesBody(side, y1, y2, ignore) ? side : alt;
+          const dJog = `M${x1} ${y1} L${dropX} ${y1} L${dropX} ${y2}`;
+          const baseStroke = '#5a5a5a';
+          const selected = !!(edge.wire?.group && selectedWireGroups.has(edge.wire.group));
+          drawnPathSpecs.push({
+            d: dJog,
+            stroke: baseStroke,
+            width: selected ? 2.2 : 1.25,
+            chassis: true,
+          });
+          return;
+        }
+      }
+
+      // Face the peer on near-horizontal runs: a leave stub opposite the
+      // approach pulls the path through the pad (Bridge→Br T3 exit=right).
+      // Skip when |dy| is large — right-wing / left-bus routes need the
+      // native throw exits (Mid→T6, Neck→T5).
+      if (!chassis && !isJumper && Math.abs(y1 - y2) < 8) {
+        if (toExit === 'right' && x1 < x2 - 2) toExit = 'left';
+        else if (toExit === 'left' && x1 > x2 + 2) toExit = 'right';
+        if (fromExit === 'right' && x2 < x1 - 2) fromExit = 'left';
+        else if (fromExit === 'left' && x2 > x1 + 2) fromExit = 'right';
       }
 
       const d = orthoRoute(x1, y1, x2, y2, destKey, {
-        fromId, toId, fromExit, toExit,
+        fromId,
+        toId,
+        fromExit,
+        toExit,
+        fromStub,
+        toStub,
+        jumper: isJumper,
+        allowMid: isJumper,
+        fromKind: edge.aKind,
+        toKind: edge.bKind,
+        lockFromExit: true,
+        lockToExit: true,
+        forceRightOf,
+        forceLeftOf,
+        coilY,
       });
       const baseStroke = chassis
         ? '#5a5a5a'
@@ -34222,63 +37543,110 @@
           ? ((edge.color === '#ffffff' || edge.color === '#fff') ? '#555' : edge.color)
           : '#6a6a72';
       const selected = !!(edge.wire?.group && selectedWireGroups.has(edge.wire.group));
-      const path = svgEl('path', {
+      drawnPathSpecs.push({
         d,
-        fill: 'none',
         stroke: baseStroke,
-        'stroke-width': selected ? 2.2 : (chassis ? 1.25 : 1.5),
-        'stroke-linecap': 'round',
-        'stroke-linejoin': 'round',
+        width: selected ? 2.2 : (chassis ? 1.25 : 1.5),
+        chassis,
       });
-      wireLayer.appendChild(path);
-      drawnPaths.push(d);
+      if (!chassis && !isJumper) registerPathLanes(d);
       maxY = Math.max(maxY, y1 + 8, y2 + 8, busY + 8);
     });
 
-    // Chassis ground rail + vertical stubs only (shared horizontal bus)
+    // Per-terminal chassis ground (§3.9.2) — no shared rail between assets
+    const railStroke = 1.25;
+    const groundGlyphSites = [];
     if (groundPins.length) {
-      const xs = groundPins.map((p) => p.absX).sort((a, b) => a - b);
-      const gx0 = xs[0];
-      const gx1 = xs[xs.length - 1];
       groundPins.forEach((p) => {
-        const d = `M${p.absX} ${p.absY} L${p.absX} ${busY}`;
-        wireLayer.appendChild(svgEl('path', {
+        const own = p.id != null ? obstacles.find((o) => o.id === p.id) : null;
+        const ignore = new Set();
+        if (own) ignore.add(own.id);
+        const isTopEnclosure = !!(p.enclosure && p.exit === 'up');
+
+        let dropX = p.absX;
+        let gndY;
+        let d;
+        if (isTopEnclosure) {
+          gndY = p.absY - GROUND_DROP;
+          if (own && vertCrossesBody(dropX, gndY, p.absY, ignore)) {
+            const preferLeft = p.absX <= own.midX;
+            dropX = preferLeft ? own.left - 12 : own.right + 12;
+            const upY = Math.min(p.absY - 6, own.top - 10);
+            d = `M${p.absX} ${p.absY} L${p.absX} ${upY} L${dropX} ${upY} L${dropX} ${gndY}`;
+          } else {
+            d = `M${p.absX} ${p.absY} L${p.absX} ${gndY}`;
+          }
+          groundGlyphSites.push({ x: dropX, y: gndY, flip: true });
+        } else {
+          // Pickup G / jack sleeve / case G: straight down into chassis glyph
+          gndY = p.absY + GROUND_DROP;
+          if (own && vertCrossesBody(dropX, p.absY, gndY, ignore)) {
+            const side = dropX - 14;
+            const alt = dropX + 14;
+            dropX = !vertCrossesBody(side, p.absY, gndY, ignore) ? side : alt;
+            d = `M${p.absX} ${p.absY} L${dropX} ${p.absY} L${dropX} ${gndY}`;
+          } else if (Math.abs(dropX - p.absX) < 0.75) {
+            d = `M${p.absX} ${p.absY} L${p.absX} ${gndY}`;
+          } else {
+            d = `M${p.absX} ${p.absY} L${dropX} ${p.absY} L${dropX} ${gndY}`;
+          }
+          groundGlyphSites.push({ x: dropX, y: gndY, flip: false });
+        }
+        drawnPathSpecs.push({
           d,
-          fill: 'none',
-          stroke: '#666',
-          'stroke-width': 1.2,
-          'stroke-linecap': 'round',
-        }));
-        drawnPaths.push(d);
+          stroke: '#5a5a5a',
+          width: railStroke,
+          chassis: true,
+        });
       });
-      const busD = `M${gx0} ${busY} L${gx1} ${busY}`;
+      maxY = Math.max(maxY, busY + 8);
+      groundGlyphSites.forEach((site) => {
+        maxX = Math.max(maxX, site.x + 10);
+      });
+    }
+
+    // Junctions from pre-hop geometry, then hops on non-junction crossings
+    const rawDs = drawnPathSpecs.map((p) => p.d);
+    const junctionDots = collectSchematicJunctionDots(rawDs);
+    const hoppedDs = schematicApplyCrossingHops(rawDs, junctionDots);
+    hoppedDs.forEach((d, i) => {
+      const spec = drawnPathSpecs[i];
       wireLayer.appendChild(svgEl('path', {
-        d: busD,
+        d,
         fill: 'none',
-        stroke: '#555',
-        'stroke-width': 1.55,
+        stroke: spec.stroke,
+        'stroke-width': spec.width,
         'stroke-linecap': 'round',
+        'stroke-linejoin': 'round',
       }));
-      drawnPaths.push(busD);
-      const ex = gx0 - 14;
+    });
+
+    // IEEE §3.9.1 general ground at each local ground pin (pickup G / pot case /
+    // jack sleeve — not a shared bus)
+    groundGlyphSites.forEach((site) => {
+      const { x, y, flip } = site;
+      const dir = flip ? -1 : 1;
       wireLayer.appendChild(svgEl('line', {
-        x1: ex - 5, y1: busY, x2: ex + 5, y2: busY,
+        x1: x - 5, y1: y, x2: x + 5, y2: y,
         stroke: '#444', 'stroke-width': 1.4, fill: 'none',
       }));
       wireLayer.appendChild(svgEl('line', {
-        x1: ex - 3.2, y1: busY + 3, x2: ex + 3.2, y2: busY + 3,
+        x1: x - 3.2, y1: y + 3 * dir, x2: x + 3.2, y2: y + 3 * dir,
         stroke: '#444', 'stroke-width': 1.2, fill: 'none',
       }));
       wireLayer.appendChild(svgEl('line', {
-        x1: ex - 1.4, y1: busY + 6, x2: ex + 1.4, y2: busY + 6,
+        x1: x - 1.4, y1: y + 6 * dir, x2: x + 1.4, y2: y + 6 * dir,
         stroke: '#444', 'stroke-width': 1, fill: 'none',
       }));
-      maxY = Math.max(maxY, busY + 10);
-      maxX = Math.max(maxX, gx1 + 28, gx0 + 8);
-    }
+      // G sits under the bars (or above when flipped)
+      if (schematicLabelsEnabled) {
+        const labelY = flip ? y - 11 : y + 14;
+        pinLabel(wireLayer, x, labelY, 'G', 0, 0, 'middle', 7.5);
+      }
+    });
 
     // IEEE junction dots (tees / degree ≥ 3) — above wires, under labels
-    collectSchematicJunctionDots(drawnPaths).forEach((pt) => {
+    junctionDots.forEach((pt) => {
       junctionLayer.appendChild(svgEl('circle', {
         cx: pt.x,
         cy: pt.y,
@@ -34319,18 +37687,22 @@
       cMaxX = Math.max(cMaxX, p.x + bodyMaxX);
       cMaxY = Math.max(cMaxY, p.y + bodyMaxY);
     });
-    // Chassis bus / earth glyph are real circuit geometry (not labels)
+    // Local earth glyphs under/over ground pins are real circuit geometry
     if (groundPins.length) {
-      const gxs = groundPins.map((p) => p.absX);
-      const gx0 = Math.min(...gxs);
-      const gx1 = Math.max(...gxs);
-      cMinX = Math.min(cMinX, gx0 - 20);
-      cMaxX = Math.max(cMaxX, gx1 + 8);
+      groundGlyphSites.forEach((site) => {
+        cMinX = Math.min(cMinX, site.x - 8);
+        cMaxX = Math.max(cMaxX, site.x + 8);
+        cMinY = Math.min(cMinY, site.y - (site.flip ? 8 : 2));
+        cMaxY = Math.max(cMaxY, site.y + (site.flip ? 2 : 8));
+        if (schematicLabelsEnabled) {
+          cMaxY = Math.max(cMaxY, site.flip ? site.y + 2 : site.y + 16);
+          cMinY = Math.min(cMinY, site.flip ? site.y - 12 : site.y - 2);
+        }
+      });
       groundPins.forEach((p) => {
         cMinY = Math.min(cMinY, p.absY - 4);
         cMaxY = Math.max(cMaxY, p.absY + 4);
       });
-      cMaxY = Math.max(cMaxY, busY + 10);
     }
     // Signal wire endpoints (routes may sit outside packs)
     signalEdges.forEach((edge) => {
@@ -34734,6 +38106,7 @@
     syncSchematicZoomLabel();
     syncSchematicPinButtonState();
     syncSchematicColourButtonState();
+    syncSchematicLabelsButtonState();
     ensureSchematicPeekAnalysis();
     ensureSchematicPeekBuildList();
 
@@ -34791,6 +38164,15 @@
       if (!panel.classList.contains('is-open')) return;
       setSchematicWireColourEnabled(!schematicWireColourEnabled);
       setStatus(schematicWireColourEnabled ? 'Schematic wires: colour' : 'Schematic wires: monochrome');
+    });
+
+    const labelsBtn = document.getElementById('schematic-peek-labels');
+    labelsBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!panel.classList.contains('is-open')) return;
+      setSchematicLabelsEnabled(!schematicLabelsEnabled);
+      setStatus(schematicLabelsEnabled ? 'Schematic labels: on' : 'Schematic labels: off');
     });
 
     remakeBtn?.addEventListener('click', (e) => {
@@ -34877,13 +38259,16 @@
       e.stopPropagation();
       const absX = Math.abs(e.deltaX);
       const absY = Math.abs(e.deltaY);
-      // Trackpad pinch often reports ctrlKey; also treat dominant vertical scroll as zoom.
+      // Trackpad pinch often reports ctrlKey; Shift = fast zoom (axis may be deltaX).
       const pinch = e.ctrlKey || e.metaKey;
-      if (!pinch && absX > absY * 1.2) return; // horizontal pan gesture — ignore
-      const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
-      const step = pinch ? SCHEMATIC_ZOOM_STEP * 0.85 : SCHEMATIC_ZOOM_STEP;
+      const fast = e.shiftKey;
+      if (!pinch && !fast && absX > absY * 1.2) return; // horizontal pan gesture — ignore
+      const delta = wheelZoomAxisDelta(e);
+      if (delta === 0) return;
+      const step = (pinch ? SCHEMATIC_ZOOM_STEP * 0.85 : SCHEMATIC_ZOOM_STEP)
+        * (fast ? ZOOM_SHIFT_MULT : 1);
       if (delta > 0) setSchematicPeekZoom(schematicPeekZoom - step);
-      else if (delta < 0) setSchematicPeekZoom(schematicPeekZoom + step);
+      else setSchematicPeekZoom(schematicPeekZoom + step);
     }, { passive: false });
 
     document.addEventListener('keydown', (e) => {
@@ -35728,6 +39113,7 @@
 
   function updateIdleWorkspaceChrome() {
     const pan = document.getElementById('pan-help-label');
+    const parts = document.getElementById('parts-search-help-label');
     if (!pan) return;
     const idle = selectedComponents.size === 0
       && selectedWireGroups.size === 0
@@ -35737,7 +39123,12 @@
       && !placementMode;
     if (!idle) {
       pan.hidden = true;
+      if (parts) parts.hidden = true;
       return;
+    }
+    if (parts) {
+      parts.hidden = false;
+      parts.innerHTML = `${formatHudKeys('[[Tab]]')} <span class="pan-help-action">Parts Search</span>`;
     }
     pan.hidden = false;
     pan.innerHTML = `${formatHudKeys('[[Space]] + [[R-click]]')} <span class="pan-help-action">Pan</span>`;
@@ -35902,6 +39293,41 @@
       }
     }
   });
+  partSpotlightInput?.addEventListener('input', () => {
+    refreshPartSpotlightResults();
+  });
+  partSpotlightInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      confirmPartSpotlightSelection();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closePartSpotlight();
+      setStatus('Ready');
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!partSpotlightMatches.length) return;
+      const delta = e.key === 'ArrowDown' ? 1 : -1;
+      partSpotlightActiveIndex = (partSpotlightActiveIndex + delta + partSpotlightMatches.length)
+        % partSpotlightMatches.length;
+      syncPartSpotlightActive();
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      e.stopPropagation();
+      confirmPartSpotlightSelection();
+    }
+  });
+  partSpotlight?.querySelector('[data-spotlight-dismiss]')?.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    closePartSpotlight();
+    setStatus('Ready');
+  });
+  window.addEventListener('resize', () => {
+    if (partSpotlightOpen) positionPartSpotlight();
+  });
   document.addEventListener('mousedown', (e) => {
     if (!textCommandOpen) return;
     if (e.target.closest('#text-command-box')) return;
@@ -35964,16 +39390,20 @@
     return [...comp.querySelectorAll('.terminal')].find((t) => getTerminalRole(t) === role) || null;
   }
 
-  function wireBetweenTerminals(termA, termB) {
+  function wireBetweenTerminals(termA, termB, colorKey) {
     if (!termA || !termB) return null;
+    const prevColor = wireColor;
+    if (colorKey && WIRE_COLORS[colorKey]) wireColor = colorKey;
     const ca = getTerminalCenter(termA);
     const cb = getTerminalCenter(termB);
     const aw = clientToWorld(ca.x, ca.y);
     const bw = clientToWorld(cb.x, cb.y);
-    return createWire(
+    const wire = createWire(
       { x: aw.x, y: aw.y, terminal: termA },
       { x: bw.x, y: bw.y, terminal: termB }
     );
+    wireColor = prevColor;
+    return wire;
   }
 
   /** Wipe electronics workspace for demo seeds. */
@@ -36000,9 +39430,10 @@
   }
 
   /**
-   * NA Strat-style controls + chassis bus (IEEE case G on pots/switch).
+   * NA Strat-style controls + chassis bus (IEEE case G on pots).
    * Volume: lug 3 = hot in · wiper → tip · lug 1 + case on ground.
    * Tone: lug 3 from volume hot · wiper → cap → ground · case on ground.
+   * Toggle case G is optional (off by default) — pass switchCaseG when wired.
    */
   function wireNaVolumeToneChassis({
     vol, tone, cap, out, switchCaseG = null, pickupGrounds = [], connect = null,
@@ -36042,10 +39473,709 @@
     return { volT, toneT, capT, outH, outG };
   }
 
+  /** Template + terminals for a placed switch (commons via GuitarAssets). */
+  function demoSwitchContext(el) {
+    const terms = [...(el?.querySelectorAll('.terminal') || [])];
+    const template = GuitarAssets.getTemplate(el?.dataset?.assetId)
+      || GuitarAssets.getTemplate(el?.dataset?.type)
+      || null;
+    const commonIdx = (typeof GuitarAssets.getSwitchCommonIndices === 'function'
+      ? GuitarAssets.getSwitchCommonIndices(template)
+      : [2, 3]).filter((i) => Number.isFinite(i));
+    const commons = commonIdx.map((i) => terms[i]).filter(Boolean);
+    const caseG = terms.find((t) => (
+      t.classList?.contains('switch-case-ground')
+      || t.dataset?.role === 'G'
+      || (t.dataset?.terminalLabel || '').trim() === 'G'
+    )) || terms[commonIdx.length ? Math.max(...commonIdx) + 1 : 6] || null;
+    return { el, template, terms, commonIdx, commons, caseG };
+  }
+
+  /**
+   * Step 1 schematic ladder: one single coil → mono out.
+   * SC H → tip · SC G → sleeve (chassis preferred later).
+   */
+  function seedStep1Demo(opts = {}) {
+    const temporary = !!opts.temporary;
+    clearElectronicsDemoBoard();
+
+    const sc = placeDemoAsset('singlecoil', 80, 120);
+    const out = placeDemoAsset('mono-output', 280, 120);
+
+    setComponentImpedance(sc, '6200');
+    setComponentElectricalValue(sc, 'inductance', '2.5');
+    setComponentGroundTag(sc, true);
+
+    const scH = terminalByRole(sc, 'H');
+    const scG = terminalByRole(sc, 'G');
+    const outH = terminalByRole(out, 'H');
+    const outG = terminalByRole(out, 'G');
+    // Distinct conductor colours (schematic shows colour when enabled)
+    wireBetweenTerminals(scH, outH, 'yellow');
+    wireBetweenTerminals(scG, outG, 'black');
+    setSchematicWireColourEnabled(true);
+
+    deselectAll();
+    refreshLightningWireGlow();
+    refreshGroundCheckAlert();
+    notifySchematicCircuitChanged();
+    openSchematicPeekDemo();
+
+    panX = 40;
+    panY = 40;
+    zoom = 1.1;
+    applyViewport();
+    setStatus('Step 1 — 1× SC · mono out (H→tip · G→sleeve)');
+    if (temporary) {
+      projectDirty = false;
+      updateProjectSwitcherUI();
+    } else {
+      markProjectDirty();
+    }
+  }
+
+  /**
+   * Step 2: SC → volume → mono out.
+   * Hot: SC H → vol lug 3 · wiper → tip.
+   * Ground: pickup G → pot case (chassis); lug 1 bonds to case; out sleeve
+   * local chassis — no drawn ground rail between assets.
+   */
+  function seedStep2Demo(opts = {}) {
+    const temporary = !!opts.temporary;
+    clearElectronicsDemoBoard();
+
+    const sc = placeDemoAsset('singlecoil', 60, 120);
+    const vol = placeDemoAsset('potentiometer', 260, 100);
+    const out = placeDemoAsset('mono-output', 460, 120);
+
+    setComponentImpedance(sc, '6200');
+    setComponentElectricalValue(sc, 'inductance', '2.5');
+    setComponentResistance(vol, '250000');
+    setPotPositionPct(vol, 50, { silent: true });
+    setComponentGroundTag(sc, true);
+    setComponentGroundTag(vol, true);
+
+    const scH = terminalByRole(sc, 'H');
+    const scG = terminalByRole(sc, 'G');
+    const volT = [...vol.querySelectorAll('.terminal')];
+    const outH = terminalByRole(out, 'H');
+    const outG = terminalByRole(out, 'G');
+
+    // NA volume: lug 3 hot in · wiper → tip
+    wireBetweenTerminals(scH, volT[2], 'yellow');
+    wireBetweenTerminals(volT[1], outH, 'yellow');
+    // Pickup shield/G → pot chassis; sleeve joins same chassis net (no schematic rail)
+    if (volT[3]) {
+      wireBetweenTerminals(scG, volT[3], 'black');
+      wireBetweenTerminals(outG, volT[3], 'black');
+    } else {
+      wireBetweenTerminals(scG, outG, 'black');
+    }
+    ensurePotCaseGroundPosition(vol);
+    setSchematicWireColourEnabled(true);
+
+    deselectAll();
+    refreshLightningWireGlow();
+    refreshGroundCheckAlert();
+    notifySchematicCircuitChanged();
+    openSchematicPeekDemo();
+
+    panX = 30;
+    panY = 30;
+    zoom = 1.0;
+    applyViewport();
+    setStatus('Step 2 — 1× SC · volume · mono out');
+    if (temporary) {
+      projectDirty = false;
+      updateProjectSwitcherUI();
+    } else {
+      markProjectDirty();
+    }
+  }
+
+  /**
+   * Step 3 (SSS ladder): 2× SC (neck + bridge) → volume → mono out.
+   * Target end state: SSS · 1 vol · 1 tone · 3-way ON-ON-ON selector ·
+   * 2-way ON-ON bridge-always-on. No switches yet — both hots paralleled
+   * into vol lug 3; both G → pot case; wiper → tip; sleeve → pot case.
+   */
+  function seedStep3Demo(opts = {}) {
+    const temporary = !!opts.temporary;
+    clearElectronicsDemoBoard();
+
+    const neck = placeDemoAsset('singlecoil', 40, 90);
+    const bridge = placeDemoAsset('singlecoil', 40, 200);
+    const vol = placeDemoAsset('potentiometer', 280, 130);
+    const out = placeDemoAsset('mono-output', 480, 150);
+    setAssetPlaceLabel(neck, 'Neck');
+    setAssetPlaceLabel(bridge, 'Bridge');
+
+    setComponentImpedance(neck, '5800');
+    setComponentElectricalValue(neck, 'inductance', '2.4');
+    setComponentImpedance(bridge, '7100');
+    setComponentElectricalValue(bridge, 'inductance', '2.8');
+    setComponentResistance(vol, '250000');
+    setPotPositionPct(vol, 50, { silent: true });
+    setComponentGroundTag(neck, true);
+    setComponentGroundTag(bridge, true);
+    setComponentGroundTag(vol, true);
+
+    const nH = terminalByRole(neck, 'H');
+    const nG = terminalByRole(neck, 'G');
+    const bH = terminalByRole(bridge, 'H');
+    const bG = terminalByRole(bridge, 'G');
+    const volT = [...vol.querySelectorAll('.terminal')];
+    const outH = terminalByRole(out, 'H');
+    const outG = terminalByRole(out, 'G');
+
+    // Both pickups into vol hot (parallel until 3-way is added)
+    wireBetweenTerminals(nH, volT[2], 'yellow');
+    wireBetweenTerminals(bH, volT[2], 'yellow');
+    wireBetweenTerminals(volT[1], outH, 'yellow');
+    if (volT[3]) {
+      wireBetweenTerminals(nG, volT[3], 'black');
+      wireBetweenTerminals(bG, volT[3], 'black');
+      wireBetweenTerminals(outG, volT[3], 'black');
+    } else {
+      wireBetweenTerminals(nG, outG, 'black');
+      wireBetweenTerminals(bG, outG, 'black');
+    }
+    ensurePotCaseGroundPosition(vol);
+    setSchematicWireColourEnabled(true);
+
+    deselectAll();
+    refreshLightningWireGlow();
+    refreshGroundCheckAlert();
+    notifySchematicCircuitChanged();
+    openSchematicPeekDemo();
+
+    panX = 20;
+    panY = 10;
+    zoom = 0.95;
+    applyViewport();
+    setStatus('Step 3 — 2× SC · volume · mono out (SSS ladder)');
+    if (temporary) {
+      projectDirty = false;
+      updateProjectSwitcherUI();
+    } else {
+      markProjectDirty();
+    }
+  }
+
+  /**
+   * Step 4 (SSS ladder): Step 3 + tone pot + 0.022 µF shunt cap.
+   * NA tone: lug 3 from volume hot · wiper → cap → chassis · case on ground.
+   * Cap uses flexible lead tip attachments (no wires to the capacitor).
+   */
+  function seedStep4Demo(opts = {}) {
+    const temporary = !!opts.temporary;
+    clearElectronicsDemoBoard();
+
+    const neck = placeDemoAsset('singlecoil', 40, 80);
+    const bridge = placeDemoAsset('singlecoil', 40, 200);
+    const vol = placeDemoAsset('potentiometer', 280, 90);
+    const tone = placeDemoAsset('potentiometer', 280, 240);
+    const cap = placeDemoAsset('capacitor', 300, 310);
+    const out = placeDemoAsset('mono-output', 520, 140);
+    setAssetPlaceLabel(neck, 'Neck');
+    setAssetPlaceLabel(bridge, 'Bridge');
+    setAssetPlaceLabel(vol, 'Vol');
+    setAssetPlaceLabel(tone, 'Tone');
+
+    setComponentImpedance(neck, '5800');
+    setComponentElectricalValue(neck, 'inductance', '2.4');
+    setComponentImpedance(bridge, '7100');
+    setComponentElectricalValue(bridge, 'inductance', '2.8');
+    setComponentResistance(vol, '250000');
+    setComponentResistance(tone, '250000');
+    setComponentCapacitance(cap, '0.022');
+    setPotPositionPct(vol, 50, { silent: true });
+    setPotPositionPct(tone, 50, { silent: true });
+    [neck, bridge, vol, tone, cap].forEach((el) => setComponentGroundTag(el, true));
+
+    const nH = terminalByRole(neck, 'H');
+    const nG = terminalByRole(neck, 'G');
+    const bH = terminalByRole(bridge, 'H');
+    const bG = terminalByRole(bridge, 'G');
+    const volT = [...vol.querySelectorAll('.terminal')];
+    const toneT = [...tone.querySelectorAll('.terminal')];
+    const toneTrack = getPotentiometerTrackTerms(tone);
+    const outH = terminalByRole(out, 'H');
+    const outG = terminalByRole(out, 'G');
+
+    // Pickups → volume hot (parallel); wiper → tip
+    wireBetweenTerminals(nH, volT[2], 'yellow');
+    wireBetweenTerminals(bH, volT[2], 'yellow');
+    wireBetweenTerminals(volT[1], outH, 'yellow');
+    // Tone off volume hot (lug 3)
+    wireBetweenTerminals(volT[2], toneT[2], 'orange');
+    // Cap leads attach like wires: top → tone wiper, bottom → tone case G
+    if (toneTrack?.wiper) setCapTipAttachment(cap, 0, toneTrack.wiper);
+    if (toneTrack?.caseG) setCapTipAttachment(cap, 1, toneTrack.caseG);
+    else if (toneT[3]) setCapTipAttachment(cap, 1, toneT[3]);
+    syncCapacitorTipAttachments(cap);
+    if (volT[3] && toneT[3]) {
+      wireBetweenTerminals(nG, volT[3], 'black');
+      wireBetweenTerminals(bG, volT[3], 'black');
+      wireBetweenTerminals(outG, volT[3], 'black');
+      wireBetweenTerminals(toneT[3], volT[3], 'black');
+    } else {
+      wireBetweenTerminals(nG, outG, 'black');
+      wireBetweenTerminals(bG, outG, 'black');
+    }
+    ensurePotCaseGroundPosition(vol);
+    ensurePotCaseGroundPosition(tone);
+    syncCapacitorTipAttachments(cap);
+    setSchematicWireColourEnabled(true);
+
+    deselectAll();
+    refreshLightningWireGlow();
+    refreshGroundCheckAlert();
+    notifySchematicCircuitChanged();
+    openSchematicPeekDemo();
+
+    panX = 10;
+    panY = 0;
+    zoom = 0.9;
+    applyViewport();
+    setStatus('Step 4 — 2× SC · vol + tone · mono out (SSS ladder)');
+    if (temporary) {
+      projectDirty = false;
+      updateProjectSwitcherUI();
+    } else {
+      markProjectDirty();
+    }
+  }
+
+  /**
+   * Step 5 (SSS ladder): Step 4 + mid SC + ON-ON-ON 3-way as N / M / B selector.
+   * Type 1 exclusive map (SD-style): T3 → vol only; jumper T1–T4; Neck→T5, Mid→T6,
+   * Bridge→T2. Up=Neck · Middle=Mid · Down=Bridge. Selected hot → 1 vol + 1 tone → out.
+   */
+  function seedStep5Demo(opts = {}) {
+    const temporary = !!opts.temporary;
+    clearElectronicsDemoBoard();
+
+    const neck = placeDemoAsset('singlecoil', 40, 40);
+    const mid = placeDemoAsset('singlecoil', 40, 150);
+    const bridge = placeDemoAsset('singlecoil', 40, 260);
+    const sw = placeDemoAsset('dpdt', 220, 150);
+    const vol = placeDemoAsset('potentiometer', 400, 70);
+    const tone = placeDemoAsset('potentiometer', 400, 250);
+    const cap = placeDemoAsset('capacitor', 420, 320);
+    const out = placeDemoAsset('mono-output', 600, 140);
+    setAssetPlaceLabel(neck, 'Neck');
+    setAssetPlaceLabel(mid, 'Mid');
+    setAssetPlaceLabel(bridge, 'Bridge');
+    setAssetPlaceLabel(vol, 'Vol');
+    setAssetPlaceLabel(tone, 'Tone');
+    setAssetPlaceLabel(sw, '3-way');
+
+    setComponentImpedance(neck, '5800');
+    setComponentElectricalValue(neck, 'inductance', '2.4');
+    setComponentImpedance(mid, '6200');
+    setComponentElectricalValue(mid, 'inductance', '2.5');
+    setComponentImpedance(bridge, '7100');
+    setComponentElectricalValue(bridge, 'inductance', '2.8');
+    setComponentResistance(vol, '250000');
+    setComponentResistance(tone, '250000');
+    setComponentCapacitance(cap, '0.022');
+    setPotPositionPct(vol, 50, { silent: true });
+    setPotPositionPct(tone, 50, { silent: true });
+    // Toggle has no chassis G by default — only pots / pickups / cap need G.
+    [neck, mid, bridge, vol, tone, cap].forEach((el) => setComponentGroundTag(el, true));
+
+    setToggleSwitchType(sw, 1);
+    GuitarAssets.setComponentStateIndex(sw, 0);
+    if (typeof GuitarAssets.setInstanceStateSecondaryLabel === 'function') {
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 0, 'N');
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 1, 'M');
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 2, 'B');
+    }
+
+    const swCtx = demoSwitchContext(sw);
+    const swT = swCtx.terms;
+
+    const nH = terminalByRole(neck, 'H');
+    const nG = terminalByRole(neck, 'G');
+    const mH = terminalByRole(mid, 'H');
+    const mG = terminalByRole(mid, 'G');
+    const bH = terminalByRole(bridge, 'H');
+    const bG = terminalByRole(bridge, 'G');
+    const volT = [...vol.querySelectorAll('.terminal')];
+    const toneT = [...tone.querySelectorAll('.terminal')];
+    const toneTrack = getPotentiometerTrackTerms(tone);
+    const volTrack = getPotentiometerTrackTerms(vol);
+    const outH = terminalByRole(out, 'H');
+    const outG = terminalByRole(out, 'G');
+    const [swCommonA, swCommonB] = swCtx.commons;
+
+    const demoColors = ['yellow', 'green', 'orange', 'red', 'blue', 'white', 'black'];
+    let demoColorIdx = 0;
+    const savedColor = wireColor;
+    const savedStyle = wireStyle;
+    wireStyle = 'solid';
+    const connect = (a, b) => {
+      if (!a || !b) return null;
+      wireColor = demoColors[demoColorIdx % demoColors.length];
+      demoColorIdx += 1;
+      return wireBetweenTerminals(a, b);
+    };
+
+    /*
+     * Exclusive N / M / B on Type 1 ON-ON-ON:
+     *   Up:    T3–T5 → Neck
+     *   Middle: T3–T1–(jumper)–T4–T6 → Mid
+     *   Down:  T3–T1–(jumper)–T4–T2 → Bridge
+     * Do not tie both commons to vol — T4 is part of the Mid/Bridge path.
+     */
+    connect(nH, swT[4]); // T5 — Up → Neck
+    connect(mH, swT[5]); // T6 — Middle → Mid
+    connect(bH, swT[1]); // T2 — Down → Bridge
+    connect(swT[0], swCommonB || swT[3]); // jumper T1–T4
+    connect(swCommonA || swT[2], volTrack?.lug3 || volT[2]); // T3 → vol hot
+
+    // Vol wiper → tip · tone off volume hot
+    connect(volT[1], outH);
+    connect(volT[2], toneT[2]);
+    if (toneTrack?.wiper) setCapTipAttachment(cap, 0, toneTrack.wiper);
+    if (toneTrack?.caseG) setCapTipAttachment(cap, 1, toneTrack.caseG);
+    else if (toneT[3]) setCapTipAttachment(cap, 1, toneT[3]);
+    syncCapacitorTipAttachments(cap);
+
+    // Local chassis: pickups + jack + tone case → vol case (no switch case G)
+    if (volT[3]) {
+      connect(nG, volT[3]);
+      connect(mG, volT[3]);
+      connect(bG, volT[3]);
+      connect(outG, volT[3]);
+      if (toneT[3]) connect(toneT[3], volT[3]);
+    }
+
+    wireColor = savedColor;
+    wireStyle = savedStyle;
+    ensurePotCaseGroundPosition(vol);
+    ensurePotCaseGroundPosition(tone);
+    syncCapacitorTipAttachments(cap);
+    setSchematicWireColourEnabled(true);
+
+    deselectAll();
+    refreshLightningWireGlow();
+    refreshGroundCheckAlert();
+    notifySchematicCircuitChanged();
+    openSchematicPeekDemo();
+
+    panX = 0;
+    panY = 0;
+    zoom = 0.82;
+    applyViewport();
+    setStatus('Step 5 — 3× SC · 3-way N/M/B · vol + tone · mono out');
+    if (temporary) {
+      projectDirty = false;
+      updateProjectSwitcherUI();
+    } else {
+      markProjectDirty();
+    }
+  }
+
+  /**
+   * Step 6 (SSS ladder): Step 5 + DPDT bridge always-on (on/off).
+   * 3-way exclusive N/M/B · when Br On is Up, Bridge H also ties to vol hot
+   * (parallel with the selected pickup). 1 vol + 1 tone + mono out.
+   */
+  function seedStep6Demo(opts = {}) {
+    const temporary = !!opts.temporary;
+    clearElectronicsDemoBoard();
+
+    const neck = placeDemoAsset('singlecoil', 40, 40);
+    const mid = placeDemoAsset('singlecoil', 40, 150);
+    const bridge = placeDemoAsset('singlecoil', 40, 260);
+    const sw = placeDemoAsset('dpdt', 220, 150);
+    const brOn = placeDemoAsset('dpdt-on-on', 360, 260);
+    const vol = placeDemoAsset('potentiometer', 420, 70);
+    const tone = placeDemoAsset('potentiometer', 420, 250);
+    const cap = placeDemoAsset('capacitor', 440, 320);
+    const out = placeDemoAsset('mono-output', 620, 140);
+    setAssetPlaceLabel(neck, 'Neck');
+    setAssetPlaceLabel(mid, 'Mid');
+    setAssetPlaceLabel(bridge, 'Bridge');
+    setAssetPlaceLabel(sw, '3-way');
+    setAssetPlaceLabel(brOn, 'Br On');
+    setAssetPlaceLabel(vol, 'Vol');
+    setAssetPlaceLabel(tone, 'Tone');
+
+    setComponentImpedance(neck, '5800');
+    setComponentElectricalValue(neck, 'inductance', '2.4');
+    setComponentImpedance(mid, '6200');
+    setComponentElectricalValue(mid, 'inductance', '2.5');
+    setComponentImpedance(bridge, '7100');
+    setComponentElectricalValue(bridge, 'inductance', '2.8');
+    setComponentResistance(vol, '250000');
+    setComponentResistance(tone, '250000');
+    setComponentCapacitance(cap, '0.022');
+    setPotPositionPct(vol, 50, { silent: true });
+    setPotPositionPct(tone, 50, { silent: true });
+    [neck, mid, bridge, vol, tone, cap].forEach((el) => setComponentGroundTag(el, true));
+
+    setToggleSwitchType(sw, 1);
+    GuitarAssets.setComponentStateIndex(sw, 0);
+    if (typeof GuitarAssets.setInstanceStateSecondaryLabel === 'function') {
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 0, 'N');
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 1, 'M');
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 2, 'B');
+    }
+    setToggleSwitchType(brOn, 1);
+    // Default Off so 3-way alone is exclusive; Up = Bridge always on
+    GuitarAssets.setComponentStateIndex(brOn, 1);
+    if (typeof GuitarAssets.setInstanceStateSecondaryLabel === 'function') {
+      GuitarAssets.setInstanceStateSecondaryLabel(brOn, 0, 'On');
+      GuitarAssets.setInstanceStateSecondaryLabel(brOn, 1, 'Off');
+    }
+
+    const swCtx = demoSwitchContext(sw);
+    const brCtx = demoSwitchContext(brOn);
+    const swT = swCtx.terms;
+    const brT = brCtx.terms;
+
+    const nH = terminalByRole(neck, 'H');
+    const nG = terminalByRole(neck, 'G');
+    const mH = terminalByRole(mid, 'H');
+    const mG = terminalByRole(mid, 'G');
+    const bH = terminalByRole(bridge, 'H');
+    const bG = terminalByRole(bridge, 'G');
+    const volT = [...vol.querySelectorAll('.terminal')];
+    const toneT = [...tone.querySelectorAll('.terminal')];
+    const toneTrack = getPotentiometerTrackTerms(tone);
+    const volTrack = getPotentiometerTrackTerms(vol);
+    const outH = terminalByRole(out, 'H');
+    const outG = terminalByRole(out, 'G');
+    const [swCommonA, swCommonB] = swCtx.commons;
+    const [brCommonA] = brCtx.commons;
+    const volHot = volTrack?.lug3 || volT[2];
+
+    const demoColors = ['yellow', 'green', 'orange', 'red', 'blue', 'white', 'black', 'copper'];
+    let demoColorIdx = 0;
+    const savedColor = wireColor;
+    const savedStyle = wireStyle;
+    wireStyle = 'solid';
+    const connect = (a, b) => {
+      if (!a || !b) return null;
+      wireColor = demoColors[demoColorIdx % demoColors.length];
+      demoColorIdx += 1;
+      return wireBetweenTerminals(a, b);
+    };
+
+    /*
+     * Exclusive N/M/B on Type 1 (same as Step 5):
+     *   Neck→T5 · Mid→T6 · Bridge→T2 · jumper T1–T4 · T3→vol
+     * Bridge always-on (ON-ON, one pole as on/off):
+     *   Bridge H → Br common (T3); Br Up throw (T5) → vol hot.
+     *   Up = Bridge paralleled with whatever the 3-way selects; Down = off.
+     */
+    connect(nH, swT[4]);
+    connect(mH, swT[5]);
+    connect(bH, swT[1]);
+    connect(swT[0], swCommonB || swT[3]);
+    connect(swCommonA || swT[2], volHot);
+
+    connect(bH, brCommonA || brT[2]);
+    connect(brT[4], volHot); // T5 — On
+
+    connect(volT[1], outH);
+    connect(volT[2], toneT[2]);
+    if (toneTrack?.wiper) setCapTipAttachment(cap, 0, toneTrack.wiper);
+    if (toneTrack?.caseG) setCapTipAttachment(cap, 1, toneTrack.caseG);
+    else if (toneT[3]) setCapTipAttachment(cap, 1, toneT[3]);
+    syncCapacitorTipAttachments(cap);
+
+    if (volT[3]) {
+      connect(nG, volT[3]);
+      connect(mG, volT[3]);
+      connect(bG, volT[3]);
+      connect(outG, volT[3]);
+      if (toneT[3]) connect(toneT[3], volT[3]);
+    }
+
+    wireColor = savedColor;
+    wireStyle = savedStyle;
+    ensurePotCaseGroundPosition(vol);
+    ensurePotCaseGroundPosition(tone);
+    syncCapacitorTipAttachments(cap);
+    setSchematicWireColourEnabled(true);
+
+    deselectAll();
+    refreshLightningWireGlow();
+    refreshGroundCheckAlert();
+    notifySchematicCircuitChanged();
+    openSchematicPeekDemo();
+
+    panX = 0;
+    panY = 0;
+    zoom = 0.8;
+    applyViewport();
+    setStatus('Step 6 — 3× SC · 3-way N/M/B · bridge on/off · 1V1T');
+    if (temporary) {
+      projectDirty = false;
+      updateProjectSwitcherUI();
+    } else {
+      markProjectDirty();
+    }
+  }
+
+  /**
+   * Standard Strat SSS renderer test: 3× SC · blade · 1 vol · 2 tones (Neck + Mid).
+   * Classic Fender-style tone taps (Tone N on Neck H, Tone M on Mid H); Bridge untamed.
+   * Blade is the available ON-ON-ON Type 1 exclusive N/M/B (3-pos stand-in for 5-way).
+   */
+  function seedStratSssDemo(opts = {}) {
+    const temporary = !!opts.temporary;
+    clearElectronicsDemoBoard();
+
+    const neck = placeDemoAsset('singlecoil', 40, 40);
+    const mid = placeDemoAsset('singlecoil', 40, 150);
+    const bridge = placeDemoAsset('singlecoil', 40, 260);
+    const sw = placeDemoAsset('dpdt', 220, 150);
+    const vol = placeDemoAsset('potentiometer', 420, 50);
+    const toneN = placeDemoAsset('potentiometer', 420, 180);
+    const toneM = placeDemoAsset('potentiometer', 420, 310);
+    const capN = placeDemoAsset('capacitor', 460, 250);
+    const capM = placeDemoAsset('capacitor', 460, 380);
+    const out = placeDemoAsset('mono-output', 640, 120);
+
+    setAssetPlaceLabel(neck, 'Neck');
+    setAssetPlaceLabel(mid, 'Mid');
+    setAssetPlaceLabel(bridge, 'Bridge');
+    setAssetPlaceLabel(sw, 'Blade');
+    setAssetPlaceLabel(vol, 'Vol');
+    setAssetPlaceLabel(toneN, 'Tone N');
+    setAssetPlaceLabel(toneM, 'Tone M');
+
+    setComponentImpedance(neck, '5800');
+    setComponentElectricalValue(neck, 'inductance', '2.4');
+    setComponentImpedance(mid, '6200');
+    setComponentElectricalValue(mid, 'inductance', '2.5');
+    setComponentImpedance(bridge, '7100');
+    setComponentElectricalValue(bridge, 'inductance', '2.8');
+    setComponentResistance(vol, '250000');
+    setComponentResistance(toneN, '250000');
+    setComponentResistance(toneM, '250000');
+    setComponentCapacitance(capN, '0.022');
+    setComponentCapacitance(capM, '0.022');
+    setPotPositionPct(vol, 50, { silent: true });
+    setPotPositionPct(toneN, 50, { silent: true });
+    setPotPositionPct(toneM, 50, { silent: true });
+    [neck, mid, bridge, vol, toneN, toneM, capN, capM].forEach((el) => {
+      setComponentGroundTag(el, true);
+    });
+
+    setToggleSwitchType(sw, 1);
+    GuitarAssets.setComponentStateIndex(sw, 0);
+    if (typeof GuitarAssets.setInstanceStateSecondaryLabel === 'function') {
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 0, 'N');
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 1, 'M');
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 2, 'B');
+    }
+
+    const swCtx = demoSwitchContext(sw);
+    const swT = swCtx.terms;
+    const nH = terminalByRole(neck, 'H');
+    const nG = terminalByRole(neck, 'G');
+    const mH = terminalByRole(mid, 'H');
+    const mG = terminalByRole(mid, 'G');
+    const bH = terminalByRole(bridge, 'H');
+    const bG = terminalByRole(bridge, 'G');
+    const volTrack = getPotentiometerTrackTerms(vol);
+    const toneNTrack = getPotentiometerTrackTerms(toneN);
+    const toneMTrack = getPotentiometerTrackTerms(toneM);
+    const volT = [...vol.querySelectorAll('.terminal')];
+    const toneNT = [...toneN.querySelectorAll('.terminal')];
+    const toneMT = [...toneM.querySelectorAll('.terminal')];
+    const outH = terminalByRole(out, 'H');
+    const outG = terminalByRole(out, 'G');
+    const [swCommonA, swCommonB] = swCtx.commons;
+    const volHot = volTrack?.lug3 || volT[2];
+
+    const demoColors = ['yellow', 'green', 'orange', 'red', 'blue', 'white', 'black', 'copper'];
+    let demoColorIdx = 0;
+    const savedColor = wireColor;
+    const savedStyle = wireStyle;
+    wireStyle = 'solid';
+    const connect = (a, b) => {
+      if (!a || !b) return null;
+      wireColor = demoColors[demoColorIdx % demoColors.length];
+      demoColorIdx += 1;
+      return wireBetweenTerminals(a, b);
+    };
+
+    /*
+     * Exclusive N/M/B (Type 1) — clean Strat stand-in for the 5-way blade:
+     *   Neck→T5 · Mid→T6 · Bridge→T2 · jumper T1–T4 · T3→vol
+     * Classic tone taps: Tone N on Neck H · Tone M on Mid H · Bridge bright.
+     */
+    connect(nH, swT[4]);
+    connect(mH, swT[5]);
+    connect(bH, swT[1]);
+    connect(swT[0], swCommonB || swT[3]);
+    connect(swCommonA || swT[2], volHot);
+
+    connect(nH, toneNTrack?.lug3 || toneNT[2]);
+    connect(mH, toneMTrack?.lug3 || toneMT[2]);
+    if (toneNTrack?.wiper) setCapTipAttachment(capN, 0, toneNTrack.wiper);
+    if (toneNTrack?.caseG) setCapTipAttachment(capN, 1, toneNTrack.caseG);
+    else if (toneNT[3]) setCapTipAttachment(capN, 1, toneNT[3]);
+    if (toneMTrack?.wiper) setCapTipAttachment(capM, 0, toneMTrack.wiper);
+    if (toneMTrack?.caseG) setCapTipAttachment(capM, 1, toneMTrack.caseG);
+    else if (toneMT[3]) setCapTipAttachment(capM, 1, toneMT[3]);
+    syncCapacitorTipAttachments(capN);
+    syncCapacitorTipAttachments(capM);
+
+    connect(volT[1], outH);
+
+    if (volT[3]) {
+      connect(nG, volT[3]);
+      connect(mG, volT[3]);
+      connect(bG, volT[3]);
+      connect(outG, volT[3]);
+      if (volT[0]) connect(volT[0], volT[3]);
+      if (toneNT[3]) connect(toneNT[3], volT[3]);
+      if (toneMT[3]) connect(toneMT[3], volT[3]);
+    }
+
+    wireColor = savedColor;
+    wireStyle = savedStyle;
+    ensurePotCaseGroundPosition(vol);
+    ensurePotCaseGroundPosition(toneN);
+    ensurePotCaseGroundPosition(toneM);
+    syncCapacitorTipAttachments(capN);
+    syncCapacitorTipAttachments(capM);
+    setSchematicWireColourEnabled(true);
+
+    deselectAll();
+    refreshLightningWireGlow();
+    refreshGroundCheckAlert();
+    notifySchematicCircuitChanged();
+    openSchematicPeekDemo();
+
+    panX = 0;
+    panY = 0;
+    zoom = 0.75;
+    applyViewport();
+    setStatus('Strat SSS — 3× SC · blade N/M/B · 1 vol · Tone N + Tone M · out');
+    if (temporary) {
+      projectDirty = false;
+      updateProjectSwitcherUI();
+    } else {
+      markProjectDirty();
+    }
+  }
+
   /**
    * Classic SSS Strat-style board (schematic renderer showcase):
    * 3× SC + ON-ON-ON 3-way + 2-way ON-ON (mid phase) + volume + tone + shunt cap
    * + chassis bus + mono out.
+   *
+   * Commons-aware: T3/T4 from getSwitchCommonIndices — jumpered for single hot out;
+   * mid phase uses pole-A common as hot and pole-B common as return to ground.
    */
   function seedSssRendererDemo(opts = {}) {
     const temporary = !!opts.temporary;
@@ -36070,20 +40200,34 @@
     setComponentResistance(vol, '250000');
     setComponentResistance(tone, '250000');
     setComponentCapacitance(cap, '0.022');
-    [neck, mid, bridge, vol, tone, cap, sw, phase].forEach((el) => setComponentGroundTag(el, true));
+    [neck, mid, bridge, vol, tone, cap].forEach((el) => setComponentGroundTag(el, true));
 
     setToggleSwitchType(sw, 1);
     GuitarAssets.setComponentStateIndex(sw, 0);
+    // Strat-facing secondary labels on the 3-way (Up/Mid/Down → N / N+M / B)
+    if (typeof GuitarAssets.setInstanceStateSecondaryLabel === 'function') {
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 0, 'N');
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 1, 'N+M');
+      GuitarAssets.setInstanceStateSecondaryLabel(sw, 2, 'B');
+    }
     setToggleSwitchType(phase, 1);
     GuitarAssets.setComponentStateIndex(phase, 0);
+    if (typeof GuitarAssets.setInstanceStateSecondaryLabel === 'function') {
+      GuitarAssets.setInstanceStateSecondaryLabel(phase, 0, 'Norm');
+      GuitarAssets.setInstanceStateSecondaryLabel(phase, 1, 'Rev');
+    }
 
-    const swT = [...sw.querySelectorAll('.terminal')];
-    const phT = [...phase.querySelectorAll('.terminal')];
-    ensureSwitchCaseGroundPosition(sw);
-    ensureSwitchCaseGroundPosition(phase);
+    const swCtx = demoSwitchContext(sw);
+    const phCtx = demoSwitchContext(phase);
+    const swT = swCtx.terms;
+    const phT = phCtx.terms;
 
     const midH = terminalByRole(mid, 'H');
     const midG = terminalByRole(mid, 'G');
+    const neckH = terminalByRole(neck, 'H');
+    const bridgeH = terminalByRole(bridge, 'H');
+    const [swCommonA, swCommonB] = swCtx.commons;
+    const [phCommonA, phCommonB] = phCtx.commons;
 
     // Distinct colours so remake / overlap testing is easy to read
     const demoColors = ['red', 'yellow', 'green', 'blue', 'orange', 'copper', 'white', 'black'];
@@ -36092,34 +40236,42 @@
     const savedStyle = wireStyle;
     wireStyle = 'solid';
     const connect = (a, b) => {
+      if (!a || !b) return null;
       wireColor = demoColors[demoColorIdx % demoColors.length];
       demoColorIdx += 1;
       return wireBetweenTerminals(a, b);
     };
 
+    /*
+     * Mid phase (ON-ON): cross H/G on the throws; commons carry hot + return.
+     *   Up:   commonA←T5(H), commonB←T6(G)  → normal
+     *   Down: commonA←T1(G), commonB←T2(H)  → reverse
+     */
     connect(midH, phT[4]);
     connect(midH, phT[1]);
     connect(midG, phT[5]);
     connect(midG, phT[0]);
-    connect(phT[2], swT[0]);
+    connect(phCommonA, swT[0]); // phased hot → 3-way throw (T1)
+    // Pole-B common is the mid return — join chassis with pickup grounds below
 
-    connect(terminalByRole(neck, 'H'), swT[4]);
-    connect(terminalByRole(bridge, 'H'), swT[1]);
-    connect(swT[2], swT[3]);
-    connect(swT[2], getPotentiometerTrackTerms(vol)?.lug3);
+    // Neck / bridge hots on opposite 3-way throws (left-facing in schematic)
+    connect(neckH, swT[4]);   // T5
+    connect(bridgeH, swT[1]); // T2
+
+    // Strat single-hot: jumper both pole commons, then feed volume lug 3
+    if (swCommonA && swCommonB) connect(swCommonA, swCommonB);
+    connect(swCommonA || swT[2], getPotentiometerTrackTerms(vol)?.lug3);
 
     wireNaVolumeToneChassis({
       vol,
       tone,
       cap,
       out,
-      switchCaseG: swT[6],
       pickupGrounds: [
         terminalByRole(neck, 'G'),
         midG,
         terminalByRole(bridge, 'G'),
-        phT[3],
-        phT[6],
+        phCommonB,       // phase return (common B)
       ],
       connect,
     });
@@ -36143,6 +40295,23 @@
     } else {
       markProjectDirty();
     }
+  }
+
+  /** Persist the commons-aware SSS board as a real project named “froge”. */
+  function createFrogeSssProject() {
+    if (projectDirty && activeProjectId && projectName.trim() && !isActiveDemoProject()) {
+      writeActiveProjectSnapshot();
+    }
+    // Drop any prior “froge” so re-running recreates a clean commons board
+    projectRecords = projectRecords.filter((p) => p && p.name !== 'froge');
+    activeProjectId = null;
+    projectName = 'froge';
+    seedSssRendererDemo({ temporary: false });
+    writeActiveProjectSnapshot();
+    projectDirty = false;
+    updateProjectSwitcherUI();
+    setStatus('Created project “froge” (SSS · commons-aware)');
+    return getActiveProjectRecord();
   }
 
   /**
@@ -36244,7 +40413,7 @@
     setComponentResistance(toneM, '250000');
     setComponentCapacitance(capN, '0.022');
     setComponentCapacitance(capM, '0.022');
-    [neck, mid, bridge, vol, toneN, toneM, capN, capM, sw, phase].forEach((el) => {
+    [neck, mid, bridge, vol, toneN, toneM, capN, capM].forEach((el) => {
       setComponentGroundTag(el, true);
     });
 
@@ -36253,15 +40422,17 @@
     setToggleSwitchType(phase, 1);
     GuitarAssets.setComponentStateIndex(phase, 0);
 
-    const swT = [...sw.querySelectorAll('.terminal')];
-    const phT = [...phase.querySelectorAll('.terminal')];
-    ensureSwitchCaseGroundPosition(sw);
-    ensureSwitchCaseGroundPosition(phase);
+    const swCtx = demoSwitchContext(sw);
+    const phCtx = demoSwitchContext(phase);
+    const swT = swCtx.terms;
+    const phT = phCtx.terms;
 
     const midH = terminalByRole(mid, 'H');
     const midG = terminalByRole(mid, 'G');
     const hbH = terminalByRole(bridge, 'H');
     const hbG = terminalByRole(bridge, 'G');
+    const [swCommonA, swCommonB] = swCtx.commons;
+    const [phCommonA, phCommonB] = phCtx.commons;
 
     const demoColors = ['red', 'yellow', 'green', 'blue', 'orange', 'copper', 'white', 'black'];
     let demoColorIdx = 0;
@@ -36275,19 +40446,19 @@
       return wireBetweenTerminals(a, b);
     };
 
-    // Mid → phase reverse → 3-way common
+    // Mid → phase reverse → 3-way throw (commons-aware)
     connect(midH, phT[4]);
     connect(midH, phT[1]);
     connect(midG, phT[5]);
     connect(midG, phT[0]);
-    connect(phT[2], swT[0]);
+    connect(phCommonA, swT[0]);
 
     connect(terminalByRole(neck, 'H'), swT[4]);
     connect(hbH, swT[1]);
-    connect(swT[2], swT[3]);
-    connect(swT[2], getPotentiometerTrackTerms(vol)?.lug3);
+    if (swCommonA && swCommonB) connect(swCommonA, swCommonB);
+    connect(swCommonA || swT[2], getPotentiometerTrackTerms(vol)?.lug3);
 
-    // Neck tone off volume hot; mid tone off mid hot (post-phase)
+    // Neck tone off volume hot; mid tone off mid hot (post-phase common A)
     const volTerms = getPotentiometerTrackTerms(vol);
     const toneNT = [...toneN.querySelectorAll('.terminal')];
     const toneMT = [...toneM.querySelectorAll('.terminal')];
@@ -36300,7 +40471,7 @@
     connect(volTerms?.lug3, toneNT[2]);
     connect(toneNT[1], capNT[0]);
     connect(capNT[1], outG);
-    connect(phT[2], toneMT[2]);
+    connect(phCommonA, toneMT[2]);
     connect(toneMT[1], capMT[0]);
     connect(capMT[1], outG);
 
@@ -36308,13 +40479,11 @@
       terminalByRole(neck, 'G'),
       midG,
       hbG,
-      phT[3],
-      phT[6],
+      phCommonB,
       volTerms?.lug1,
       volTerms?.caseG,
       toneNT[3],
       toneMT[3],
-      swT[6],
       outG,
     ].filter(Boolean);
     const seen = new Set();
@@ -36363,7 +40532,34 @@
   }
 
   const demoParam = new URLSearchParams(location.search).get('demo');
-  if (demoParam === 'sss') {
+  if (demoParam === 'strat') {
+    setTimeout(() => openStratDemoProject(), 80);
+  } else if (demoParam === 'step6') {
+    setTimeout(() => openStep6DemoProject(), 80);
+  } else if (demoParam === 'step5') {
+    setTimeout(() => openStep5DemoProject(), 80);
+  } else if (demoParam === 'step4') {
+    setTimeout(() => openStep4DemoProject(), 80);
+  } else if (demoParam === 'step3') {
+    setTimeout(() => openStep3DemoProject(), 80);
+  } else if (demoParam === 'step2') {
+    setTimeout(() => openStep2DemoProject(), 80);
+  } else if (demoParam === 'step1') {
+    setTimeout(() => openStep1DemoProject(), 80);
+  } else if (demoParam === 'sss') {
     setTimeout(() => openSssDemoProject(), 80);
+  } else if (demoParam === 'froge' || demoParam === 'sss-froge') {
+    setTimeout(() => createFrogeSssProject(), 80);
   }
+  // Optional hook for Bugtest / console recreation
+  try {
+    window.createFrogeSssProject = createFrogeSssProject;
+    window.openStep1DemoProject = openStep1DemoProject;
+    window.openStep2DemoProject = openStep2DemoProject;
+    window.openStep3DemoProject = openStep3DemoProject;
+    window.openStep4DemoProject = openStep4DemoProject;
+    window.openStep5DemoProject = openStep5DemoProject;
+    window.openStep6DemoProject = openStep6DemoProject;
+    window.openStratDemoProject = openStratDemoProject;
+  } catch (_) { /* ignore */ }
 })();
